@@ -173,6 +173,7 @@ protected:
 	friend class IPTunnelTimer;
 
 	using ConnectionMap = std::map<ConnIDKey, Connection*>;
+	using FragmentMap = std::map<FragReassemblerKey, FragReassembler*>;
 
 	Connection* NewConn(const ConnIDKey& k, double t, const ConnID* id,
 			const u_char* data, int proto, uint32_t flow_label,
@@ -218,11 +219,10 @@ protected:
 
 	void InsertConnection(ConnectionMap* m, const ConnIDKey& key, Connection* conn);
 
-	CompositeHash* ch;
 	ConnectionMap tcp_conns;
 	ConnectionMap udp_conns;
 	ConnectionMap icmp_conns;
-	PDict<FragReassembler> fragments;
+	FragmentMap fragments;
 
 	SessionStats stats;
 
