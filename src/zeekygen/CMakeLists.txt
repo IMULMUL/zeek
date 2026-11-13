@@ -1,25 +1,17 @@
-# See the file "COPYING" in the main distribution directory for copyright.
-
-include(ZeekSubdir)
-
-include_directories(BEFORE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-set(zeekygen_SRCS
+zeek_add_subdir_library(
+    zeekygen
+    SOURCES
     Manager.cc
     Info.h
+    MetricInfo.cc
     PackageInfo.cc
     ScriptInfo.cc
     IdentifierInfo.cc
+    IdentifierReST.cc
     Target.cc
     Configuration.cc
     ReStructuredTextTable.cc
-    utils.cc
-)
+    utils.cc)
 
+# Treat BIFs as builtin (alternative mode).
 bif_target(zeekygen.bif)
-bro_add_subdir_library(zeekygen ${zeekygen_SRCS})
-
-add_dependencies(bro_zeekygen generate_outputs)

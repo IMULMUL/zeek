@@ -2,258 +2,126 @@
 
 #pragma once
 
-#include <cstdint>
+#include <prometheus/family.h>
+#include <prometheus/gauge.h>
 #include <initializer_list>
-#include <type_traits>
+#include <memory>
+#include <span>
 
-#include "zeek/Span.h"
+#include "zeek/NetVar.h" // For BifEnum::Telemetry value
 #include "zeek/telemetry/MetricFamily.h"
+#include "zeek/telemetry/Utils.h"
 
-namespace zeek::telemetry
-	{
+namespace zeek::telemetry {
 
-class DblGaugeFamily;
-class IntGaugeFamily;
-class Manager;
+namespace detail {
+using CollectCallbackPtr = std::function<double()>;
+}
 
 /**
- * A handle to a metric that represents an integer value. Gauges are less
- * permissive than counters and also allow decrementing the value.
+ * A handle to a metric that can count up and down.
  */
-class IntGauge
-	{
+class Gauge {
 public:
-	friend class IntGaugeFamily;
+    static inline const char* OpaqueName = "GaugeMetricVal";
 
-	struct Impl;
+    using Handle = prometheus::Gauge;
+    using FamilyType = prometheus::Family<Handle>;
 
-	static inline const char* OpaqueName = "IntGaugeMetricVal";
+    explicit Gauge(FamilyType* family, const prometheus::Labels& labels,
+                   detail::CollectCallbackPtr callback = nullptr) noexcept;
 
-	IntGauge() = delete;
-	IntGauge(const IntGauge&) noexcept = default;
-	IntGauge& operator=(const IntGauge&) noexcept = default;
+    /**
+     * Increments the value by 1.
+     */
+    void Inc() noexcept { Inc(1); }
 
-	/**
-	 * Increments the value by 1.
-	 */
-	void Inc() noexcept;
+    /**
+     * Increments the value by @p amount.
+     */
+    void Inc(double amount) noexcept { handle.Increment(amount); }
 
-	/**
-	 * Increments the value by @p amount.
-	 */
-	void Inc(int64_t amount) noexcept;
+    /**
+     * Increments the value by 1.
+     * @return The new value.
+     */
+    double operator++() noexcept {
+        Inc(1);
+        return Value();
+    }
 
-	/**
-	 * Increments the value by 1.
-	 * @return The new value.
-	 */
-	int64_t operator++() noexcept;
+    /**
+     * Decrements the value by 1.
+     */
+    void Dec() noexcept { Dec(1); }
 
-	/**
-	 * Decrements the value by 1.
-	 */
-	void Dec() noexcept;
+    /**
+     * Decrements the value by @p amount.
+     */
+    void Dec(double amount) noexcept { handle.Decrement(amount); }
 
-	/**
-	 * Decrements the value by @p amount.
-	 */
-	void Dec(int64_t amount) noexcept;
+    /**
+     * Set the value by @p val.
+     */
+    void Set(double val) noexcept { handle.Set(val); }
 
-	/**
-	 * Decrements the value by 1.
-	 * @return The new value.
-	 */
-	int64_t operator--() noexcept;
+    /**
+     * Decrements the value by 1.
+     * @return The new value.
+     */
+    double operator--() noexcept {
+        Dec(1);
+        return Value();
+    }
 
-	/**
-	 * @return The current value.
-	 */
-	int64_t Value() const noexcept;
+    double Value() const noexcept;
 
-	/**
-	 * @return Whether @c this and @p other refer to the same counter.
-	 */
-	constexpr bool IsSameAs(IntGauge other) const noexcept { return pimpl == other.pimpl; }
+    bool operator==(const Gauge& rhs) const noexcept { return &handle == &rhs.handle; }
+    bool operator!=(const Gauge& rhs) const noexcept { return &handle != &rhs.handle; }
+
+    bool CompareLabels(const prometheus::Labels& lbls) const { return labels == lbls; }
+
+    bool HasCallback() const noexcept { return callback != nullptr; }
+    double RunCallback() const { return callback(); }
+    void RemoveCallback() { callback = nullptr; }
 
 private:
-	explicit IntGauge(Impl* ptr) noexcept : pimpl(ptr) { }
+    FamilyType* family = nullptr;
+    Handle& handle;
+    prometheus::Labels labels;
+    detail::CollectCallbackPtr callback;
+};
 
-	Impl* pimpl;
-	};
+using GaugePtr = std::shared_ptr<Gauge>;
 
-/**
- * Checks whether two @ref IntGauge handles are identical.
- * @return Whether @p lhs and @p rhs refer to the same object.
- * @note compare their @c value instead to check for equality.
- */
-constexpr bool operator==(IntGauge lhs, IntGauge rhs) noexcept
-	{
-	return lhs.IsSameAs(rhs);
-	}
-
-/// @relates IntGauge
-constexpr bool operator!=(IntGauge lhs, IntGauge rhs) noexcept
-	{
-	return ! (lhs == rhs);
-	}
-
-/**
- * Manages a collection of IntGauge metrics.
- */
-class IntGaugeFamily : public MetricFamily
-	{
+class GaugeFamily : public MetricFamily {
 public:
-	friend class Manager;
+    static inline const char* OpaqueName = "GaugeMetricFamilyVal";
 
-	class Impl;
+    /**
+     * Returns the metrics handle for given labels, creating a new instance
+     * lazily if necessary.
+     */
+    GaugePtr GetOrAdd(std::span<const LabelView> labels, detail::CollectCallbackPtr callback = nullptr);
 
-	static inline const char* OpaqueName = "IntGaugeMetricFamilyVal";
+    /**
+     * @copydoc GetOrAdd
+     */
+    GaugePtr GetOrAdd(std::initializer_list<LabelView> labels, detail::CollectCallbackPtr callback = nullptr);
 
-	using InstanceType = IntGauge;
+    zeek_int_t MetricType() const noexcept override { return BifEnum::Telemetry::MetricType::GAUGE; }
 
-	IntGaugeFamily(const IntGaugeFamily&) noexcept = default;
-	IntGaugeFamily& operator=(const IntGaugeFamily&) noexcept = default;
+    GaugeFamily(prometheus::Family<prometheus::Gauge>* family, std::span<const std::string_view> labels,
+                std::string_view unit, std::string_view helptext)
+        : MetricFamily(labels, family->GetName(), unit, helptext), family(family) {}
 
-	/**
-	 * Returns the metrics handle for given labels, creating a new instance
-	 * lazily if necessary.
-	 */
-	IntGauge GetOrAdd(Span<const LabelView> labels);
-
-	/**
-	 * @copydoc GetOrAdd
-	 */
-	IntGauge GetOrAdd(std::initializer_list<LabelView> labels)
-		{
-		return GetOrAdd(Span{labels.begin(), labels.size()});
-		}
+    void RunCallbacks() override;
 
 private:
-	explicit IntGaugeFamily(Impl* ptr);
-	};
+    prometheus::Family<prometheus::Gauge>* family;
+    std::vector<GaugePtr> gauges;
+};
 
-/**
- * A handle to a metric that represents a floating point value. Gauges are less
- * permissive than counters and also allow decrementing the value.
- * up.
- */
-class DblGauge
-	{
-public:
-	friend class DblGaugeFamily;
+using GaugeFamilyPtr = std::shared_ptr<GaugeFamily>;
 
-	struct Impl;
-
-	static inline const char* OpaqueName = "DblGaugeMetricVal";
-
-	DblGauge() = delete;
-	DblGauge(const DblGauge&) noexcept = default;
-	DblGauge& operator=(const DblGauge&) noexcept = default;
-
-	/**
-	 * Increments the value by 1.
-	 */
-	void Inc() noexcept;
-
-	/**
-	 * Increments the value by @p amount.
-	 */
-	void Inc(double amount) noexcept;
-
-	/**
-	 * Increments the value by 1.
-	 */
-	void Dec() noexcept;
-
-	/**
-	 * Increments the value by @p amount.
-	 */
-	void Dec(double amount) noexcept;
-
-	/**
-	 * @return The current value.
-	 */
-	double Value() const noexcept;
-
-	/**
-	 * @return Whether @c this and @p other refer to the same counter.
-	 */
-	constexpr bool IsSameAs(DblGauge other) const noexcept { return pimpl == other.pimpl; }
-
-private:
-	explicit DblGauge(Impl* ptr) noexcept : pimpl(ptr) { }
-
-	Impl* pimpl;
-	};
-
-/**
- * Checks whether two @ref DblGauge handles are identical.
- * @return Whether @p lhs and @p rhs refer to the same object.
- * @note compare their @c value instead to check for equality.
- */
-constexpr bool operator==(DblGauge lhs, DblGauge rhs) noexcept
-	{
-	return lhs.IsSameAs(rhs);
-	}
-
-/// @relates DblGauge
-constexpr bool operator!=(DblGauge lhs, DblGauge rhs) noexcept
-	{
-	return ! (lhs == rhs);
-	}
-
-/**
- * Manages a collection of DblGauge metrics.
- */
-class DblGaugeFamily : public MetricFamily
-	{
-public:
-	friend class Manager;
-
-	class Impl;
-
-	static inline const char* OpaqueName = "DblGaugeMetricFamilyVal";
-
-	using InstanceType = DblGauge;
-
-	DblGaugeFamily(const DblGaugeFamily&) noexcept = default;
-	DblGaugeFamily& operator=(const DblGaugeFamily&) noexcept = default;
-
-	/**
-	 * Returns the metrics handle for given labels, creating a new instance
-	 * lazily if necessary.
-	 */
-	DblGauge GetOrAdd(Span<const LabelView> labels);
-
-	/**
-	 * @copydoc GetOrAdd
-	 */
-	DblGauge GetOrAdd(std::initializer_list<LabelView> labels)
-		{
-		return GetOrAdd(Span{labels.begin(), labels.size()});
-		}
-
-private:
-	explicit DblGaugeFamily(Impl* ptr);
-	};
-
-namespace detail
-	{
-
-template <class T> struct GaugeOracle
-	{
-	static_assert(std::is_same<T, int64_t>::value, "Gauge<T> only supports int64_t and double");
-
-	using type = IntGauge;
-	};
-
-template <> struct GaugeOracle<double>
-	{
-	using type = DblGauge;
-	};
-
-	} // namespace detail
-
-template <class T> using Gauge = typename detail::GaugeOracle<T>::type;
-
-	} // namespace zeek::telemetry
+} // namespace zeek::telemetry

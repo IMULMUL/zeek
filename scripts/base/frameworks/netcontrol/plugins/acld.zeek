@@ -183,11 +183,11 @@ function rule_to_acl_rule(p: PluginState, r: Rule) : AclRule
 			else if ( is_tcp_port(f$dst_p) && r$ty == WHITELIST )
 				command = "permittcpdsthostport";
 			else if ( is_udp_port(f$dst_p) && r$ty == DROP)
-				command = "dropucpdsthostport";
+				command = "dropudpdsthostport";
 			else if ( is_udp_port(f$dst_p) && r$ty == WHITELIST)
-				command = "permitucpdsthostport";
+				command = "permitudpdsthostport";
 
-			arg = fmt("%s %d", subnet_to_addr(f$dst_h), f$dst_p);
+			arg = fmt("%s %d", f$dst_h as addr, f$dst_p);
 			}
 		else if ( f?$src_h && ( ! f?$src_p ) && f?$dst_h && ( ! f?$dst_p ) && ( ! f?$src_m ) && ( ! f?$dst_m ) )
 			{
@@ -195,7 +195,7 @@ function rule_to_acl_rule(p: PluginState, r: Rule) : AclRule
 				command = "";
 			else if ( r$ty == DROP )
 				command = "blockhosthost";
-			arg = fmt("%s %s", subnet_to_addr(f$src_h), subnet_to_addr(f$dst_h));
+			arg = fmt("%s %s", f$src_h as addr, f$dst_h as addr);
 			}
 		else if ( ( ! f?$src_h ) && ( ! f?$src_p ) && ( ! f?$dst_h ) && f?$dst_p && ( ! f?$src_m ) && ( ! f?$dst_m ) )
 			{
@@ -303,7 +303,7 @@ function create_acld(config: AcldConfig) : PluginState
 		add netcontrol_acld_topics[config$acld_topic];
 
 	local host = cat(config$acld_host);
-	local p: PluginState = [$acld_config=config, $plugin=acld_plugin, $acld_id=netcontrol_acld_current_id];
+	local p = PluginState($acld_config=config, $plugin=acld_plugin, $acld_id=netcontrol_acld_current_id);
 
 	if ( [config$acld_port, host] in netcontrol_acld_peers )
 		Reporter::warning(fmt("Peer %s:%s was added to NetControl acld plugin twice.", host, config$acld_port));

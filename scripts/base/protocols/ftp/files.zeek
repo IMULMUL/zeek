@@ -7,11 +7,6 @@
 module FTP;
 
 export {
-	redef record Info += {
-		## File unique ID.
-		fuid: string &optional &log;
-	};
-
 	## Default file handle provider for FTP.
 	global get_file_handle: function(c: connection, is_orig: bool): string;
 
@@ -37,7 +32,7 @@ function describe_file(f: fa_file): string
 	if ( f$source != "FTP" )
 		return "";
 
-	for ( cid, c in f$conns )
+	for ( _, c in f$conns )
 		{
 		if ( c?$ftp )
 			return FTP::describe(c$ftp);
@@ -48,8 +43,8 @@ function describe_file(f: fa_file): string
 event zeek_init() &priority=5
 	{
 	Files::register_protocol(Analyzer::ANALYZER_FTP_DATA,
-	                         [$get_file_handle = FTP::get_file_handle,
-	                          $describe        = FTP::describe_file]);
+	                         Files::ProtoRegistration($get_file_handle = FTP::get_file_handle,
+	                                                  $describe        = FTP::describe_file));
 	}
 
 event file_over_new_connection(f: fa_file, c: connection, is_orig: bool) &priority=5

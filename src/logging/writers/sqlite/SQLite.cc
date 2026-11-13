@@ -2,370 +2,379 @@
 
 #include "zeek/logging/writers/sqlite/SQLite.h"
 
-#include "zeek/zeek-config.h"
-
-#include <errno.h>
+#include <cerrno>
+#include <filesystem>
 #include <string>
-#include <vector>
 
+#include "zeek/Desc.h"
 #include "zeek/logging/writers/sqlite/sqlite.bif.h"
 #include "zeek/threading/SerialTypes.h"
+#include "zeek/util.h"
 
 using namespace std;
 using zeek::threading::Field;
 using zeek::threading::Value;
 
-namespace zeek::logging::writer::detail
-	{
+namespace zeek::logging::writer::detail {
 
-SQLite::SQLite(WriterFrontend* frontend)
-	: WriterBackend(frontend), fields(), num_fields(), db(), st()
-	{
-	set_separator.assign((const char*)BifConst::LogSQLite::set_separator->Bytes(),
-	                     BifConst::LogSQLite::set_separator->Len());
+SQLite::SQLite(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
+    set_separator.assign(reinterpret_cast<const char*>(BifConst::LogSQLite::set_separator->Bytes()),
+                         BifConst::LogSQLite::set_separator->Len());
 
-	unset_field.assign((const char*)BifConst::LogSQLite::unset_field->Bytes(),
-	                   BifConst::LogSQLite::unset_field->Len());
+    unset_field.assign(reinterpret_cast<const char*>(BifConst::LogSQLite::unset_field->Bytes()),
+                       BifConst::LogSQLite::unset_field->Len());
 
-	empty_field.assign((const char*)BifConst::LogSQLite::empty_field->Bytes(),
-	                   BifConst::LogSQLite::empty_field->Len());
+    empty_field.assign(reinterpret_cast<const char*>(BifConst::LogSQLite::empty_field->Bytes()),
+                       BifConst::LogSQLite::empty_field->Len());
 
-	threading::formatter::Ascii::SeparatorInfo sep_info(string(), set_separator, unset_field,
-	                                                    empty_field);
-	io = new threading::formatter::Ascii(this, sep_info);
-	}
+    synchronous = BifConst::LogSQLite::synchronous->AsInt();
+    journal_mode = BifConst::LogSQLite::journal_mode->AsInt();
 
-SQLite::~SQLite()
-	{
-	if ( db != 0 )
-		{
-		sqlite3_finalize(st);
-		if ( ! sqlite3_close(db) )
-			Error("Sqlite could not close connection");
+    threading::formatter::Ascii::SeparatorInfo sep_info(string(), set_separator, unset_field, empty_field);
+    io = new threading::formatter::Ascii(this, sep_info);
+}
 
-		db = 0;
-		}
+SQLite::~SQLite() {
+    if ( db != nullptr ) {
+        sqlite3_finalize(st);
+        if ( ! sqlite3_close(db) )
+            Error("Sqlite could not close connection");
 
-	delete io;
-	}
+        db = nullptr;
+    }
 
-string SQLite::GetTableType(int arg_type, int arg_subtype)
-	{
-	string type;
+    delete io;
+}
 
-	switch ( arg_type )
-		{
-		case TYPE_BOOL:
-			type = "boolean";
-			break;
+string SQLite::GetTableType(int arg_type, int arg_subtype) {
+    string type;
 
-		case TYPE_INT:
-		case TYPE_COUNT:
-		case TYPE_PORT: // note that we do not save the protocol at the moment. Just like in the
-		                // case of the ascii-writer
-			type = "integer";
-			break;
+    switch ( arg_type ) {
+        case TYPE_BOOL: type = "boolean"; break;
 
-		case TYPE_SUBNET:
-		case TYPE_ADDR:
-			type = "text"; // sqlite3 does not have a type for internet addresses
-			break;
+        case TYPE_INT:
+        case TYPE_COUNT:
+        case TYPE_PORT: // note that we do not save the protocol at the moment. Just like in the
+                        // case of the ascii-writer
+            type = "integer";
+            break;
 
-		case TYPE_TIME:
-		case TYPE_INTERVAL:
-		case TYPE_DOUBLE:
-			type = "double precision";
-			break;
+        case TYPE_SUBNET:
+        case TYPE_ADDR:
+            type = "text"; // sqlite3 does not have a type for internet addresses
+            break;
 
-		case TYPE_ENUM:
-		case TYPE_STRING:
-		case TYPE_FILE:
-		case TYPE_FUNC:
-			type = "text";
-			break;
+        case TYPE_TIME:
+        case TYPE_INTERVAL:
+        case TYPE_DOUBLE: type = "double precision"; break;
 
-		case TYPE_TABLE:
-		case TYPE_VECTOR:
-			type = "text"; // dirty - but sqlite does not directly support arrays. so - we just roll
-			               // it into a ","-separated string.
-			break;
+        case TYPE_ENUM:
+        case TYPE_STRING:
+        case TYPE_FILE:
+        case TYPE_FUNC:
+        case TYPE_TABLE:
+        case TYPE_VECTOR:
+            // For TYPE_TABLE and TYPE_VECTOR, this is sort of dirty, but sqlite does not
+            // directly support arrays. so we just roll it all into a comma-separated string.
+            type = "text";
+            break;
 
-		default:
-			Error(Fmt("unsupported field format %d ", arg_type));
-			return ""; // not the cleanest way to abort. But sqlite will complain on create table...
-		}
+        default:
+            Error(Fmt("unsupported field format %d ", arg_type));
+            return ""; // not the cleanest way to abort. But sqlite will complain on create table...
+    }
 
-	return type;
-	}
+    return type;
+}
 
-// returns true true in case of error
-bool SQLite::checkError(int code)
-	{
-	if ( code != SQLITE_OK && code != SQLITE_DONE )
-		{
-		Error(Fmt("SQLite call failed: %s", sqlite3_errmsg(db)));
-		return true;
-		}
+// returns true in case of error
+bool SQLite::checkError(int code) {
+    if ( code != SQLITE_OK && code != SQLITE_DONE ) {
+        Error(Fmt("SQLite call failed: %s", sqlite3_errmsg(db)));
+        return true;
+    }
 
-	return false;
-	}
+    return false;
+}
 
-bool SQLite::DoInit(const WriterInfo& info, int arg_num_fields, const Field* const* arg_fields)
-	{
-	if ( sqlite3_threadsafe() == 0 )
-		{
-		Error("SQLite reports that it is not threadsafe. Zeek needs a threadsafe version of "
-		      "SQLite. Aborting");
-		return false;
-		}
-
-	// Allow connections to same DB to use single data/schema cache. Also
-	// allows simultaneous writes to one file.
+bool SQLite::DoInit(const WriterInfo& info, int arg_num_fields, const Field* const* arg_fields) {
+    // Allow connections to same DB to use single data/schema cache. Also
+    // allows simultaneous writes to one file.
 #ifndef ZEEK_TSAN
-	sqlite3_enable_shared_cache(1);
+    sqlite3_enable_shared_cache(1);
 #endif
 
-	num_fields = arg_num_fields;
-	fields = arg_fields;
+    num_fields = arg_num_fields;
+    fields = arg_fields;
 
-	string fullpath(info.path);
-	fullpath.append(".sqlite");
-	string tablename;
+    auto fullpath = std::filesystem::path(zeek::id::find_const<StringVal>("Log::default_logdir")->ToStdString());
 
-	WriterInfo::config_map::const_iterator it = info.config.find("tablename");
-	if ( it == info.config.end() )
-		{
-		MsgThread::Info(
-			Fmt("tablename configuration option not found. Defaulting to path %s", info.path));
-		tablename = info.path;
-		}
-	else
-		tablename = it->second;
+    fullpath /= info.path;
+    fullpath += ".sqlite";
+    string tablename;
 
-	if ( checkError(sqlite3_open_v2(
-			 fullpath.c_str(), &db,
-			 SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, NULL)) )
-		return false;
+    WriterInfo::config_map::const_iterator it = info.config.find("tablename");
+    if ( it == info.config.end() ) {
+        MsgThread::Info(Fmt("tablename configuration option not found. Defaulting to path %s", info.path));
+        tablename = info.path;
+    }
+    else
+        tablename = it->second;
 
-	string create = "CREATE TABLE IF NOT EXISTS " + tablename + " (\n";
-	//"id SERIAL UNIQUE NOT NULL"; // SQLite has rowids, we do not need a counter here.
+    if ( checkError(sqlite3_open_v2(fullpath.string().c_str(), &db,
+                                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nullptr)) )
+        return false;
 
-	for ( unsigned int i = 0; i < num_fields; ++i )
-		{
-		const Field* field = fields[i];
+    char* errorMsg = nullptr;
+    int res;
+    switch ( synchronous ) {
+        case BifEnum::LogSQLite::SQLiteSynchronous::SQLITE_SYNCHRONOUS_DEFAULT: res = SQLITE_OK; break;
+        case BifEnum::LogSQLite::SQLiteSynchronous::SQLITE_SYNCHRONOUS_OFF:
+            res = sqlite3_exec(db, "PRAGMA synchronous=OFF;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteSynchronous::SQLITE_SYNCHRONOUS_NORMAL:
+            res = sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteSynchronous::SQLITE_SYNCHRONOUS_FULL:
+            res = sqlite3_exec(db, "PRAGMA synchronous=FULL;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteSynchronous::SQLITE_SYNCHRONOUS_EXTRA:
+            res = sqlite3_exec(db, "PRAGMA synchronous=EXTRA;", nullptr, nullptr, &errorMsg);
+            break;
+        default: Error("Invalid LogSQLite::synchronous enum"); return false;
+    }
 
-		if ( i != 0 )
-			create += ",\n";
+    if ( res != SQLITE_OK ) {
+        Error(Fmt("Error setting synchronous pragma: %s", errorMsg));
+        sqlite3_free(errorMsg);
+        return false;
+    }
 
-		// sadly sqlite3 has no other method for escaping stuff. That I know of.
-		char* fieldname = sqlite3_mprintf("%Q", fields[i]->name);
-		if ( fieldname == 0 )
-			{
-			InternalError("Could not malloc memory");
-			return false;
-			}
+    switch ( journal_mode ) {
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_DEFAULT: res = SQLITE_OK; break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_DELETE:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=DELETE;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_TRUNCATE:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=TRUNCATE;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_PERSIST:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=PERSIST;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_MEMORY:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=MEMORY;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_WAL:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &errorMsg);
+            break;
+        case BifEnum::LogSQLite::SQLiteJournalMode::SQLITE_JOURNAL_MODE_OFF:
+            res = sqlite3_exec(db, "PRAGMA journal_mode=OFF;", nullptr, nullptr, &errorMsg);
+            break;
+        default: Error("Invalid LogSQLite::journal_mode enum"); return false;
+    }
 
-		create += fieldname;
+    if ( res != SQLITE_OK ) {
+        Error(Fmt("Error setting journal_mode pragma: %s", errorMsg));
+        sqlite3_free(errorMsg);
+        return false;
+    }
 
-		string type = GetTableType(field->type, field->subtype);
-		if ( type == "" )
-			{
-			InternalError(Fmt("Could not determine type for field %u:%s", i, fieldname));
-			sqlite3_free(fieldname);
-			return false;
-			}
+    string create = "CREATE TABLE IF NOT EXISTS " + tablename + " (\n";
+    //"id SERIAL UNIQUE NOT NULL"; // SQLite has rowids, we do not need a counter here.
 
-		sqlite3_free(fieldname);
-		create += " " + type;
+    for ( unsigned int i = 0; i < num_fields; ++i ) {
+        const Field* field = fields[i];
 
-		/* if ( !field->optional ) {
-		 create += " NOT NULL";
-		 } */
-		}
+        if ( i != 0 )
+            create += ",\n";
 
-	create += "\n);";
+        // sadly sqlite3 has no other method for escaping stuff. That I know of.
+        char* fieldname = sqlite3_mprintf("%Q", fields[i]->name);
+        if ( fieldname == nullptr ) {
+            InternalError("Could not malloc memory");
+            return false;
+        }
 
-	char* errorMsg = 0;
-	int res = sqlite3_exec(db, create.c_str(), NULL, NULL, &errorMsg);
-	if ( res != SQLITE_OK )
-		{
-		Error(Fmt("Error executing table creation statement: %s", errorMsg));
-		sqlite3_free(errorMsg);
-		return false;
-		}
+        create += fieldname;
 
-	// create the prepared statement that will be re-used forever...
-	string insert = "VALUES (";
-	string names = "INSERT INTO " + tablename + " ( ";
+        string type = GetTableType(field->type, field->subtype);
+        if ( type.empty() ) {
+            InternalError(Fmt("Could not determine type for field %u:%s", i, fieldname));
+            sqlite3_free(fieldname);
+            return false;
+        }
 
-	for ( unsigned int i = 0; i < num_fields; i++ )
-		{
-		bool ac = true;
+        sqlite3_free(fieldname);
+        create += " " + type;
 
-		if ( i == 0 )
-			ac = false;
-		else
-			{
-			names += ", ";
-			insert += ", ";
-			}
+        /* if ( !field->optional ) {
+         create += " NOT NULL";
+         } */
+    }
 
-		insert += "?";
+    create += "\n);";
 
-		char* fieldname = sqlite3_mprintf("%Q", fields[i]->name);
-		if ( fieldname == 0 )
-			{
-			InternalError("Could not malloc memory");
-			return false;
-			}
+    errorMsg = nullptr;
+    res = sqlite3_exec(db, create.c_str(), nullptr, nullptr, &errorMsg);
+    if ( res != SQLITE_OK ) {
+        Error(Fmt("Error executing table creation statement: %s", errorMsg));
+        sqlite3_free(errorMsg);
+        return false;
+    }
 
-		names.append(fieldname);
-		sqlite3_free(fieldname);
-		}
+    // create the prepared statement that will be re-used forever...
+    string insert = "VALUES (";
+    string names = "INSERT INTO " + tablename + " ( ";
 
-	insert += ");";
-	names += ") ";
+    for ( unsigned int i = 0; i < num_fields; i++ ) {
+        bool ac = true;
 
-	insert = names + insert;
+        if ( i == 0 )
+            ac = false;
+        else {
+            names += ", ";
+            insert += ", ";
+        }
 
-	if ( checkError(sqlite3_prepare_v2(db, insert.c_str(), insert.size() + 1, &st, NULL)) )
-		return false;
+        insert += '?';
 
-	return true;
-	}
+        char* fieldname = sqlite3_mprintf("%Q", fields[i]->name);
+        if ( fieldname == nullptr ) {
+            InternalError("Could not malloc memory");
+            return false;
+        }
 
-int SQLite::AddParams(Value* val, int pos)
-	{
-	if ( ! val->present )
-		return sqlite3_bind_null(st, pos);
+        names.append(fieldname);
+        sqlite3_free(fieldname);
+    }
 
-	switch ( val->type )
-		{
-		case TYPE_BOOL:
-			return sqlite3_bind_int(st, pos, val->val.int_val != 0 ? 1 : 0);
+    insert += ");";
+    names += ") ";
 
-		case TYPE_INT:
-			return sqlite3_bind_int(st, pos, val->val.int_val);
+    insert = names + insert;
 
-		case TYPE_COUNT:
-			return sqlite3_bind_int(st, pos, val->val.uint_val);
+    if ( checkError(sqlite3_prepare_v2(db, insert.c_str(), insert.size() + 1, &st, nullptr)) )
+        return false;
 
-		case TYPE_PORT:
-			return sqlite3_bind_int(st, pos, val->val.port_val.port);
+    return true;
+}
 
-		case TYPE_SUBNET:
-			{
-			string out = io->Render(val->val.subnet_val);
-			return sqlite3_bind_text(st, pos, out.data(), out.size(), SQLITE_TRANSIENT);
-			}
+int SQLite::AddParams(Value* val, int pos) {
+    if ( ! val->present )
+        return sqlite3_bind_null(st, pos);
 
-		case TYPE_ADDR:
-			{
-			string out = io->Render(val->val.addr_val);
-			return sqlite3_bind_text(st, pos, out.data(), out.size(), SQLITE_TRANSIENT);
-			}
+    switch ( val->type ) {
+        case TYPE_BOOL: return sqlite3_bind_int(st, pos, val->val.int_val != 0 ? 1 : 0);
 
-		case TYPE_TIME:
-		case TYPE_INTERVAL:
-		case TYPE_DOUBLE:
-			return sqlite3_bind_double(st, pos, val->val.double_val);
+        case TYPE_INT: return sqlite3_bind_int(st, pos, val->val.int_val);
 
-		case TYPE_ENUM:
-		case TYPE_STRING:
-		case TYPE_FILE:
-		case TYPE_FUNC:
-			{
-			if ( ! val->val.string_val.length || val->val.string_val.length == 0 )
-				return sqlite3_bind_null(st, pos);
+        case TYPE_COUNT: return sqlite3_bind_int(st, pos, val->val.uint_val);
 
-			return sqlite3_bind_text(st, pos, val->val.string_val.data, val->val.string_val.length,
-			                         SQLITE_TRANSIENT);
-			}
+        case TYPE_PORT: return sqlite3_bind_int(st, pos, val->val.port_val.port);
 
-		case TYPE_TABLE:
-			{
-			ODesc desc;
-			desc.Clear();
-			desc.EnableEscaping();
-			desc.AddEscapeSequence(set_separator);
+        case TYPE_SUBNET: {
+            string out = io->Render(val->val.subnet_val);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
+            return sqlite3_bind_text(st, pos, out.data(), out.size(), SQLITE_TRANSIENT);
+        }
 
-			if ( ! val->val.set_val.size )
-				desc.Add(empty_field);
-			else
-				for ( bro_int_t j = 0; j < val->val.set_val.size; j++ )
-					{
-					if ( j > 0 )
-						desc.AddRaw(set_separator);
+        case TYPE_ADDR: {
+            string out = io->Render(val->val.addr_val);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
+            return sqlite3_bind_text(st, pos, out.data(), out.size(), SQLITE_TRANSIENT);
+        }
 
-					io->Describe(&desc, val->val.set_val.vals[j], fields[pos - 1]->name);
-					}
+        case TYPE_TIME:
+        case TYPE_INTERVAL:
+        case TYPE_DOUBLE: return sqlite3_bind_double(st, pos, val->val.double_val);
 
-			desc.RemoveEscapeSequence(set_separator);
-			return sqlite3_bind_text(st, pos, (const char*)desc.Bytes(), desc.Len(),
-			                         SQLITE_TRANSIENT);
-			}
+        case TYPE_ENUM:
+        case TYPE_STRING:
+        case TYPE_FILE:
+        case TYPE_FUNC: {
+            if ( ! val->val.string_val.length || val->val.string_val.length == 0 )
+                return sqlite3_bind_null(st, pos);
 
-		case TYPE_VECTOR:
-			{
-			ODesc desc;
-			desc.Clear();
-			desc.EnableEscaping();
-			desc.AddEscapeSequence(set_separator);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
+            return sqlite3_bind_text(st, pos, val->val.string_val.data, val->val.string_val.length, SQLITE_TRANSIENT);
+        }
 
-			if ( ! val->val.vector_val.size )
-				desc.Add(empty_field);
-			else
-				for ( bro_int_t j = 0; j < val->val.vector_val.size; j++ )
-					{
-					if ( j > 0 )
-						desc.AddRaw(set_separator);
+        case TYPE_TABLE: {
+            ODesc desc;
+            desc.Clear();
+            desc.EnableEscaping();
+            desc.AddEscapeSequence(set_separator);
 
-					io->Describe(&desc, val->val.vector_val.vals[j], fields[pos - 1]->name);
-					}
+            if ( ! val->val.set_val.size )
+                desc.Add(empty_field);
+            else
+                for ( zeek_int_t j = 0; j < val->val.set_val.size; j++ ) {
+                    if ( j > 0 )
+                        desc.AddRaw(set_separator);
 
-			desc.RemoveEscapeSequence(set_separator);
-			return sqlite3_bind_text(st, pos, (const char*)desc.Bytes(), desc.Len(),
-			                         SQLITE_TRANSIENT);
-			}
+                    io->Describe(&desc, val->val.set_val.vals[j], fields[pos - 1]->name);
+                }
 
-		default:
-			Error(Fmt("unsupported field format %d", val->type));
-			return 0;
-		}
-	}
+            desc.RemoveEscapeSequence(set_separator);
+            return sqlite3_bind_text(st, pos, reinterpret_cast<const char*>(desc.Bytes()), desc.Size(),
+                                     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
+                                     SQLITE_TRANSIENT);
+        }
 
-bool SQLite::DoWrite(int num_fields, const Field* const* fields, Value** vals)
-	{
-	// bind parameters
-	for ( int i = 0; i < num_fields; i++ )
-		{
-		if ( checkError(AddParams(vals[i], i + 1)) )
-			return false;
-		}
+        case TYPE_VECTOR: {
+            ODesc desc;
+            desc.Clear();
+            desc.EnableEscaping();
+            desc.AddEscapeSequence(set_separator);
 
-	// execute query
-	if ( checkError(sqlite3_step(st)) )
-		return false;
+            if ( ! val->val.vector_val.size )
+                desc.Add(empty_field);
+            else
+                for ( zeek_int_t j = 0; j < val->val.vector_val.size; j++ ) {
+                    if ( j > 0 )
+                        desc.AddRaw(set_separator);
 
-	// clean up and make ready for next query execution
-	if ( checkError(sqlite3_clear_bindings(st)) )
-		return false;
+                    io->Describe(&desc, val->val.vector_val.vals[j], fields[pos - 1]->name);
+                }
 
-	if ( checkError(sqlite3_reset(st)) )
-		return false;
+            desc.RemoveEscapeSequence(set_separator);
+            return sqlite3_bind_text(st, pos, reinterpret_cast<const char*>(desc.Bytes()), desc.Size(),
+                                     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-cstyle-cast)
+                                     SQLITE_TRANSIENT);
+        }
 
-	return true;
-	}
+        default: Error(Fmt("unsupported field format %d", val->type)); return 0;
+    }
+}
 
-bool SQLite::DoRotate(const char* rotated_path, double open, double close, bool terminating)
-	{
-	if ( ! FinishedRotation("/dev/null", Info().path, open, close, terminating) )
-		{
-		Error(Fmt("error rotating %s", Info().path));
-		return false;
-		}
+bool SQLite::DoWrite(int num_fields, const Field* const* fields, Value** vals) {
+    // bind parameters
+    for ( int i = 0; i < num_fields; i++ ) {
+        if ( checkError(AddParams(vals[i], i + 1)) )
+            return false;
+    }
 
-	return true;
-	}
+    // execute query
+    if ( checkError(sqlite3_step(st)) )
+        return false;
 
-	} // namespace zeek::logging::writer::detail
+    // clean up and make ready for next query execution
+    if ( checkError(sqlite3_clear_bindings(st)) )
+        return false;
+
+    if ( checkError(sqlite3_reset(st)) )
+        return false;
+
+    return true;
+}
+
+bool SQLite::DoRotate(const char* rotated_path, double open, double close, bool terminating) {
+    if ( ! FinishedRotation("/dev/null", Info().path, open, close, terminating) ) {
+        Error(Fmt("error rotating %s", Info().path));
+        return false;
+    }
+
+    return true;
+}
+
+} // namespace zeek::logging::writer::detail

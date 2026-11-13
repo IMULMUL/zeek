@@ -36,14 +36,14 @@ Usage: $0 <options>
   repo.
 
   Options:
-    --help             Display this output.
-    --html DIR         This is the default mode, but this argument can be passed
-                       to make it explicit. It also can be used to pass an optional
-                       destination directory for the HTML output.
-    --coveralls TOKEN  Report coverage data to Coveralls.io using the specified
-                       repo token. Enabling this option disables the HTML report.
-                       This option requires the coveralls-lcov Ruby gem to be
-                       installed.
+    --help              Display this output.
+    --html DIR          This is the default mode, but this argument can be passed
+                        to make it explicit. It also can be used to pass an optional
+                         destination directory for the HTML output.
+    --coveralls [TOKEN] Report coverage data to Coveralls.io using the specified
+                        repo token. Enabling this option disables the HTML report.
+                        This option requires the coveralls-lcov Ruby gem to be
+                        installed. If TOKEN is empty, uses --dry-run mode.
 "
 
     echo "${usage}"
@@ -63,15 +63,14 @@ while (("$#")); do
             fi
             ;;
         --coveralls)
-            if [ ${#2} -eq 0 ]; then
-                echo "ERROR: Coveralls repo token must be passed with --coveralls argument."
-                echo
-                usage
-            fi
-
             HTML_REPORT=0
-            COVERALLS_REPO_TOKEN=$2
-            shift 2
+            if [ ${#2} -eq 0 ]; then
+                echo "WARN: No coveralls token, running coveralls-lcov --dry-run."
+                shift 1
+            else
+                COVERALLS_REPO_TOKEN=$2
+                shift 2
+            fi
             ;;
         --help)
             usage
@@ -93,7 +92,7 @@ fi
 
 # Files and directories that will be removed from the counts in step 5. Directories
 # need to be surrounded by escaped wildcards.
-REMOVE_TARGETS="*.yy *.ll *.y *.l \*/bro.dir/\* *.bif \*/zeek.dir/\* \*/src/3rdparty/\* \*/src/zeek/3rdparty/\* \*/auxil/\* "
+REMOVE_TARGETS="*.yy *.ll *.y *.l *.bif \*/zeek.dir/\* \*/src/3rdparty/\* \*/src/zeek/3rdparty/\* \*/auxil/\* \*/build/zeek/3rdparty/\*"
 
 # 1. Move to base dir, create tmp dir
 cd ../../
@@ -117,19 +116,19 @@ verify_run "which lcov" \
 
 # 4. Create a "tracefile" through lcov, which is necessary to create output later on.
 echo -n "Creating tracefile for output generation... "
-verify_run "lcov --no-external --capture --directory . --output-file $COVERAGE_FILE"
+verify_run "lcov --ignore-errors unused --no-external --capture --directory . --exclude 'testing/btest/.tmp/*' --output-file $COVERAGE_FILE"
 
-# 5. Remove a number of 3rdparty and "extra" files that shoudln't be included in the
+# 5. Remove a number of 3rdparty and "extra" files that shouldn't be included in the
 # Zeek coverage numbers.
 for TARGET in $REMOVE_TARGETS; do
     echo -n "Getting rid of $TARGET files from tracefile... "
-    verify_run "lcov --remove $COVERAGE_FILE $TARGET --output-file $COVERAGE_FILE"
+    verify_run "lcov --ignore-errors unused,empty --remove $COVERAGE_FILE $TARGET --output-file $COVERAGE_FILE"
 done
 
 # 6. Create HTML files or Coveralls report
 if [ $HTML_REPORT -eq 1 ]; then
     echo -n "Creating HTML files... "
-    verify_run "genhtml -o $COVERAGE_HTML_DIR $COVERAGE_FILE"
+    verify_run "genhtml --ignore-errors empty -o $COVERAGE_HTML_DIR $COVERAGE_FILE"
 else
     # The data we send to coveralls has a lot of duplicate files in it because of the
     # zeek symlink in the src directory. Run a script that cleans that up.
@@ -137,12 +136,17 @@ else
     COVERAGE_FILE_CLEAN="${COVERAGE_FILE}.clean"
     verify_run "testing/coverage/coverage_cleanup.py ${COVERAGE_FILE} > ${COVERAGE_FILE_CLEAN} 2>&1"
 
-    echo -n "Reporting to Coveralls..."
-    coveralls_cmd="coveralls-lcov -t ${COVERALLS_REPO_TOKEN}"
+    if [ "${CIRCLE_BRANCH}" == "master" ] && [ -n "${ZEEK_COVERALLS_REPO_TOKEN}" ] && [ "${CIRCLE_PROJECT_REPONAME}" == "zeek" ]; then
+        echo -n "Reporting to Coveralls..."
+        coveralls_cmd="coveralls-lcov -t ${ZEEK_COVERALLS_REPO_TOKEN}"
+    else
+        echo "Reporting to Coveralls in --dry-run mode"
+        coveralls_cmd="coveralls-lcov --dry-run"
+    fi
 
-    # If we're being called by Cirrus, add some additional information to the output.
-    if [ -n "${CIRRUS_BUILD_ID}" ]; then
-        coveralls_cmd="${coveralls_cmd} --service-name=cirrus --service-job-id=${CIRRUS_BUILD_ID}"
+    # If we're being called by CircleCI, add some additional information to the output.
+    if [ -n "${CIRCLE_WORKFLOW_ID}" ]; then
+        coveralls_cmd="${coveralls_cmd} --service-name=circleci --service-job-id=${CIRCLE_WORKFLOW_ID}"
     else
         coveralls_cmd="${coveralls_cmd} --service-name=local"
     fi

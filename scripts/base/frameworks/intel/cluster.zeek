@@ -6,9 +6,18 @@
 
 module Intel;
 
-# Internal events for cluster data distribution.
-global insert_item: event(item: Item);
-global insert_indicator: event(item: Item);
+# Internal events for cluster data distribution.  Marked as &is_used since
+# they're communicated via Broker.
+global insert_item: event(item: Item) &is_used;
+global insert_indicator: event(item: Item) &is_used;
+
+# Event to transfer the min_data_store to connecting nodes.
+global new_min_data_store: event(store: MinDataStore) &is_used;
+
+# By default the manager sends its current min_data_store to connecting workers.
+# During testing it's handy to suppress this, since receipt of the store
+# introduces nondeterminism when mixed with explicit data insertions.
+const send_store_on_node_up = T &redef;
 
 # If this process is not a manager process, we don't want the full metadata.
 @if ( Cluster::local_node_type() != Cluster::MANAGER )
@@ -16,19 +25,21 @@ redef have_full_data = F;
 @endif
 
 @if ( Cluster::local_node_type() == Cluster::MANAGER )
-event zeek_init()
+# The manager propagates remove_indicator() to workers.
+event remove_indicator(item: Item)
 	{
-	Broker::auto_publish(Cluster::worker_topic, remove_indicator);
+	Cluster::publish(Cluster::worker_topic, remove_indicator, item);
 	}
 
 # Handling of new worker nodes.
 event Cluster::node_up(name: string, id: string)
 	{
-	# When a worker connects, send it the complete minimal data store.
-	# It will be kept up to date after this by the insert_indicator event.
-	if ( name in Cluster::nodes && Cluster::nodes[name]$node_type == Cluster::WORKER )
+	# When a worker connects, send it the complete minimal data store unless
+	# we turned off that feature. The store will be kept up to date after
+	# this by the insert_indicator event.
+	if ( send_store_on_node_up && name in Cluster::nodes && Cluster::nodes[name]$node_type == Cluster::WORKER )
 		{
-		Broker::publish_id(Cluster::node_topic(name), "Intel::min_data_store");
+		Cluster::publish(Cluster::node_topic(name), new_min_data_store, min_data_store);
 		}
 	}
 
@@ -36,6 +47,9 @@ event Cluster::node_up(name: string, id: string)
 # has to be distributed.
 event Intel::new_item(item: Item) &priority=5
 	{
+	# This shouldn't be required, pushing directly from
+	# the manager is more efficient and has less round
+	# trips for non-broker backends.
 	local pt = Cluster::rr_topic(Cluster::proxy_pool, "intel_insert_rr_key");
 
 	if ( pt == "" )
@@ -43,7 +57,7 @@ event Intel::new_item(item: Item) &priority=5
 		# relaying via a proxy.
 		pt = Cluster::worker_topic;
 
-	Broker::publish(pt, Intel::insert_indicator, item);
+	Cluster::publish(pt, Intel::insert_indicator, item);
 	}
 
 # Handling of item insertion triggered by remote node.
@@ -66,18 +80,23 @@ event Intel::match_remote(s: Seen) &priority=5
 	}
 @endif
 
+
 @if ( Cluster::local_node_type() == Cluster::WORKER )
-event zeek_init()
+event match_remote(s: Seen)
 	{
-	Broker::auto_publish(Cluster::manager_topic, match_remote);
-	Broker::auto_publish(Cluster::manager_topic, remove_item);
+	Cluster::publish(Cluster::manager_topic, match_remote, s);
+	}
+
+event remove_item(item: Item, purge_indicator: bool)
+	{
+	Cluster::publish(Cluster::manager_topic, remove_item, item, purge_indicator);
 	}
 
 # On a worker, the new_item event requires to trigger the insertion
 # on the manager to update the back-end data store.
 event Intel::new_item(item: Intel::Item) &priority=5
 	{
-	Broker::publish(Cluster::manager_topic, Intel::insert_item, item);
+	Cluster::publish(Cluster::manager_topic, Intel::insert_item, item);
 	}
 
 # Handling of new indicators published by the manager.
@@ -85,13 +104,38 @@ event Intel::insert_indicator(item: Intel::Item) &priority=5
 	{
 	Intel::_insert(item, F);
 	}
+
+function invoke_indicator_hook(store: MinDataStore, h: hook(v: string, t: Intel::Type))
+	{
+	for ( a in store$host_data )
+		hook h(cat(a), Intel::ADDR);
+
+	for ( sn in store$subnet_data)
+		hook h(cat(sn), Intel::SUBNET);
+
+	for ( [indicator_value, indicator_type] in store$string_data )
+		hook h(indicator_value, indicator_type);
+	}
+
+# Handling of a complete MinDataStore snapshot
+#
+# Invoke the removed and inserted hooks using the old and new min data store
+# instances, respectively. The way this event is used, the original
+# min_data_store should essentially be empty.
+event new_min_data_store(store: MinDataStore)
+	{
+	invoke_indicator_hook(min_data_store, Intel::indicator_removed);
+
+	min_data_store = store;
+
+	invoke_indicator_hook(min_data_store, Intel::indicator_inserted);
+	}
 @endif
 
 @if ( Cluster::local_node_type() == Cluster::PROXY )
 event Intel::insert_indicator(item: Intel::Item) &priority=5
 	{
 	# Just forwarding from manager to workers.
-	Broker::publish(Cluster::worker_topic, Intel::insert_indicator, item);
+	Cluster::publish(Cluster::worker_topic, Intel::insert_indicator, item);
 	}
 @endif
-

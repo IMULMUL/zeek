@@ -1,7 +1,9 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #include "zeek/Trigger.h"
 
-#include <assert.h>
 #include <algorithm>
+#include <cassert>
 
 #include "zeek/DebugLogger.h"
 #include "zeek/Desc.h"
@@ -13,6 +15,7 @@
 #include "zeek/Traverse.h"
 #include "zeek/Val.h"
 #include "zeek/iosource/Manager.h"
+#include "zeek/telemetry/Manager.h"
 
 using namespace zeek::detail;
 using namespace zeek::detail::trigger;
@@ -20,535 +23,463 @@ using namespace zeek::detail::trigger;
 // Callback class to traverse an expression, registering all relevant IDs and
 // Vals for change notifications.
 
-namespace zeek::detail::trigger
-	{
+namespace zeek::detail::trigger {
 
-class TriggerTraversalCallback : public TraversalCallback
-	{
+// Used to extract the globals and locals seen in a trigger expression.
+class TriggerTraversalCallback : public TraversalCallback {
 public:
-	TriggerTraversalCallback(Trigger* arg_trigger)
-		{
-		Ref(arg_trigger);
-		trigger = arg_trigger;
-		}
+    TriggerTraversalCallback(IDSet& _globals, IDSet& _locals) : globals(_globals), locals(_locals) {}
 
-	~TriggerTraversalCallback() { Unref(trigger); }
-
-	virtual TraversalCode PreExpr(const Expr*) override;
+    TraversalCode PreExpr(const Expr*) override;
 
 private:
-	Trigger* trigger;
-	};
+    IDSet& globals;
+    IDSet& locals;
+};
 
-TraversalCode trigger::TriggerTraversalCallback::PreExpr(const Expr* expr)
-	{
-	// We catch all expressions here which in some way reference global
-	// state.
+TraversalCode trigger::TriggerTraversalCallback::PreExpr(const Expr* expr) {
+    // We catch all expressions here which in some way reference global
+    // state.
 
-	switch ( expr->Tag() )
-		{
-		case EXPR_NAME:
-			{
-			const auto* e = static_cast<const NameExpr*>(expr);
-			if ( e->Id()->IsGlobal() )
-				trigger->Register(e->Id());
+    switch ( expr->Tag() ) {
+        case EXPR_NAME: {
+            const auto* e = static_cast<const NameExpr*>(expr);
+            auto id = e->IdPtr();
 
-			Val* v = e->Id()->GetVal().get();
+            if ( id->IsGlobal() )
+                globals.insert(id);
+            else
+                locals.insert(id);
+        };
 
-			if ( v && v->Modifiable() )
-				trigger->Register(v);
-			break;
-			};
+        default:
+            // All others are uninteresting.
+            break;
+    }
 
-		default:
-			// All others are uninteresting.
-			break;
-		}
+    return TC_CONTINUE;
+}
 
-	return TC_CONTINUE;
-	}
-
-class TriggerTimer final : public Timer
-	{
+class TriggerTimer final : public Timer {
 public:
-	TriggerTimer(double arg_timeout, Trigger* arg_trigger)
-		: Timer(run_state::network_time + arg_timeout, TIMER_TRIGGER)
-		{
-		Ref(arg_trigger);
-		trigger = arg_trigger;
-		timeout = arg_timeout;
-		time = run_state::network_time;
-		}
+    TriggerTimer(double arg_timeout, Trigger* arg_trigger)
+        : Timer(run_state::network_time + arg_timeout, TIMER_TRIGGER) {
+        Ref(arg_trigger);
+        trigger = arg_trigger;
+        timeout = arg_timeout;
+        time = run_state::network_time;
+    }
 
-	~TriggerTimer() { Unref(trigger); }
+    ~TriggerTimer() override { Unref(trigger); }
 
-	void Dispatch(double t, bool is_expire) override
-		{
-		// The network_time may still have been zero when the
-		// timer was instantiated.  In this case, it fires
-		// immediately and we simply restart it.
-		if ( time )
-			trigger->Timeout();
-		else
-			{
-			TriggerTimer* timer = new TriggerTimer(timeout, trigger);
-			timer_mgr->Add(timer);
-			trigger->timer = timer;
-			}
-		}
+    void Dispatch(double t, bool is_expire) override {
+        // The network_time may still have been zero when the
+        // timer was instantiated.  In this case, it fires
+        // immediately and we simply restart it.
+        if ( time )
+            trigger->Timeout();
+        else {
+            TriggerTimer* timer = new TriggerTimer(timeout, trigger);
+            timer_mgr->Add(timer);
+            trigger->timer = timer;
+        }
+    }
 
 protected:
-	Trigger* trigger;
-	double timeout;
-	double time;
-	};
+    Trigger* trigger;
+    double timeout;
+    double time;
+};
 
-Trigger::Trigger(const Expr* cond, Stmt* body, Stmt* timeout_stmts, Expr* timeout_expr,
-                 Frame* frame, bool is_return, const Location* location)
-	{
-	timeout_value = -1;
+Trigger::Trigger(const std::shared_ptr<WhenInfo>& wi, const IDSet& _globals, std::vector<ValPtr> _local_aggrs,
+                 double timeout, Frame* f, const Location* loc) {
+    timeout_value = timeout;
+    globals = _globals;
+    local_aggrs = std::move(_local_aggrs);
+    have_trigger_elems = true;
 
-	if ( timeout_expr )
-		{
-		ValPtr timeout_val;
+    cond = wi->Cond();
+    body = wi->WhenBody();
+    timeout_stmts = wi->TimeoutStmt();
+    is_return = wi->IsReturn();
 
-		try
-			{
-			timeout_val = timeout_expr->Eval(frame);
-			}
-		catch ( InterpreterException& )
-			{ /* Already reported */
-			}
+    timer = nullptr;
+    delayed = false;
+    disabled = false;
+    attached = nullptr;
 
-		if ( timeout_val )
-			timeout_value = timeout_val->AsInterval();
-		}
+    if ( loc )
+        name = util::fmt("%s:%d-%d", loc->FileName(), loc->FirstLine(), loc->LastLine());
+    else
+        name = "<no-trigger-location>";
 
-	Init(cond, body, timeout_stmts, frame, is_return, location);
-	}
+    if ( f )
+        frame = f->CloneForTrigger();
+    else
+        frame = nullptr;
 
-Trigger::Trigger(const Expr* cond, Stmt* body, Stmt* timeout_stmts, double timeout, Frame* frame,
-                 bool is_return, const Location* location)
-	{
-	timeout_value = timeout;
-	Init(cond, body, timeout_stmts, frame, is_return, location);
-	}
+    DBG_LOG(DBG_NOTIFIERS, "%s: instantiating", Name());
 
-void Trigger::Init(const Expr* arg_cond, Stmt* arg_body, Stmt* arg_timeout_stmts, Frame* arg_frame,
-                   bool arg_is_return, const Location* arg_location)
-	{
-	cond = arg_cond;
-	body = arg_body;
-	timeout_stmts = arg_timeout_stmts;
-	frame = arg_frame->Clone();
-	timer = nullptr;
-	delayed = false;
-	disabled = false;
-	attached = nullptr;
-	is_return = arg_is_return;
-	location = arg_location;
+    if ( is_return && frame ) {
+        Trigger* parent = frame->GetTrigger();
+        if ( ! parent ) {
+            reporter->Error("return trigger in context which does not allow delaying result");
+            return;
+        }
 
-	DBG_LOG(DBG_NOTIFIERS, "%s: instantiating", Name());
+        parent->Attach(this);
+        f->SetDelayed();
+    }
 
-	if ( is_return )
-		{
-		Trigger* parent = frame->GetTrigger();
-		if ( ! parent )
-			{
-			reporter->Error("return trigger in context which does not allow delaying result");
-			Unref(this);
-			return;
-			}
+    // Make sure we don't get deleted if somebody calls a method like
+    // Timeout() while evaluating the trigger.
+    Ref(this);
 
-		parent->Attach(this);
-		arg_frame->SetDelayed();
-		}
+    if ( ! Eval() && timeout_value >= 0 ) {
+        timer = new TriggerTimer(timeout_value, this);
+        timer_mgr->Add(timer);
+    }
+}
 
-	// Make sure we don't get deleted if somebody calls a method like
-	// Timeout() while evaluating the trigger.
-	Ref(this);
+void Trigger::Terminate() {
+    if ( is_return ) {
+        auto parent = frame->GetTrigger();
 
-	if ( ! Eval() && timeout_value >= 0 )
-		{
-		timer = new TriggerTimer(timeout_value, this);
-		timer_mgr->Add(timer);
-		}
+        if ( ! parent->Disabled() ) {
+            // If the trigger was already disabled due to interpreter
+            // exception, an Unref already happened at that point.
+            parent->Disable();
+            Unref(parent);
+        }
 
-	Unref(this);
-	}
+        frame->ClearTrigger();
+    }
 
-void Trigger::Terminate()
-	{
-	if ( is_return )
-		{
-		auto parent = frame->GetTrigger();
+    Disable();
+    Unref(this);
+}
 
-		if ( ! parent->Disabled() )
-			{
-			// If the trigger was already disabled due to interpreter
-			// exception, an Unref already happened at that point.
-			parent->Disable();
-			Unref(parent);
-			}
+Trigger::~Trigger() {
+    DBG_LOG(DBG_NOTIFIERS, "%s: deleting", Name());
 
-		frame->ClearTrigger();
-		}
+    for ( auto& [_, trigger] : cache )
+        Unref(trigger);
 
-	Disable();
-	Unref(this);
-	}
+    Unref(frame);
+    UnregisterAll();
 
-Trigger::~Trigger()
-	{
-	DBG_LOG(DBG_NOTIFIERS, "%s: deleting", Name());
+    Unref(attached);
+    // Due to ref'counting, "this" cannot be part of pending at this
+    // point.
+}
 
-	for ( ValCache::iterator i = cache.begin(); i != cache.end(); ++i )
-		Unref(i->second);
+void Trigger::ReInit(const std::vector<ValPtr>& index_expr_results) {
+    assert(! disabled);
+    UnregisterAll();
 
-	Unref(frame);
-	UnregisterAll();
+    if ( ! have_trigger_elems ) {
+        TriggerTraversalCallback cb(globals, locals);
+        cond->Traverse(&cb);
+        have_trigger_elems = true;
+    }
 
-	Unref(attached);
-	// Due to ref'counting, "this" cannot be part of pending at this
-	// point.
-	}
+    for ( const auto& g : globals ) {
+        Register(g.get());
 
-void Trigger::ReInit(std::vector<ValPtr> index_expr_results)
-	{
-	assert(! disabled);
-	UnregisterAll();
-	TriggerTraversalCallback cb(this);
-	cond->Traverse(&cb);
+        auto& v = g->GetVal();
+        if ( v && v->Modifiable() )
+            Register(v.get());
+    }
 
-	for ( const auto& v : index_expr_results )
-		Register(v.get());
-	}
+    for ( const auto& l : locals ) {
+        ASSERT(! l->GetVal());
+    }
 
-bool Trigger::Eval()
-	{
-	if ( disabled )
-		return true;
+    for ( auto& av : local_aggrs )
+        Register(av.get());
 
-	DBG_LOG(DBG_NOTIFIERS, "%s: evaluating", Name());
+    for ( const auto& v : index_expr_results )
+        Register(v.get());
+}
 
-	if ( delayed )
-		{
-		DBG_LOG(DBG_NOTIFIERS, "%s: skipping eval due to delayed call", Name());
-		return false;
-		}
+bool Trigger::Eval() {
+    if ( disabled )
+        return true;
 
-	// It's unfortunate that we have to copy the frame again here but
-	// otherwise changes to any of the locals would propagate to later
-	// evaluations.
-	//
-	// An alternative approach to copying the frame would be to deep-copy
-	// the expression itself, replacing all references to locals with
-	// constants.
+    DBG_LOG(DBG_NOTIFIERS, "%s: evaluating", Name());
 
-	Frame* f = nullptr;
+    if ( delayed ) {
+        DBG_LOG(DBG_NOTIFIERS, "%s: skipping eval due to delayed call", Name());
+        return false;
+    }
 
-	try
-		{
-		f = frame->Clone();
-		}
-	catch ( InterpreterException& )
-		{
-		// Frame contains values that couldn't be cloned. It's
-		// already been reported, disable trigger.
-		Disable();
-		Unref(this);
-		return false;
-		}
+    // It's unfortunate that we have to copy the frame again here but
+    // otherwise changes to any of the locals would propagate to later
+    // evaluations.
+    //
+    // An alternative approach to copying the frame would be to deep-copy
+    // the expression itself, replacing all references to locals with
+    // constants.
 
-	f->SetTrigger({NewRef{}, this});
+    Frame* f = nullptr;
 
-	ValPtr v;
-	IndexExprWhen::StartEval();
+    try {
+        f = frame->CloneForTrigger();
+    } catch ( InterpreterException& ) {
+        // Frame contains values that couldn't be cloned. It's
+        // already been reported, disable trigger.
+        Disable();
+        Unref(this);
+        return false;
+    }
 
-	try
-		{
-		v = cond->Eval(f);
-		}
-	catch ( InterpreterException& )
-		{ /* Already reported */
-		}
+    f->SetTrigger({NewRef{}, this});
 
-	IndexExprWhen::EndEval();
-	auto index_expr_results = IndexExprWhen::TakeAllResults();
+    ValPtr v;
+    IndexExprWhen::StartEval();
 
-	f->ClearTrigger();
+    try {
+        v = cond->Eval(f);
+    } catch ( InterpreterException& ) { /* Already reported */
+    }
 
-	if ( f->HasDelayed() )
-		{
-		DBG_LOG(DBG_NOTIFIERS, "%s: eval has delayed", Name());
-		assert(! v);
-		Unref(f);
-		return false;
-		}
+    IndexExprWhen::EndEval();
+    auto index_expr_results = IndexExprWhen::TakeAllResults();
 
-	if ( ! v || v->IsZero() )
-		{
-		// Not true. Perhaps next time...
-		DBG_LOG(DBG_NOTIFIERS, "%s: trigger condition is false", Name());
-		Unref(f);
-		ReInit(std::move(index_expr_results));
-		return false;
-		}
+    f->ClearTrigger();
 
-	DBG_LOG(DBG_NOTIFIERS, "%s: trigger condition is true, executing", Name());
+    if ( f->HasDelayed() ) {
+        DBG_LOG(DBG_NOTIFIERS, "%s: eval has delayed", Name());
+        assert(! v);
+        Unref(f);
+        return false;
+    }
 
-	v = nullptr;
-	StmtFlowType flow;
+    if ( ! v || v->IsZero() ) {
+        // Not true. Perhaps next time...
+        DBG_LOG(DBG_NOTIFIERS, "%s: trigger condition is false", Name());
+        Unref(f);
+        ReInit(index_expr_results);
+        return false;
+    }
 
-	try
-		{
-		v = body->Exec(f, flow);
-		}
-	catch ( InterpreterException& e )
-		{ /* Already reported. */
-		}
+    DBG_LOG(DBG_NOTIFIERS, "%s: trigger condition is true, executing", Name());
 
-	if ( is_return )
-		{
-		Trigger* trigger = frame->GetTrigger();
-		assert(trigger);
-		assert(frame->GetCall());
-		assert(trigger->attached == this);
+    v = nullptr;
+    StmtFlowType flow;
+
+    try {
+        v = body->Exec(f, flow);
+    } catch ( InterpreterException& e ) { /* Already reported. */
+    }
+
+    if ( is_return ) {
+        Trigger* trigger = frame->GetTrigger();
+        assert(trigger);
+        assert(frame->GetTriggerAssoc());
+        assert(trigger->attached == this);
 
 #ifdef DEBUG
-		const char* pname = util::copy_string(trigger->Name());
-		DBG_LOG(DBG_NOTIFIERS, "%s: trigger has parent %s, caching result", Name(), pname);
-		delete[] pname;
+        const char* pname = util::copy_string(trigger->Name());
+        DBG_LOG(DBG_NOTIFIERS, "%s: trigger has parent %s, caching result", Name(), pname);
+        delete[] pname;
 #endif
 
-		auto queued = trigger->Cache(frame->GetCall(), v.get());
-		trigger->Release();
-		frame->ClearTrigger();
+        auto queued = trigger->Cache(frame->GetTriggerAssoc(), v.get());
+        trigger->Release();
+        frame->ClearTrigger();
 
-		if ( ! queued && trigger->TimeoutValue() < 0 )
-			// Usually the parent-trigger would get unref'd either by
-			// its Eval() or its eventual Timeout(), but has neither
-			Unref(trigger);
-		}
+        if ( ! queued && trigger->TimeoutValue() < 0 )
+            // Usually the parent-trigger would get unref'd either by
+            // its Eval() or its eventual Timeout(), but has neither
+            Unref(trigger);
+    }
 
-	Unref(f);
+    Unref(f);
 
-	if ( timer )
-		timer_mgr->Cancel(timer);
+    if ( timer )
+        timer_mgr->Cancel(timer);
 
-	Disable();
-	Unref(this);
+    Disable();
+    Unref(this);
 
-	return true;
-	}
+    return true;
+}
 
-void Trigger::Timeout()
-	{
-	if ( disabled )
-		return;
+void Trigger::Timeout() {
+    if ( disabled )
+        return;
 
-	DBG_LOG(DBG_NOTIFIERS, "%s: timeout", Name());
-	if ( timeout_stmts )
-		{
-		StmtFlowType flow;
-		FramePtr f{AdoptRef{}, frame->Clone()};
-		ValPtr v;
+    DBG_LOG(DBG_NOTIFIERS, "%s: timeout", Name());
+    if ( timeout_stmts ) {
+        StmtFlowType flow;
+        FramePtr f{AdoptRef{}, frame->CloneForTrigger()};
+        ValPtr v;
 
-		try
-			{
-			v = timeout_stmts->Exec(f.get(), flow);
-			}
-		catch ( InterpreterException& e )
-			{ /* Already reported. */
-			}
+        try {
+            v = timeout_stmts->Exec(f.get(), flow);
+        } catch ( InterpreterException& e ) { /* Already reported. */
+        }
 
-		if ( is_return )
-			{
-			Trigger* trigger = frame->GetTrigger();
-			assert(trigger);
-			assert(frame->GetCall());
-			assert(trigger->attached == this);
+        if ( is_return ) {
+            Trigger* trigger = frame->GetTrigger();
+            assert(trigger);
+            assert(frame->GetTriggerAssoc());
+            assert(trigger->attached == this);
 
 #ifdef DEBUG
-			const char* pname = util::copy_string(trigger->Name());
-			DBG_LOG(DBG_NOTIFIERS, "%s: trigger has parent %s, caching timeout result", Name(),
-			        pname);
-			delete[] pname;
+            const char* pname = util::copy_string(trigger->Name());
+            DBG_LOG(DBG_NOTIFIERS, "%s: trigger has parent %s, caching timeout result", Name(), pname);
+            delete[] pname;
 #endif
-			auto queued = trigger->Cache(frame->GetCall(), v.get());
-			trigger->Release();
-			frame->ClearTrigger();
+            auto queued = trigger->Cache(frame->GetTriggerAssoc(), v.get());
+            trigger->Release();
+            frame->ClearTrigger();
 
-			if ( ! queued && trigger->TimeoutValue() < 0 )
-				// Usually the parent-trigger would get unref'd either by
-				// its Eval() or its eventual Timeout(), but has neither
-				Unref(trigger);
-			}
-		}
+            if ( ! queued && trigger->TimeoutValue() < 0 )
+                // Usually the parent-trigger would get unref'd either by
+                // its Eval() or its eventual Timeout(), but has neither
+                Unref(trigger);
+        }
+    }
 
-	Disable();
-	Unref(this);
-	}
+    Disable();
+    Unref(this);
+}
 
-void Trigger::Register(ID* id)
-	{
-	assert(! disabled);
-	notifier::detail::registry.Register(id, this);
+void Trigger::Register(const ID* const_id) {
+    assert(! disabled);
+    ID* id = const_cast<ID*>(const_id);
+    notifier::detail::registry.Register(id, this);
 
-	Ref(id);
-	objs.push_back({id, id});
-	}
+    Ref(id);
+    objs.emplace_back(id, id);
+}
 
-void Trigger::Register(Val* val)
-	{
-	if ( ! val->Modifiable() )
-		return;
+void Trigger::Register(Val* val) {
+    if ( ! val->Modifiable() )
+        return;
 
-	assert(! disabled);
-	notifier::detail::registry.Register(val->Modifiable(), this);
+    assert(! disabled);
+    notifier::detail::registry.Register(val->Modifiable(), this);
 
-	Ref(val);
-	objs.emplace_back(val, val->Modifiable());
-	}
+    Ref(val);
+    objs.emplace_back(val, val->Modifiable());
+}
 
-void Trigger::UnregisterAll()
-	{
-	DBG_LOG(DBG_NOTIFIERS, "%s: unregistering all", Name());
+void Trigger::UnregisterAll() {
+    DBG_LOG(DBG_NOTIFIERS, "%s: unregistering all", Name());
 
-	for ( const auto& o : objs )
-		{
-		notifier::detail::registry.Unregister(o.second, this);
-		Unref(o.first);
-		}
+    for ( const auto& o : objs ) {
+        notifier::detail::registry.Unregister(o.second, this);
+        Unref(o.first);
+    }
 
-	objs.clear();
-	}
+    objs.clear();
+}
 
-void Trigger::Attach(Trigger* trigger)
-	{
-	assert(! disabled);
-	assert(! trigger->disabled);
-	assert(! trigger->delayed);
+void Trigger::Attach(Trigger* trigger) {
+    assert(! disabled);
+    assert(! trigger->disabled);
+    assert(! trigger->delayed);
 
 #ifdef DEBUG
-	const char* pname = util::copy_string(trigger->Name());
-	DBG_LOG(DBG_NOTIFIERS, "%s: attaching to %s", Name(), pname);
-	delete[] pname;
+    const char* pname = util::copy_string(trigger->Name());
+    DBG_LOG(DBG_NOTIFIERS, "%s: attaching to %s", Name(), pname);
+    delete[] pname;
 #endif
 
-	Ref(trigger);
-	attached = trigger;
-	Hold();
-	}
+    Ref(trigger);
+    attached = trigger;
+    Hold();
+}
 
-bool Trigger::Cache(const CallExpr* expr, Val* v)
-	{
-	if ( disabled || ! v )
-		return false;
+bool Trigger::Cache(const void* obj, Val* v) {
+    if ( disabled || ! v )
+        return false;
 
-	ValCache::iterator i = cache.find(expr);
+    ValCache::iterator i = cache.find(obj);
 
-	if ( i != cache.end() )
-		{
-		Unref(i->second);
-		i->second = v;
-		}
+    if ( i != cache.end() ) {
+        Unref(i->second);
+        i->second = v;
+    }
 
-	else
-		cache.insert(ValCache::value_type(expr, v));
+    else
+        cache.insert(ValCache::value_type(obj, v));
 
-	Ref(v);
+    Ref(v);
 
-	trigger_mgr->Queue(this);
-	return true;
-	}
+    trigger_mgr->Queue(this);
+    return true;
+}
 
-Val* Trigger::Lookup(const CallExpr* expr)
-	{
-	assert(! disabled);
+Val* Trigger::Lookup(const void* obj) {
+    assert(! disabled);
 
-	ValCache::iterator i = cache.find(expr);
-	return (i != cache.end()) ? i->second : 0;
-	}
+    ValCache::iterator i = cache.find(obj);
+    return (i != cache.end()) ? i->second : 0;
+}
 
-void Trigger::Disable()
-	{
-	UnregisterAll();
-	disabled = true;
-	}
+void Trigger::Disable() {
+    UnregisterAll();
+    disabled = true;
+}
 
-void Trigger::Describe(ODesc* d) const
-	{
-	d->Add("<trigger>");
-	}
+void Trigger::Describe(ODesc* d) const { d->Add("<trigger>"); }
 
-void Trigger::Modified(notifier::detail::Modifiable* m)
-	{
-	trigger_mgr->Queue(this);
-	}
+void Trigger::Modified(notifier::detail::Modifiable* m) { trigger_mgr->Queue(this); }
 
-const char* Trigger::Name() const
-	{
-	assert(location);
-	return util::fmt("%s:%d-%d", location->filename, location->first_line, location->last_line);
-	}
+Manager::Manager() : iosource::IOSource() { pending = new TriggerList(); }
 
-Manager::Manager() : iosource::IOSource()
-	{
-	pending = new TriggerList();
-	iosource_mgr->Register(this, true);
-	}
+Manager::~Manager() { delete pending; }
 
-Manager::~Manager()
-	{
-	delete pending;
-	}
+void Manager::InitPostScript() {
+    trigger_count = telemetry_mgr->CounterInstance("zeek", "triggers", {}, "Total number of triggers scheduled");
+    trigger_pending =
+        telemetry_mgr->GaugeInstance("zeek", "pending_triggers", {}, "Pending number of triggers", "", []() {
+            return trigger_mgr ? static_cast<double>(trigger_mgr->pending->size()) : 0.0;
+        });
 
-double Manager::GetNextTimeout()
-	{
-	return pending->empty() ? -1 : run_state::network_time + 0.100;
-	}
+    iosource_mgr->Register(this, true);
+}
 
-void Manager::Process()
-	{
-	DBG_LOG(DBG_NOTIFIERS, "evaluating all pending triggers");
+double Manager::GetNextTimeout() { return pending->empty() ? -1 : run_state::network_time + 0.100; }
 
-	// While we iterate over the list, executing statements, we may
-	// in fact trigger new triggers and thereby modify the list.
-	// Therefore, we create a new temporary list which will receive
-	// triggers triggered during this time.
-	TriggerList* orig = pending;
-	TriggerList tmp;
-	pending = &tmp;
+void Manager::Process() {
+    DBG_LOG(DBG_NOTIFIERS, "evaluating all pending triggers");
 
-	for ( TriggerList::iterator i = orig->begin(); i != orig->end(); ++i )
-		{
-		Trigger* t = *i;
-		(*i)->Eval();
-		Unref(t);
-		}
+    // While we iterate over the list, executing statements, we may
+    // in fact trigger new triggers and thereby modify the list.
+    // Therefore, we create a new temporary list which will receive
+    // triggers triggered during this time.
+    TriggerList* orig = pending;
+    TriggerList tmp;
+    pending = &tmp;
 
-	pending = orig;
-	orig->clear();
+    for ( auto* t : *orig ) {
+        t->Eval();
+        Unref(t);
+    }
 
-	std::swap(tmp, *pending);
-	}
+    pending = orig;
+    orig->clear();
 
-void Manager::Queue(Trigger* trigger)
-	{
-	if ( std::find(pending->begin(), pending->end(), trigger) == pending->end() )
-		{
-		Ref(trigger);
-		pending->push_back(trigger);
-		total_triggers++;
-		iosource_mgr->Wakeup(Tag());
-		}
-	}
+    std::swap(tmp, *pending);
+}
 
-void Manager::GetStats(Stats* stats)
-	{
-	stats->total = total_triggers;
-	stats->pending = pending->size();
-	}
+void Manager::Queue(Trigger* trigger) {
+    if ( std::ranges::find(*pending, trigger) == pending->end() ) {
+        Ref(trigger);
+        pending->push_back(trigger);
+        trigger_count->Inc();
+        iosource_mgr->Wakeup(Tag());
+    }
+}
 
-	}
+void Manager::GetStats(Stats* stats) {
+    stats->total = static_cast<unsigned long>(trigger_count->Value());
+    stats->pending = pending->size();
+}
+
+} // namespace zeek::detail::trigger

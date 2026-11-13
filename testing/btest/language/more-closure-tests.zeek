@@ -52,7 +52,7 @@ function die()
     {
     local h: addr = 127.0.0.1;
 
-	when ( local hname = lookup_addr(h) )
+	when [h] ( local hname = lookup_addr(h) )
 		{
 		print "lookup successful";
 		terminate();
@@ -92,7 +92,7 @@ event zeek_init()
     print "expect [8, 16, 24]";
     print map_1(times_eight, test);
 
-    # things like this are only possible becuse we allow functions to
+    # things like this are only possible because we allow functions to
     # mutate their closures.
     local thunder= make_dog("thunder", 10);
     thunder("get name", "");

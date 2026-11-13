@@ -19,11 +19,13 @@
 
 using namespace zeek::packet_analysis::ARP;
 
-ARPAnalyzer::ARPAnalyzer() : zeek::packet_analysis::Analyzer("ARP") { }
+ARPAnalyzer::ARPAnalyzer() : zeek::packet_analysis::Analyzer("ARP") {}
 
 // Argh! FreeBSD and Linux have almost completely different net/if_arp.h .
 // ... and on Solaris we are missing half of the ARPOP codes, so define
 // them here as necessary:
+
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
 
 #ifndef ARPOP_REQUEST
 #define ARPOP_REQUEST 1 // ARP request.
@@ -60,7 +62,7 @@ ARPAnalyzer::ARPAnalyzer() : zeek::packet_analysis::Analyzer("ARP") { }
 #endif
 
 #ifndef ar_tpa
-#define ar_tpa(ap) ((caddr_t((ap) + 1)) + 2 * (ap)->ar_hln + (ap)->ar_pln)
+#define ar_tpa(ap) ((caddr_t((ap) + 1)) + 2 * static_cast<size_t>((ap)->ar_hln) + (ap)->ar_pln)
 #endif
 
 #ifndef ARPOP_REVREQUEST
@@ -79,155 +81,147 @@ ARPAnalyzer::ARPAnalyzer() : zeek::packet_analysis::Analyzer("ARP") { }
 #define ARPOP_INVREPLY ARPOP_InREPLY
 #endif
 
-bool ARPAnalyzer::AnalyzePacket(size_t len, const uint8_t* data, Packet* packet)
-	{
-	packet->l3_proto = L3_ARP;
+// Windows doesn't define this value.
+#ifndef ARPHRD_IEEE802
+#define ARPHRD_IEEE802 6
+#endif
 
-	// Check whether the header is complete.
-	if ( sizeof(struct arp_pkthdr) > len )
-		{
-		Weird("truncated_ARP", packet);
-		return false;
-		}
+// NOLINTEND(cppcoreguidelines-macro-usage)
 
-	// Check whether the packet is OK ("inspired" in tcpdump's print-arp.c).
-	auto ah = (const struct arp_pkthdr*)data;
+bool ARPAnalyzer::AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) {
+    packet->l3_proto = L3_ARP;
 
-	// Check the size.
-	size_t min_length = (ar_tpa(ah) - (char*)data) + ah->ar_pln;
-	if ( min_length > len )
-		{
-		Weird("truncated_ARP", packet);
-		return false;
-		}
+    // Check whether the header is complete.
+    if ( sizeof(struct arp_pkthdr) > len ) {
+        Weird("truncated_ARP", packet);
+        return false;
+    }
 
-	// ARP packets are considered processed if we get to this point. There may be issues
-	// with the processing of them, but they're actually an ARP packet and anything else
-	// will be reported via events.
-	packet->processed = true;
+    // Check whether the packet is OK ("inspired" in tcpdump's print-arp.c).
+    auto ah = reinterpret_cast<const arp_pkthdr*>(data);
 
-	// Check the address description fields.
-	switch ( ntohs(ah->ar_hrd) )
-		{
-		case ARPHRD_ETHER:
-			if ( ah->ar_hln != 6 )
-				{
-				// don't know how to handle the opcode
-				BadARPEvent(ah, "corrupt-arp-header (hrd=%i, hln=%i)", ntohs(ah->ar_hrd),
-				            ah->ar_hln);
-				return false;
-				}
-			break;
+    // Check the size.
+    size_t min_length = (ar_tpa(ah) - reinterpret_cast<caddr_t>(const_cast<uint8_t*>(data))) + ah->ar_pln;
+    if ( min_length > len ) {
+        Weird("truncated_ARP", packet);
+        return false;
+    }
 
-		default:
-			{
-			// don't know how to proceed
-			BadARPEvent(ah, "unknown-arp-hw-address (hrd=%i)", ntohs(ah->ar_hrd));
-			return false;
-			}
-		}
+    // ARP packets are considered processed if we get to this point. There may be issues
+    // with the processing of them, but they're actually an ARP packet and anything else
+    // will be reported via events.
+    packet->processed = true;
 
-	// Note: We don't support IPv6 addresses.
-	switch ( ntohs(ah->ar_pro) )
-		{
-		case ETHERTYPE_IP:
-			if ( ah->ar_pln != 4 )
-				{
-				// don't know how to handle the opcode
-				BadARPEvent(ah, "corrupt-arp-header (pro=%i, pln=%i)", ntohs(ah->ar_pro),
-				            ah->ar_pln);
-				return false;
-				}
-			break;
+    // Check the address description fields.
+    switch ( ntohs(ah->ar_hrd) ) {
+        case ARPHRD_ETHER:
+        case ARPHRD_IEEE802:
+            if ( ah->ar_hln != 6 ) {
+                // don't know how to handle the opcode
+                BadARPEvent(ah, "corrupt-arp-header (hrd=%i, hln=%i)", ntohs(ah->ar_hrd), ah->ar_hln);
+                return false;
+            }
+            break;
 
-		default:
-			{
-			// don't know how to proceed
-			BadARPEvent(ah, "unknown-arp-proto-address (pro=%i)", ntohs(ah->ar_pro));
-			return false;
-			}
-		}
+        default: {
+            // don't know how to proceed
+            BadARPEvent(ah, "unknown-arp-hw-address (hrd=%i)", ntohs(ah->ar_hrd));
+            return false;
+        }
+    }
 
-	// Check MAC src address = ARP sender MAC address.
-	if ( memcmp(packet->l2_src, ar_sha(ah), ah->ar_hln) != 0 )
-		{
-		BadARPEvent(ah, "weird-arp-sha");
-		return false;
-		}
+    // Note: We don't support IPv6 addresses.
+    switch ( ntohs(ah->ar_pro) ) {
+        case ETHERTYPE_IP:
+            if ( ah->ar_pln != 4 ) {
+                // don't know how to handle the opcode
+                BadARPEvent(ah, "corrupt-arp-header (pro=%i, pln=%i)", ntohs(ah->ar_pro), ah->ar_pln);
+                return false;
+            }
+            break;
 
-	// Check the code is supported.
-	switch ( ntohs(ah->ar_op) )
-		{
-		case ARPOP_REQUEST:
-			RequestReplyEvent(arp_request, packet->l2_src, packet->l2_dst, ar_spa(ah), ar_sha(ah),
-			                  ar_tpa(ah), ar_tha(ah));
-			break;
+        default: {
+            // don't know how to proceed
+            BadARPEvent(ah, "unknown-arp-proto-address (pro=%i)", ntohs(ah->ar_pro));
+            return false;
+        }
+    }
 
-		case ARPOP_REPLY:
-			RequestReplyEvent(arp_reply, packet->l2_src, packet->l2_dst, ar_spa(ah), ar_sha(ah),
-			                  ar_tpa(ah), ar_tha(ah));
-			break;
+    // Check MAC src address = ARP sender MAC address.
+    if ( memcmp(packet->l2_src, ar_sha(ah), ah->ar_hln) != 0 ) {
+        BadARPEvent(ah, "weird-arp-sha");
+        return false;
+    }
 
-		case ARPOP_REVREQUEST:
-		case ARPOP_REVREPLY:
-		case ARPOP_INVREQUEST:
-		case ARPOP_INVREPLY:
-			{
-			// don't know how to handle the opcode
-			BadARPEvent(ah, "unimplemented-arp-opcode (%i)", ntohs(ah->ar_op));
-			return false;
-			}
+    // Check the code is supported.
+    switch ( ntohs(ah->ar_op) ) {
+        case ARPOP_REQUEST: RequestReplyEvent(arp_request, packet->l2_src, packet->l2_dst, ah); break;
 
-		default:
-			{
-			// invalid opcode
-			BadARPEvent(ah, "invalid-arp-opcode (opcode=%i)", ntohs(ah->ar_op));
-			return false;
-			}
-		}
+        case ARPOP_REPLY: RequestReplyEvent(arp_reply, packet->l2_src, packet->l2_dst, ah); break;
 
-	// Leave packet analyzer land
-	return true;
-	}
+        case ARPOP_REVREQUEST:
+        case ARPOP_REVREPLY:
+        case ARPOP_INVREQUEST:
+        case ARPOP_INVREPLY: {
+            // don't know how to handle the opcode
+            BadARPEvent(ah, "unimplemented-arp-opcode (%i)", ntohs(ah->ar_op));
+            return false;
+        }
 
-zeek::AddrValPtr ARPAnalyzer::ToAddrVal(const void* addr)
-	{
-	// Note: We only handle IPv4 addresses.
-	return zeek::make_intrusive<zeek::AddrVal>(*(const uint32_t*)addr);
-	}
+        default: {
+            // invalid opcode
+            BadARPEvent(ah, "invalid-arp-opcode (opcode=%i)", ntohs(ah->ar_op));
+            return false;
+        }
+    }
 
-zeek::StringValPtr ARPAnalyzer::ToEthAddrStr(const u_char* addr)
-	{
-	char buf[1024];
-	snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", addr[0], addr[1], addr[2], addr[3],
-	         addr[4], addr[5]);
-	return zeek::make_intrusive<zeek::StringVal>(buf);
-	}
+    // Leave packet analyzer land
+    return true;
+}
 
-void ARPAnalyzer::BadARPEvent(const struct arp_pkthdr* hdr, const char* fmt, ...)
-	{
-	if ( ! bad_arp )
-		return;
+zeek::AddrValPtr ARPAnalyzer::ToAddrVal(const void* addr, size_t len) {
+    if ( len < 4 )
+        return zeek::make_intrusive<zeek::AddrVal>(static_cast<uint32_t>(0));
 
-	char msg[1024];
-	va_list args;
-	va_start(args, fmt);
-	vsnprintf(msg, sizeof(msg), fmt, args);
-	va_end(args);
+    // Note: We only handle IPv4 addresses.
+    return zeek::make_intrusive<zeek::AddrVal>(*reinterpret_cast<const uint32_t*>(addr));
+}
 
-	event_mgr.Enqueue(bad_arp, ToAddrVal(ar_spa(hdr)), ToEthAddrStr((const u_char*)ar_sha(hdr)),
-	                  ToAddrVal(ar_tpa(hdr)), ToEthAddrStr((const u_char*)ar_tha(hdr)),
-	                  zeek::make_intrusive<zeek::StringVal>(msg));
-	}
+zeek::StringValPtr ARPAnalyzer::ToEthAddrStr(const u_char* addr, size_t len) {
+    if ( len < 6 )
+        return zeek::make_intrusive<zeek::StringVal>("");
+
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return zeek::make_intrusive<zeek::StringVal>(buf);
+}
+
+void ARPAnalyzer::BadARPEvent(const struct arp_pkthdr* hdr, const char* fmt, ...) {
+    if ( ! bad_arp )
+        return;
+
+    char msg[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+
+    event_mgr.Enqueue(bad_arp, ToAddrVal(reinterpret_cast<const u_char*>(ar_spa(hdr)), hdr->ar_pln),
+                      ToEthAddrStr(reinterpret_cast<const u_char*>(ar_sha(hdr)), hdr->ar_hln),
+                      ToAddrVal(reinterpret_cast<const u_char*>(ar_tpa(hdr)), hdr->ar_pln),
+                      ToEthAddrStr(reinterpret_cast<const u_char*>(ar_tha(hdr)), hdr->ar_hln),
+                      zeek::make_intrusive<zeek::StringVal>(msg));
+}
 
 void ARPAnalyzer::RequestReplyEvent(EventHandlerPtr e, const u_char* src, const u_char* dst,
-                                    const char* spa, const char* sha, const char* tpa,
-                                    const char* tha)
-	{
-	if ( ! e )
-		return;
+                                    const struct arp_pkthdr* hdr) {
+    if ( ! e )
+        return;
 
-	event_mgr.Enqueue(e, ToEthAddrStr(src), ToEthAddrStr(dst), ToAddrVal(spa),
-	                  ToEthAddrStr((const u_char*)sha), ToAddrVal(tpa),
-	                  ToEthAddrStr((const u_char*)tha));
-	}
+    // The src and dst pointers are the l2_src and l2_dst addresses from the packet. We assume
+    // that the length of those were validated at some point earlier in the processing.
+    event_mgr.Enqueue(e, ToEthAddrStr(src, 6), ToEthAddrStr(dst, 6), ToAddrVal(ar_spa(hdr), hdr->ar_pln),
+                      ToEthAddrStr(reinterpret_cast<const u_char*>(ar_sha(hdr)), hdr->ar_hln),
+                      ToAddrVal(ar_tpa(hdr), hdr->ar_pln),
+                      ToEthAddrStr(reinterpret_cast<const u_char*>(ar_tha(hdr)), hdr->ar_hln));
+}

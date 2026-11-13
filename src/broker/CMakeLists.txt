@@ -1,20 +1,18 @@
-include(ZeekSubdir)
-
-include_directories(BEFORE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-set(comm_SRCS
+zeek_add_subdir_library(
+    comm
+    INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    SOURCES
     Data.cc
     Manager.cc
-    Store.cc
-)
+    WebSocketShim.cc
+    BIFS
+    comm.bif
+    data.bif
+    messaging.bif)
 
-bif_target(comm.bif)
-bif_target(data.bif)
-bif_target(messaging.bif)
-bif_target(store.bif)
-
-bro_add_subdir_library(brokercomm ${comm_SRCS})
-add_dependencies(bro_brokercomm generate_outputs)
+# Small plugin shim to make the CLUSTER_BACKEND_BROKER enum value available.
+zeek_add_plugin(
+    Zeek Cluster_Backend_Broker
+    SOURCES Plugin.cc)

@@ -23,7 +23,7 @@ const COOKIE_UID_START = 0;
 
 export {
 	# All ethertypes can be found at
-	# http://standards.ieee.org/develop/regauth/ethertype/eth.txt
+	# https://standards.ieee.org/develop/regauth/ethertype/eth.txt
 	# but are not interesting for us at this point
 #type ethertype: enum {
 	# Internet protocol version 4
@@ -69,7 +69,7 @@ export {
 #};
 
 	# A list of ip protocol numbers can be found at
-	# http://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
+	# https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
 #type iptype: enum {
 	# IPv6 Hop-by-Hop Option (RFC2460)
 	const IP_HOPOPT = 0x00;
@@ -83,7 +83,7 @@ export {
 	const IP_IPIP = 0x04;
 	# Internet Stream Protocol (RFC1190;RFC1819)
 	const IP_ST = 0x05;
-	# Tansmission Control Protocol (RFC793)
+	# Transmission Control Protocol (RFC793)
 	const IP_TCP = 0x06;
 	# Core-based trees (RFC2189)
 	const IP_CBT = 0x07;
@@ -126,7 +126,7 @@ export {
 	const INVALID_COOKIE = 0x7fffffffffffffff;
 	# Openflow physical port definitions
 	## Send the packet out the input port. This
-	## virual port must be explicitly used in
+	## virtual port must be explicitly used in
 	## order to send back out of the input port.
 	const OFPP_IN_PORT = 0xfffffff8;
 	## Perform actions in flow table.

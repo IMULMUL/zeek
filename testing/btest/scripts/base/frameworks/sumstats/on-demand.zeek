@@ -22,7 +22,7 @@ redef exit_only_after_terminate=T;
 event on_demand_key()
 	{
 	local host = 1.2.3.4;
-	when ( local result = SumStats::request_key("test", [$host=host]) )
+	when [host] ( local result = SumStats::request_key("test", [$host=host]) )
 		{
 		print fmt("Key request for %s", host);
 		print fmt("    Host: %s -> %.0f", host, result["test.reducer"]$sum);
@@ -32,7 +32,7 @@ event on_demand_key()
 
 event zeek_init() &priority=5
 	{
-	local r1: SumStats::Reducer = [$stream="test.reducer", 
+	local r1: SumStats::Reducer = [$stream="test.reducer",
 	                               $apply=set(SumStats::SUM)];
 	SumStats::create([$name="test",
 	                  $epoch=1hr,
@@ -45,4 +45,3 @@ event zeek_init() &priority=5
 	#schedule 0.1 secs { on_demand() };
 	schedule 1 secs { on_demand_key() };
 	}
-

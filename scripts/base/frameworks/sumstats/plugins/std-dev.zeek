@@ -23,11 +23,6 @@ function calc_std_dev(rv: ResultVal)
 		rv$std_dev = sqrt(rv$variance);
 	}
 
-hook std_dev_hook(r: Reducer, val: double, obs: Observation, rv: ResultVal)
-	{
-	calc_std_dev(rv);
-	}
-
 hook register_observe_plugins() &priority=-10
 	{
 	register_observe_plugin(STD_DEV, function(r: Reducer, val: double, obs: Observation, rv: ResultVal)

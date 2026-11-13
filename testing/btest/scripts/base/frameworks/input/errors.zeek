@@ -1,16 +1,16 @@
-# Test different kinds of errors of the input framework
+# @TEST-DOC: Test different kinds of errors of the input framework
 #
 # @TEST-EXEC: zeek -b %INPUT
 # @TEST-EXEC: btest-diff .stderr
-# @TEST-EXEC: btest-diff out
+# @TEST-EXEC: TEST_DIFF_CANONIFIER=sort btest-diff out
 
-@TEST-START-FILE input.log
+# @TEST-START-FILE input.log
 #separator \x09
 #path	ssh
 #fields	b	i	e	c	p	sn	a	d	t	iv	s	sc	ss	se	vc	ve	ns
 #types	bool	int	enum	count	port	subnet	addr	double	time	interval	string	table	table	table	vector	vector	string
 T	-42	SSH::LOG	21	123	10.0.0.0/24	1.2.3.4	3.14	1315801931.273616	100.000000	hurz	2,4,1,3	CC,AA,BB	EMPTY	10,20,30	EMPTY	4242
-@TEST-END-FILE
+# @TEST-END-FILE
 
 redef Input::accept_unsupported_types = T;
 
@@ -59,23 +59,21 @@ global val_table: table[count] of Val = table();
 global val_table2: table[count, int] of Val = table();
 global val_table3: table[count, int] of int = table();
 global val_table4: table[count] of int;
+global val_set: set[count];
 
 event line_file(description: Input::EventDescription, tpe: Input::Event, r:FileVal)
 	{
-	print outfile, description$name;
-	print outfile, r;
+	print outfile, description$name, r;
 	}
 
 event optional_line_file(description: Input::EventDescription, tpe: Input::Event, r:OptionalFileVal)
 	{
-	print outfile, description$name;
-	print outfile, r;
+	print outfile, description$name, r;
 	}
 
 event line_record(description: Input::EventDescription, tpe: Input::Event, r: OptionalRecordVal)
 	{
-	print outfile, description$name;
-	print outfile, r;
+	print outfile, description$name, r;
 	}
 
 event event1(description: Input::EventDescription, tpe: Input::Event, r: OptionalRecordVal, r2: OptionalRecordVal)
@@ -189,6 +187,16 @@ event zeek_init()
 	Input::add_event([$source="input.log", $name="error5", $fields=Val, $ev=event11, $want_record=T, $error_ev=errorhandler5]);
 
 	Input::add_table([$source="input.log", $name="error6", $idx=Idx, $destination=val_table]);
+
+	# Check that we do not crash when a user passes unexpected types to any fields in the description records.
+	Input::add_table([$source="input.log", $name="types1", $idx="string-is-not-allowed", $destination=val_set]);
+	Input::add_table([$source="input.log", $name="types2", $idx=Idx, $val="string-is-not-allowed", $destination=val_set]);
+	Input::add_table([$source="input.log", $name="types3", $idx=Idx, $destination="string-is-not-allowed"]);
+	Input::add_table([$source="input.log", $name="types4", $idx=Idx, $destination=val_set, $ev="not-an-event"]);
+	Input::add_table([$source="input.log", $name="types5", $idx=Idx, $destination=val_set, $error_ev="not-an-event"]);
+	Input::add_event([$source="input.log", $name="types6", $fields="string-is-not-allowed", $ev=event11]);
+	Input::add_event([$source="input.log", $name="types7", $fields=Val, $ev="not-an-event"]);
+	Input::add_event([$source="input.log", $name="types8", $fields=Val, $ev=event11, $error_ev="not-an-event"]);
 
 	schedule 3secs { kill_me() };
 	}

@@ -7,8 +7,16 @@
 result=0
 BTEST=$(pwd)/auxil/btest/btest
 
-if [[ -z "${CIRRUS_CI}" ]]; then
-    # Set default values to use in place of env. variables set by Cirrus CI.
+# Due to issues with DNS lookups on macOS, one of the Cirrus support people recommended we
+# run our tests as root. See https://github.com/cirruslabs/cirrus-ci-docs/issues/1302 for
+# more details.
+# TODO: Is this necessary anymore?
+if [[ "${ZEEK_CI_RUNNER_OS}" == "macos" ]]; then
+    BTEST="sudo ${BTEST}"
+fi
+
+if [[ -z "${ZEEK_CI}" ]]; then
+    # Set default values to use in place of env. variables set by CI.
     ZEEK_CI_CPUS=1
     [[ $(which nproc) ]] && ZEEK_CI_CPUS=$(nproc)
     [[ -n "${1}" ]] && ZEEK_CI_CPUS=${1}
@@ -17,7 +25,17 @@ if [[ -z "${CIRRUS_CI}" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-. ${SCRIPT_DIR}/common.sh
+
+if [ -n "${ZEEK_TSAN_OPTIONS}" ]; then
+    export TSAN_OPTIONS=${ZEEK_TSAN_OPTIONS}
+fi
+
+if [ -n "${ZEEK_TEST_ULIMIT_OPEN_FILES}" ]; then
+    if ! ulimit -n "${ZEEK_TEST_ULIMIT_OPEN_FILES}"; then
+        echo "failed to run ulimit -n ${ZEEK_TEST_ULIMIT_OPEN_FILES}" >&2
+        exit 1
+    fi
+fi
 
 function pushd {
     command pushd "$@" >/dev/null || exit 1
@@ -35,19 +53,15 @@ function banner {
     printf "+--------------------------------------------------------------+\n"
 }
 
-function run_unit_tests {
-    banner "Running unit tests"
-
-    pushd build
-    (. ./zeek-path-dev.sh && zeek --test) || result=1
-    popd
-    return 0
-}
-
 function prep_artifacts {
     banner "Prepare artifacts"
     [[ -d .tmp ]] && rm -rf .tmp/script-coverage && tar -czf tmp.tar.gz .tmp
     junit2html btest-results.xml btest-results.html
+
+    # Copy these into a location where CI hosts can collect all of the results from at
+    # once.
+    mkdir -p ${CIRCLE_WORKING_DIRECTORY}/btest-results/$1
+    cp btest-results.xml ${CIRCLE_WORKING_DIRECTORY}/btest-results/$1/results.xml
 }
 
 function run_btests {
@@ -55,34 +69,25 @@ function run_btests {
 
     pushd testing/btest
 
-    # Commenting out this line in btest.cfg causes the script profiling/coverage
-    # to be disabled. We do this for the sanitizer build right now because of a
-    # fairly significant performance bug when running tests.
-    if [ "${ZEEK_CI_DISABLE_SCRIPT_PROFILING}" = "1" ]; then
-        sed -i 's/^ZEEK_PROFILER_FILE/#ZEEK_PROFILER_FILE/g' btest.cfg
-    fi
-
-    ${BTEST} -z ${ZEEK_CI_BTEST_RETRIES} -d -b -x btest-results.xml -j ${ZEEK_CI_BTEST_JOBS} || result=1
+    ZEEK_PROFILER_FILE=$(pwd)/.tmp/script-coverage/XXXXXX \
+        ${BTEST} -z ${ZEEK_CI_BTEST_RETRIES} -d -A -x btest-results.xml -j ${ZEEK_CI_BTEST_JOBS} ${ZEEK_CI_BTEST_EXTRA_ARGS} || result=1
     make coverage
-    prep_artifacts
+    prep_artifacts btest
     popd
     return 0
 }
 
 function run_external_btests {
-    # Commenting out this line in btest.cfg causes the script profiling/coverage
-    # to be disabled. We do this for the sanitizer build right now because of a
-    # fairly significant performance bug when running tests.
-    if [ "${ZEEK_CI_DISABLE_SCRIPT_PROFILING}" = "1" ]; then
-        pushd testing/external
-        sed -i 's/^ZEEK_PROFILER_FILE/#ZEEK_PROFILER_FILE/g' subdir-btest.cfg
-        popd
+    if [[ ${ZEEK_CI_SKIP_EXTERNAL_BTESTS} -eq 1 ]]; then
+        printf "Skipping external tests as requested by task configuration\n\n"
+        return 0
     fi
 
     local zeek_testing_pid=""
     local zeek_testing_pid_private=""
     pushd testing/external/zeek-testing
-    ${BTEST} -d -b -x btest-results.xml -j ${ZEEK_CI_BTEST_JOBS} >btest.out 2>&1 &
+    ZEEK_PROFILER_FILE=$(pwd)/.tmp/script-coverage/XXXXXX \
+        ${BTEST} -d -A -x btest-results.xml -j ${ZEEK_CI_BTEST_JOBS} ${ZEEK_CI_BTEST_EXTRA_ARGS} >btest.out 2>&1 &
     zeek_testing_pid=$!
     popd
 
@@ -90,7 +95,8 @@ function run_external_btests {
         pushd testing/external/zeek-testing-private
         # Note that we don't use btest's "-d" flag or generate/upload any
         # artifacts to prevent leaking information about the private pcaps.
-        ${BTEST} -b -j ${ZEEK_CI_BTEST_JOBS} >btest.out 2>&1 &
+        ZEEK_PROFILER_FILE=$(pwd)/.tmp/script-coverage/XXXXXX \
+            ${BTEST} -A -j ${ZEEK_CI_BTEST_JOBS} >btest.out 2>&1 &
         zeek_testing_private_pid=$!
         popd
     fi
@@ -100,7 +106,7 @@ function run_external_btests {
     pushd testing/external/zeek-testing
     cat btest.out
     make coverage
-    prep_artifacts
+    prep_artifacts zeek-testing
     popd
 
     if [[ -n "${zeek_testing_private_pid}" ]]; then
@@ -117,8 +123,11 @@ function run_external_btests {
 
 banner "Start tests: ${ZEEK_CI_CPUS} cpus, ${ZEEK_CI_BTEST_JOBS} btest jobs"
 
-run_unit_tests
 run_btests
+if [[ ${result} -eq 1 ]]; then
+    exit 1
+fi
+
 run_external_btests
 
 exit ${result}

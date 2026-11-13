@@ -1,3 +1,9 @@
+# Can't use this test for -O gen-C++ because of multiple simultaneous
+# Zeek runs.
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+#
+# @TEST-GROUP: broker
+#
 # @TEST-PORT: BROKER_PORT
 #
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
@@ -6,7 +12,7 @@
 # @TEST-EXEC: btest-bg-wait 45
 # @TEST-EXEC: btest-diff recv/recv.out
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -39,9 +45,9 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 	terminate();
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -102,4 +108,4 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 	terminate();
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE

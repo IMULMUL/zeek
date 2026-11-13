@@ -1,68 +1,91 @@
 
 #include "Plugin.h"
 
-#include <Func.h>
-#include <Event.h>
-#include <Conn.h>
-#include <Desc.h>
-#include <threading/Formatter.h>
-#include <RunState.h>
+#include "zeek/Conn.h"
+#include "zeek/Desc.h"
+#include "zeek/Event.h"
+#include "zeek/Func.h"
+#include "zeek/RunState.h"
+#include "zeek/threading/Formatter.h"
 
-namespace btest::plugin::Log_Hooks { Plugin plugin; }
+namespace btest::plugin::Log_Hooks {
+Plugin plugin;
+}
 
 using namespace btest::plugin::Log_Hooks;
 
-zeek::plugin::Configuration Plugin::Configure()
-	{
-	round = 0;
-	EnableHook(zeek::plugin::HOOK_LOG_INIT);
-	EnableHook(zeek::plugin::HOOK_LOG_WRITE);
+zeek::plugin::Configuration Plugin::Configure() {
+    round = 0;
+    EnableHook(zeek::plugin::HOOK_LOG_INIT);
+    EnableHook(zeek::plugin::HOOK_LOG_WRITE);
 
-	zeek::plugin::Configuration config;
-	config.name = "Log::Hooks";
-	config.description = "Exercises Log hooks";
-	config.version.major = 1;
-	config.version.minor = 0;
-	config.version.patch = 0;
-	return config;
-	}
+    zeek::plugin::Configuration config;
+    config.name = "Log::Hooks";
+    config.description = "Exercises Log hooks";
+    config.version.major = 1;
+    config.version.minor = 0;
+    config.version.patch = 0;
+    return config;
+}
 
-void Plugin::HookLogInit(const std::string& writer, const std::string& instantiating_filter, bool local,
-                         bool remote, const zeek::logging::WriterBackend::WriterInfo& info,
-                         int num_fields, const zeek::threading::Field* const* fields)
-	{
-	zeek::ODesc d;
+void Plugin::HookLogInit(const std::string& writer, const std::string& instantiating_filter, bool local, bool remote,
+                         const zeek::logging::WriterBackend::WriterInfo& info, int num_fields,
+                         const zeek::threading::Field* const* fields) {
+    zeek::ODesc d;
 
-	d.Add("{");
-	for ( int i=0; i < num_fields; i++ )
-		{
-		const zeek::threading::Field* f = fields[i];
+    d.Add("{");
+    for ( int i = 0; i < num_fields; i++ ) {
+        const zeek::threading::Field* f = fields[i];
 
-		if ( i > 0 )
-			d.Add(", ");
+        if ( i > 0 )
+            d.Add(", ");
 
-		d.Add(f->name);
-		d.Add(" (");
-		d.Add(f->TypeName());
-		d.Add(")");
-		}
-	d.Add("}");
+        d.Add(f->name);
+        d.Add(" (");
+        d.Add(f->TypeName());
+        d.Add(")");
+    }
+    d.Add("}");
 
-	fprintf(stderr, "%.6f %-15s %s %d/%d %s\n", zeek::run_state::network_time,
-	        "| HookLogInit", info.path, local, remote, d.Description());
-	}
+    fprintf(stderr, "%.6f %-15s %s %d/%d %s\n", zeek::run_state::network_time, "| HookLogInit", info.path, local,
+            remote, d.Description());
+
+    fields_init = fields;
+    info_addr_init = &info;
+}
 
 bool Plugin::HookLogWrite(const std::string& writer, const std::string& filter,
                           const zeek::logging::WriterBackend::WriterInfo& info, int num_fields,
-                          const zeek::threading::Field* const* fields, zeek::threading::Value** vals)
-	{
-	round++;
-	if ( round == 1 ) // do not output line
-		return false;
-	else if ( round == 2 )
-		vals[0]->val.int_val = 0;
-	else if ( round == 3 )
-		vals[1]->present = false;
+                          const zeek::threading::Field* const* fields, zeek::threading::Value** vals) {
+    round++;
+    if ( round == 1 ) // do not output line
+        return false;
+    else if ( round == 2 )
+        vals[0]->val.int_val = 0;
+    else if ( round == 3 )
+        vals[1]->present = false;
 
-	return true;
-	}
+    if ( ! info_addr_write )
+        info_addr_write = &info;
+    else if ( info_addr_write != &info )
+        fprintf(stderr, "FAIL: subsequent info addr %p differs from %p\n", &info, info_addr_write);
+
+    if ( ! fields_write )
+        fields_write = fields;
+    else if ( fields_write != fields )
+        fprintf(stderr, "FAIL: subsequent fields addr %p differs from %p\n", fields, fields_write);
+
+    return true;
+}
+
+void Plugin::Done() {
+    if ( ! info_addr_init || ! info_addr_write || info_addr_init != info_addr_write ) {
+        fprintf(stderr, "FAIL: info_addr_init=%p info_addr_write=%p\n", info_addr_init, info_addr_write);
+        exit(1);
+    }
+
+    if ( ! fields_init || ! fields_write || fields_init != fields_write ) {
+        fprintf(stderr, "FAIL: fields_init=%p fields_write=%p\n", fields_init, fields_write);
+        exit(1);
+    }
+}

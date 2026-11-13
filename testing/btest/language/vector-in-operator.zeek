@@ -1,3 +1,4 @@
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
 
@@ -7,7 +8,9 @@ local n = 0;
 vec[5] = "five";
 vec[7] = "seven";
 print vec;
-vec = vec + ".exe";
+
+for ( i in vec )
+	vec[i] += ".exe";
 
 for ( c in ten )
 	{

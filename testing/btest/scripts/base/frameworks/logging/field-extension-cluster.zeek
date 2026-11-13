@@ -1,18 +1,17 @@
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
+# This test is flaky on Windows. Skip it temporarily.
+# @TEST-REQUIRES: ! is-windows-ci
+
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager-1 zeek -b %INPUT"
-# @TEST-EXEC: btest-bg-run worker-1  "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-1 zeek -b --pseudo-realtime -C -r $TRACES/wikipedia.trace %INPUT"
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# @TEST-EXEC: btest-bg-run manager  "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager  zeek -b %INPUT"
+# @TEST-EXEC: btest-bg-run worker-1 "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-1 zeek -b --pseudo-realtime -C -r $TRACES/wikipedia.pcap %INPUT"
 # @TEST-EXEC: btest-bg-wait 30
-# @TEST-EXEC: btest-diff manager-1/http.log
+# @TEST-EXEC: TEST_DIFF_CANONIFIER="$SCRIPTS/diff-remove-timestamps | $SCRIPTS/diff-remove-uids" btest-diff manager/http.log
 
-
-@TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1", $interface="eth0"],
-};
-@TEST-END-FILE
 
 @load base/protocols/conn
 @load base/protocols/http

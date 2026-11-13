@@ -1,151 +1,261 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
 #include "zeek/script_opt/CPP/Compile.h"
-#include "zeek/script_opt/ProfileFunc.h"
+#include "zeek/script_opt/IDOptInfo.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 using namespace std;
 
-void CPPCompile::CreateGlobal(const ID* g)
-	{
-	auto gn = string(g->Name());
-	bool is_bif = pfs.BiFGlobals().count(g) > 0;
+bool CPPCompile::CreateGlobal(IDPtr g) {
+    auto gn = string(g->Name());
+    bool is_bif = pfs->BiFGlobals().contains(g);
 
-	if ( pfs.Globals().count(g) == 0 )
-		{
-		// Only used in the context of calls.  If it's compilable,
-		// then we'll call it directly.
-		if ( compilable_funcs.count(gn) > 0 )
-			{
-			AddGlobal(gn, "zf");
-			return;
-			}
+    if ( ! accessed_globals.contains(g) ) {
+        // Only used in the context of calls.  If it's compilable,
+        // then we'll call it directly.
+        if ( compilable_funcs.contains(gn) ) {
+            AddGlobal(gn, "zf");
+            return false;
+        }
 
-		if ( is_bif )
-			{
-			AddBiF(g, false);
-			return;
-			}
-		}
+        if ( is_bif ) {
+            AddBiF(g, false);
+            return false;
+        }
+    }
 
-	if ( AddGlobal(gn, "gl") )
-		{ // We'll be creating this global.
-		Emit("IDPtr %s;", globals[gn]);
+    bool should_init = false;
 
-		if ( pfs.Events().count(gn) > 0 )
-			// This is an event that's also used as a variable.
-			Emit("EventHandlerPtr %s_ev;", globals[gn]);
+    if ( AddGlobal(gn, "gl") ) { // We'll be creating this global.
+        Emit("IDPtr %s;", globals[gn]);
 
-		auto gi = make_shared<GlobalInitInfo>(this, g, globals[gn]);
-		global_id_info->AddInstance(gi);
-		global_gis[g] = gi;
-		}
+        if ( accessed_events.contains(gn) )
+            // This is an event that's also used as a variable.
+            Emit("EventHandlerPtr %s_ev;", globals[gn]);
 
-	if ( is_bif )
-		// This is a BiF that's referred to in a non-call context,
-		// so we didn't already add it above.
-		AddBiF(g, true);
+        should_init = true;
+    }
 
-	global_vars.emplace(g);
-	}
+    if ( is_bif )
+        // This is a BiF that's referred to in a non-call context,
+        // so we didn't already add it above.
+        AddBiF(g, true);
 
-std::shared_ptr<CPP_InitInfo> CPPCompile::RegisterGlobal(const ID* g)
-	{
-	auto gg = global_gis.find(g);
+    global_vars.emplace(g);
 
-	if ( gg == global_gis.end() )
-		{
-		auto gn = string(g->Name());
+    return should_init;
+}
 
-		if ( globals.count(gn) == 0 )
-			// Create a name for it.
-			(void)IDNameStr(g);
+std::shared_ptr<CPP_InitInfo> CPPCompile::RegisterGlobal(IDPtr g) {
+    auto gg = global_gis.find(g);
 
-		auto gi = make_shared<GlobalInitInfo>(this, g, globals[gn]);
-		global_id_info->AddInstance(gi);
-		global_gis[g] = gi;
-		return gi;
-		}
-	else
-		return gg->second;
-	}
+    if ( gg != global_gis.end() )
+        return gg->second;
 
-void CPPCompile::AddBiF(const ID* b, bool is_var)
-	{
-	auto bn = b->Name();
-	auto n = string(bn);
-	if ( is_var )
-		n = n + "_"; // make the name distinct
+    auto gn = string(g->Name());
 
-	if ( AddGlobal(n, "bif") )
-		Emit("Func* %s;", globals[n]);
+    if ( ! globals.contains(gn) ) {
+        // Create a name for it.
+        (void)IDNameStr(g);
 
-	ASSERT(BiFs.count(globals[n]) == 0);
-	BiFs[globals[n]] = bn;
-	}
+        // That call may have created the initializer, in which
+        // case no need to repeat it.
+        gg = global_gis.find(g);
+        if ( gg != global_gis.end() )
+            return gg->second;
+    }
 
-bool CPPCompile::AddGlobal(const string& g, const char* suffix)
-	{
-	if ( globals.count(g) > 0 )
-		return false;
+    auto gi = GenerateGlobalInit(g);
+    global_id_info->AddInstance(gi);
+    global_gis[g] = gi;
 
-	globals.emplace(g, GlobalName(g, suffix));
-	return true;
-	}
+    return gi;
+}
 
-void CPPCompile::RegisterEvent(string ev_name)
-	{
-	body_events[body_name].emplace_back(move(ev_name));
-	}
+std::shared_ptr<CPP_InitInfo> CPPCompile::GenerateGlobalInit(IDPtr g) {
+    auto gi = global_gis.find(g);
+    if ( gi != global_gis.end() )
+        return gi->second;
 
-const string& CPPCompile::IDNameStr(const ID* id)
-	{
-	if ( id->IsGlobal() )
-		{
-		auto g = string(id->Name());
-		if ( globals.count(g) == 0 )
-			CreateGlobal(id);
-		return globals[g];
-		}
+    auto gn = string(g->Name());
+    if ( ! standalone )
+        return make_shared<GlobalLookupInitInfo>(this, g, globals[gn]);
 
-	auto l = locals.find(id);
-	ASSERT(l != locals.end());
-	return l->second;
-	}
+    if ( obj_matches_opt_files(g) == AnalyzeDecision::SHOULD )
+        return make_shared<GlobalInitInfo>(this, g, globals[gn]);
 
-string CPPCompile::LocalName(const ID* l) const
-	{
-	auto n = l->Name();
-	auto without_module = strstr(n, "::");
+    // It's not a global that's created by the scripts we're compiling,
+    // but it might have a redef in those scripts, in which case we need
+    // to generate an initializer that will both look it up and then assign
+    // it to that value.
+    bool needs_redef = false;
 
-	if ( without_module )
-		return Canonicalize(without_module + 2);
-	else
-		return Canonicalize(n);
-	}
+    for ( const auto& i_e : g->GetOptInfo()->GetInitExprs() )
+        if ( obj_matches_opt_files(i_e) == AnalyzeDecision::SHOULD ) {
+            needs_redef = true;
+            break;
+        }
 
-string CPPCompile::Canonicalize(const char* name) const
-	{
-	string cname;
+    return make_shared<GlobalLookupInitInfo>(this, g, globals[gn], needs_redef);
+}
 
-	for ( int i = 0; name[i]; ++i )
-		{
-		auto c = name[i];
+void CPPCompile::AddBiF(IDPtr b, bool is_var) {
+    auto bn = b->Name();
+    auto n = string(bn);
+    if ( is_var )
+        n = n + "_"; // make the name distinct
 
-		// Strip <>'s - these get introduced for lambdas.
-		if ( c == '<' || c == '>' )
-			continue;
+    if ( AddGlobal(n, "bif") )
+        Emit("Func* %s;", globals[n]);
 
-		if ( c == ':' || c == '-' )
-			c = '_';
+    ASSERT(! BiFs.contains(globals[n]));
+    BiFs[globals[n]] = bn;
+}
 
-		cname += c;
-		}
+bool CPPCompile::AddGlobal(const string& g, const char* suffix) {
+    if ( globals.contains(g) )
+        return false;
 
-	// Add a trailing '_' to avoid conflicts with C++ keywords.
-	return cname + "_";
-	}
+    globals.emplace(g, GlobalName(g, suffix));
+    return true;
+}
 
-	} // zeek::detail
+void CPPCompile::RegisterEvent(string ev_name) { body_events[body_name].emplace_back(std::move(ev_name)); }
+
+class FixedInitChecker : public TraversalCallback {
+public:
+    FixedInitChecker() = default;
+
+    bool IsFixed() const { return is_fixed; }
+
+    TraversalCode PreExpr(const Expr* e) override;
+
+private:
+    TraversalCode NotFixed() {
+        is_fixed = false;
+        return TC_ABORTALL;
+    }
+
+    bool is_fixed = true;
+};
+
+TraversalCode FixedInitChecker::PreExpr(const Expr* e) {
+    switch ( e->Tag() ) {
+        case EXPR_NAME: {
+            const auto& id = e->AsNameExpr()->IdPtr();
+            if ( ! id->IsGlobal() || ! id->IsConst() )
+                return NotFixed();
+            return TC_CONTINUE;
+        }
+
+        case EXPR_CALL: // Too hard to analyze given the modest gain
+            return NotFixed();
+
+        case EXPR_LAMBDA:
+            // A lambda itself is fixed, even if its body might not be.
+            // Avoid going into the body.
+            return TC_ABORTSTMT;
+
+        default: return TC_CONTINUE;
+    }
+}
+
+bool CPPCompile::HasFixedInit(const IDPtr& g) const {
+    if ( ! g->IsGlobal() || ! g->GetOptInfo() )
+        return false;
+
+    if ( ! IsAggr(g->GetType()) )
+        // Fixed inits are only applicable for aggregates.
+        return false;
+
+    for ( const auto& ie : g->GetOptInfo()->GetInitExprs() ) {
+        // We use GetOp2() because initializations are represented
+        // as some form of assignment.
+        FixedInitChecker c;
+        ie->GetOp2()->Traverse(&c);
+        if ( ! c.IsFixed() )
+            return false;
+    }
+
+    return true;
+}
+
+ValPtr CPPCompile::GenFixedInit(IDPtr g) const {
+    for ( const auto& ie : g->GetOptInfo()->GetInitExprs() )
+        try {
+            (void)eval_in_isolation(ie);
+        } catch ( InterpreterException& ) {
+            g->Error("re-initialization for compiling standalone script failed");
+        }
+
+    return g->GetVal();
+}
+
+const string& CPPCompile::IDNameStr(const IDPtr& id) {
+    if ( id->IsGlobal() ) {
+        auto g = string(id->Name());
+        if ( ! globals.contains(g) )
+            CreateGlobal(id);
+        return globals[g];
+    }
+
+    auto l = locals.find(id);
+    ASSERT(l != locals.end());
+    return l->second;
+}
+
+static string trim_name(const IDPtr& id) {
+    auto n = id->Name();
+    auto without_module = strstr(n, "::");
+
+    while ( without_module ) {
+        n = without_module + 2;
+        without_module = strstr(n, "::");
+    }
+
+    string ns = n;
+
+    // Look for suffices added by check_params() (src/Var.cc).
+    static auto hidden_suffix = "-hidden";
+    static auto hidden_suffix_len = strlen(hidden_suffix);
+    auto hidden_loc = ns.find(hidden_suffix);
+
+    if ( hidden_loc != string::npos )
+        ns.erase(hidden_loc, hidden_loc + hidden_suffix_len);
+
+    return ns;
+}
+
+string CPPCompile::LocalName(const IDPtr& l) const { return Canonicalize(trim_name(l)); }
+
+string CPPCompile::CaptureName(const IDPtr& c) const {
+    // We want to strip both the module and any inlining appendage.
+    auto tn = trim_name(c);
+
+    auto appendage = tn.find('.');
+    if ( appendage != string::npos )
+        tn.erase(tn.begin() + appendage, tn.end());
+
+    return Canonicalize(tn);
+}
+
+string CPPCompile::Canonicalize(const std::string& name) const {
+    string cname;
+
+    for ( auto c : name ) {
+        // Strip <>'s - these get introduced for lambdas.
+        if ( c == '<' || c == '>' )
+            continue;
+
+        if ( c == ':' || c == '-' || c == '.' )
+            c = '_';
+
+        cname += c;
+    }
+
+    // Add a trailing '_' to avoid conflicts with C++ keywords.
+    return cname + "_";
+}
+
+} // namespace zeek::detail

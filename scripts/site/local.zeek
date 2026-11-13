@@ -9,18 +9,16 @@ redef digest_salt = "Please change this value.";
 # This script logs which scripts were loaded during each run.
 @load misc/loaded-scripts
 
-# Apply the default tuning scripts for common tuning settings.
-@load tuning/defaults
-
 # Estimate and log capture loss.
 @load misc/capture-loss
 
 # Enable logging of memory, packet and lag statistics.
 @load misc/stats
 
-# Load the scan detection script.  It's disabled by default because
-# it often causes performance issues.
-#@load misc/scan
+# For TCP scan detection, we recommend installing the package from
+# 'https://github.com/ncsa/bro-simple-scan'. E.g., by installing it via
+#
+#     zkg install ncsa/bro-simple-scan
 
 # Detect traceroute being run on the network. This could possibly cause
 # performance trouble when there are a lot of traceroutes on your network.
@@ -76,7 +74,7 @@ redef digest_salt = "Please change this value.";
 @load protocols/ssh/interesting-hostnames
 
 # Detect SQL injection attacks.
-@load protocols/http/detect-sqli
+@load protocols/http/detect-sql-injection
 
 #### Network File Handling ####
 
@@ -89,9 +87,21 @@ redef digest_salt = "Please change this value.";
 # Extend email alerting to include hostnames
 @load policy/frameworks/notice/extend-email/hostnames
 
+# Extend the notice.log with Community ID hashes
+# @load policy/frameworks/notice/community-id
+
+# Enable logging of telemetry data into telemetry.log and telemetry_histogram.log.
+# This can impact performance if periodic metrics collection makes up a large
+# part of Zeek's work, such as with "sparse" long-running pcaps.
+# @load policy/frameworks/telemetry/log
+
 # Uncomment the following line to enable detection of the heartbleed attack. Enabling
 # this might impact performance a bit.
 # @load policy/protocols/ssl/heartbleed
+
+# Uncomment the following line to enable logging of Community ID hashes in
+# the conn.log file.
+# @load policy/protocols/conn/community-id-logging
 
 # Uncomment the following line to enable logging of connection VLANs. Enabling
 # this adds two VLAN fields to the conn.log file.

@@ -2,6 +2,15 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
 
+module Monochrome;
+export {
+	type color: enum { BLACK, WHITE };
+}
+
+module GLOBAL;
+
+type color: enum { RED, BLUE };
+
 type myrec: record {
 	myfield: bool;
 };
@@ -11,6 +20,8 @@ type tt: record {
 	b: string &default="Bar";
 	c: double &optional;
 	d: string &log;
+	e: color &default=BLUE;
+	f: Monochrome::color &log;
 	m: myrec;
 };
 
@@ -30,6 +41,8 @@ type cr: record {
      c: set[double, tt];
      d: table[double, string] of table[string] of vector of string;
      e: vector of vector of string;
+     f: vector of color;
+     g: table[string] of color;
 };
 
 event zeek_init()
@@ -39,7 +52,9 @@ event zeek_init()
     local t: record_field_table;
     t = record_fields(x);
     print t;
-    print t["c"]?$value;
+    print "c value", t["c"]?$value;
+    print "c default ", t["c"]?$default_val;
+    print "c optional", t["c"]$optional;
 
     t = record_fields(x$e);
     print t;

@@ -15,9 +15,14 @@ traffic analysis and security monitoring.
 [_Development_](#development) —
 [_License_](#license)
 
-Follow us on Twitter at [@zeekurity](https://twitter.com/zeekurity).
-
 [![Coverage Status](https://coveralls.io/repos/github/zeek/zeek/badge.svg?branch=master)](https://coveralls.io/github/zeek/zeek?branch=master)
+[![Build Status](https://dl.circleci.com/status-badge/img/gh/zeek/zeek/tree/master.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/zeek/zeek/tree/master)
+
+[![Slack](https://img.shields.io/badge/slack-@zeek-brightgreen.svg?logo=slack)](https://zeek.org/slack)
+[![Discourse](https://img.shields.io/discourse/status?server=https%3A%2F%2Fcommunity.zeek.org)](https://community.zeek.org)
+
+[![Mastodon](https://img.shields.io/badge/mastodon-@zeek@infosec.exchange-brightgreen.svg?logo=mastodon)](https://infosec.exchange/@zeek)
+[![Bluesky](https://img.shields.io/badge/bluesky-@zeek-brightgreen.svg?logo=bluesky)](https://bsky.app/profile/zeek.org)
 
 </h4>
 
@@ -47,13 +52,13 @@ Getting Started
 
 The best place to find information about getting started with Zeek is
 our web site [www.zeek.org](https://www.zeek.org), specifically the
-[documentation](https://www.zeek.org/documentation/index.html) section
+[documentation](https://docs.zeek.org/en/stable/index.html) section
 there. On the web site you can also find downloads for stable
 releases, tutorials on getting Zeek set up, and many other useful
 resources.
 
-You can find release notes in [NEWS](https://github.com/zeek/zeek/blob/master/NEWS),
-and a complete record of all changes in [CHANGES](https://github.com/zeek/zeek/blob/master/CHANGES).
+You can find release notes in [NEWS](https://github.com/zeek/zeek/blob/master/NEWS)
+and individual changes in the [commit history](https://github.com/zeek/zeek/commits/master/).
 
 To work with the most recent code from the development branch of Zeek,
 clone the master git repository:
@@ -81,7 +86,7 @@ And run it:
 `zeek hello.zeek`
 
 For learning more about the Zeek scripting
-language, [try.zeek.org](http://try.zeek.org) is a great resource.
+language, [try.zeek.org](https://try.zeek.org) is a great resource.
 
 Development
 -----------
@@ -100,12 +105,23 @@ you might find
 [these](https://github.com/zeek/zeek/labels/good%20first%20issue)
 to be a good place to get started. More information on Zeek's
 development can be found
-[here](https://www.zeek.org/development/index.html), and information
+[here](https://docs.zeek.org/en/current/devel/index.html), and information
 about its community and mailing lists (which are fairly active) can be
-found [here](https://www.zeek.org/community/index.html).
+found [here](https://www.zeek.org/community/).
 
 License
 -------
 
 Zeek comes with a BSD license, allowing for free use with virtually no
 restrictions. You can find it [here](https://github.com/zeek/zeek/blob/master/COPYING).
+
+
+Tooling
+-------
+
+We use the following tooling to help discover issues to fix, amongst a number of
+others.
+
+- [Clang-Tidy](https://clang.llvm.org/extra/clang-tidy/)
+- [Coverity](https://scan.coverity.com/projects/bro)
+- [PVS-Studio](https://pvs-studio.com/en/pvs-studio/?utm_source=github&utm_medium=organic&utm_campaign=open_source) - static analyzer for C, C++, C#, and Java code.

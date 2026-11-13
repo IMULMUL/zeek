@@ -1,5 +1,8 @@
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
+
 # Check if @if can be used to alternative function/event definitions
 
 @if ( 1==1 )

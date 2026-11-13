@@ -1,10 +1,9 @@
-# @TEST-EXEC: zeek -b -r $TRACES/smtp.trace %INPUT
+# @TEST-EXEC: zeek -b -r $TRACES/smtp.pcap %INPUT
 # @TEST-EXEC: btest-diff conn.log
 
 @load base/protocols/conn
 @load base/protocols/smtp
 @load base/protocols/dns
-@load base/frameworks/dpd
 @load base/frameworks/netcontrol
 
 event NetControl::init()
@@ -15,7 +14,7 @@ event NetControl::init()
 
 event connection_established(c: connection)
 	{
-	local e = NetControl::Entity($ty=NetControl::ADDRESS, $ip=addr_to_subnet(c$id$orig_h));
+	local e = NetControl::Entity($ty=NetControl::ADDRESS, $ip=c$id$orig_h as subnet);
 	local r = NetControl::Rule($ty=NetControl::DROP, $target=NetControl::MONITOR, $entity=e, $expire=10min);
 
 	NetControl::add_rule(r);

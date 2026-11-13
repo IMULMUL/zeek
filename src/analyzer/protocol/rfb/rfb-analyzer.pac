@@ -49,10 +49,10 @@ refine flow RFB_Flow += {
 		if ( rfb_server_parameters )
 			{
 			auto vec_ptr = ${msg.name};
-			auto name_ptr = &((*vec_ptr)[0]);
+			auto name_ptr = reinterpret_cast<const char*>(vec_ptr->data());
 			zeek::BifEvent::enqueue_rfb_server_parameters(
 			    connection()->zeek_analyzer(), connection()->zeek_analyzer()->Conn(),
-			    zeek::make_intrusive<zeek::StringVal>(${msg.name}->size(), (const char*)name_ptr),
+			    zeek::make_intrusive<zeek::StringVal>(${msg.name}->size(), name_ptr),
 			    ${msg.width},
 			    ${msg.height});
 			}
@@ -61,15 +61,15 @@ refine flow RFB_Flow += {
 
 	function proc_handle_security_result(result : uint32) : bool
 		%{
-		if ( rfb_auth_result )
-			zeek::BifEvent::enqueue_rfb_auth_result(connection()->zeek_analyzer(), connection()->zeek_analyzer()->Conn(), result);
+		if ( rfb_authentication_result )
+			zeek::BifEvent::enqueue_rfb_authentication_result(connection()->zeek_analyzer(), connection()->zeek_analyzer()->Conn(), result == 0);
 		return true;
 		%}
 };
 
 refine connection RFB_Conn += {
 	%member{
-		enum ServerState {
+		enum ServerState : uint8_t {
 			SERVER_VERSION            =  0,
 			SERVER_AUTH_TYPE          =  1,
 			SERVER_AUTH_TYPE37        =  2,
@@ -84,7 +84,7 @@ refine connection RFB_Conn += {
 			SERVER_INVALID            =100,
 		};
 
-		enum ClientState {
+		enum ClientState : uint8_t {
 			CLIENT_VERSION           =  0,
 			CLIENT_AUTH_SELECTION    =  1,
 			CLIENT_AUTH_VNC_RESPONSE =  2,

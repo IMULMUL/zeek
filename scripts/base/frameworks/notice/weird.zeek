@@ -52,7 +52,7 @@ export {
 		## The peer that originated this weird.  This is helpful in
 		## cluster deployments if a particular cluster node is having
 		## trouble to help identify which node is having trouble.
-		peer:   string  &log &optional &default=peer_description;
+		peer:   string  &log &default=peer_description;
 
 		## The source of the weird. When reported by an analyzer, this
 		## should be the name of the analyzer.
@@ -136,9 +136,17 @@ export {
 		["FIN_advanced_last_seq"]               = ACTION_LOG,
 		["FIN_after_reset"]                     = ACTION_IGNORE,
 		["FIN_storm"]                           = ACTION_NOTICE_PER_ORIG,
+		["FTP_max_command_length_exceeded"]     = ACTION_LOG_PER_CONN,
+		["FTP_too_many_pending_commands"]       = ACTION_LOG_PER_CONN,
+		["FTP_user_too_long"]                   = ACTION_LOG_PER_CONN,
+		["FTP_reply_msg_too_long"]              = ACTION_LOG_PER_CONN,
+		["FTP_arg_too_long"]                    = ACTION_LOG_PER_CONN,
+		["FTP_password_too_long"]               = ACTION_LOG_PER_CONN,
 		["HTTP_bad_chunk_size"]                 = ACTION_LOG,
 		["HTTP_chunked_transfer_for_multipart_message"] = ACTION_LOG,
+		["HTTP_excessive_pipelining"]           = ACTION_LOG,
 		["HTTP_overlapping_messages"]           = ACTION_LOG,
+		["HTTP_response_before_request"]        = ACTION_LOG,
 		["unknown_HTTP_method"]                 = ACTION_LOG,
 		["HTTP_version_mismatch"]               = ACTION_LOG,
 		["ident_request_addendum"]              = ACTION_LOG,
@@ -193,17 +201,23 @@ export {
 		["repeated_SYN_with_ack"]               = ACTION_LOG,
 		["responder_RPC_call"]                  = ACTION_LOG_PER_ORIG,
 		["rlogin_text_after_rejected"]          = ACTION_LOG,
+		["RPC_pending_calls_discarded"]         = ACTION_LOG,
 		["RPC_rexmit_inconsistency"]            = ACTION_LOG,
 		["RPC_underflow"]                       = ACTION_LOG,
 		["RST_storm"]                           = ACTION_LOG,
 		["RST_with_data"]                       = ACTION_LOG,
 		["SSL_many_server_names"]               = ACTION_LOG,
 		["simultaneous_open"]                   = ACTION_LOG_PER_CONN,
+		["smtp_mail_transaction_invalid"]       = ACTION_LOG_PER_CONN,
+		["smtp_excessive_invalid_mail_transactions"] = ACTION_LOG_PER_CONN,
 		["spontaneous_FIN"]                     = ACTION_IGNORE,
 		["spontaneous_RST"]                     = ACTION_IGNORE,
 		["SMB_parsing_error"]                   = ACTION_LOG,
+		["SMB_discarded_messages_state"]        = ACTION_LOG,
+		["SMB_discarded_dce_rpc_analyzers"]     = ACTION_LOG,
 		["no_smb_session_using_parsesambamsg"]  = ACTION_LOG,
 		["smb_andx_command_failed_to_parse"]    = ACTION_LOG,
+		["smb_tree_connect_andx_response_without_tree"] = ACTION_LOG_PER_CONN,
 		["transaction_subcmd_missing"]          = ACTION_LOG,
 		["successful_RPC_reply_to_invalid_request"] = ACTION_NOTICE_PER_ORIG,
 		["SYN_after_close"]                     = ACTION_LOG,
@@ -213,6 +227,7 @@ export {
 		["SYN_seq_jump"]                        = ACTION_LOG,
 		["SYN_with_data"]                       = ACTION_LOG_PER_ORIG,
 		["TCP_christmas"]                       = ACTION_LOG,
+		["TCP_scale_range"]                     = ACTION_LOG,
 		["truncated_ARP"]                       = ACTION_LOG,
 		["truncated_NTP"]                       = ACTION_LOG,
 		["UDP_datagram_length_mismatch"]        = ACTION_LOG_PER_ORIG,
@@ -246,6 +261,8 @@ export {
 		["internally_truncated_header"]         = ACTION_LOG,
 		["truncated_IP"]                        = ACTION_LOG,
 		["truncated_header"]                    = ACTION_LOG,
+		["SSH_max_packet_length_exceeded"]      = ACTION_LOG_PER_ORIG,
+		["SSH_max_string_length_exceeded"]      = ACTION_LOG_PER_ORIG,
 	} &default=ACTION_LOG &redef;
 
 	## To completely ignore a specific weird for a host, add the host
@@ -279,8 +296,6 @@ export {
 	##
 	## rec: The weird columns about to be logged to the weird stream.
 	global log_weird: event(rec: Info);
-
-	global weird: function(w: Weird::Info);
 }
 
 # These actions result in the output being limited and further redundant
@@ -305,7 +320,7 @@ const notice_actions = {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Weird::LOG, [$columns=Info, $ev=log_weird, $path="weird", $policy=log_policy]);
+	Log::create_stream(Weird::LOG, Log::Stream($columns=Info, $ev=log_weird, $path="weird", $policy=log_policy));
 	}
 
 function flow_id_string(src: addr, dst: addr): string
@@ -313,7 +328,7 @@ function flow_id_string(src: addr, dst: addr): string
 	return fmt("%s -> %s", src, dst);
 	}
 
-function weird(w: Weird::Info)
+function do_weird(w: Weird::Info)
 	{
 	local action = actions[w$name];
 
@@ -413,7 +428,7 @@ event conn_weird(name: string, c: connection, addl: string, source: string)
 	if ( source != "" )
 		i$source = source;
 
-	weird(i);
+	do_weird(i);
 	}
 
 event expired_conn_weird(name: string, id: conn_id, uid: string, addl: string, source: string)
@@ -427,7 +442,7 @@ event expired_conn_weird(name: string, id: conn_id, uid: string, addl: string, s
 	if ( source != "" )
 		i$source = source;
 
-	weird(i);
+	do_weird(i);
 	}
 
 event flow_weird(name: string, src: addr, dst: addr, addl: string, source: string)
@@ -445,7 +460,7 @@ event flow_weird(name: string, src: addr, dst: addr, addl: string, source: strin
 	if ( source != "" )
 		i$source = source;
 
-	weird(i);
+	do_weird(i);
 	}
 
 event net_weird(name: string, addl: string, source: string)
@@ -458,7 +473,7 @@ event net_weird(name: string, addl: string, source: string)
 	if ( source != "" )
 		i$source = source;
 
-	weird(i);
+	do_weird(i);
 	}
 
 event file_weird(name: string, f: fa_file, addl: string, source: string)
@@ -471,5 +486,5 @@ event file_weird(name: string, f: fa_file, addl: string, source: string)
 	if ( source != "" )
 		i$source = source;
 
-	weird(i);
+	do_weird(i);
 	}

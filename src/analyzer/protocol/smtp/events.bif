@@ -1,6 +1,6 @@
 ## Generated for client-side SMTP commands.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
+## See `Wikipedia <https://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
 ## for more information about the SMTP protocol.
 ##
 ## c: The connection.
@@ -20,12 +20,12 @@
 ##    mime_end_entity mime_entity_data mime_event mime_one_header mime_segment_data
 ##    smtp_data smtp_reply
 ##
-## .. note:: Zeek does not support the newer ETRN extension yet.
+## .. note:: Zeek does not support the ETRN extension.
 event smtp_request%(c: connection, is_orig: bool, command: string, arg: string%);
 
 ## Generated for server-side SMTP commands.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
+## See `Wikipedia <https://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
 ## for more information about the SMTP protocol.
 ##
 ## c: The connection.
@@ -39,7 +39,7 @@ event smtp_request%(c: connection, is_orig: bool, command: string, arg: string%)
 ##
 ## code: The reply's numerical code.
 ##
-## cmd: TODO.
+## cmd: The SMTP command this reply pertains to.
 ##
 ## msg: The reply's textual description.
 ##
@@ -51,7 +51,7 @@ event smtp_request%(c: connection, is_orig: bool, command: string, arg: string%)
 ##    mime_end_entity mime_entity_data mime_event mime_one_header mime_segment_data
 ##    smtp_data  smtp_request
 ##
-## .. note:: Zeek doesn't support the newer ETRN extension yet.
+## .. note:: Zeek doesn't support the ETRN extension.
 event smtp_reply%(c: connection, is_orig: bool, code: count, cmd: string, msg: string, cont_resp: bool%);
 
 ## Generated for DATA transmitted on SMTP sessions. This event is raised for
@@ -59,7 +59,7 @@ event smtp_reply%(c: connection, is_orig: bool, code: count, cmd: string, msg: s
 ## corresponding end marker ``.`` is seen. A handler may want to reassemble
 ## the pieces as they come in if stream-analysis is required.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
+## See `Wikipedia <https://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
 ## for more information about the SMTP protocol.
 ##
 ## c: The connection.
@@ -84,7 +84,7 @@ event smtp_data%(c: connection, is_orig: bool, data: string%);
 ## event that it sees even though it would not expect so at the current point
 ## of the communication.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
+## See `Wikipedia <https://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol>`__
 ## for more information about the SMTP protocol.
 ##
 ## c: The connection.

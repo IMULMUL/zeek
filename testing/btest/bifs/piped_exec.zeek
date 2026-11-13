@@ -1,13 +1,23 @@
 # @TEST-EXEC: zeek -b %INPUT >output
 # @TEST-EXEC: btest-diff output
 # @TEST-EXEC: btest-diff --binary test.txt
+# @TEST-EXEC: btest-diff --binary quoted.txt
 
 global cmds = "print \"hello world\";";
 cmds = string_cat(cmds, "\nprint \"foobar\";");
-if ( piped_exec("zeek", cmds) != T )
+
+# If we're using generated C++, turn that off for the pipe execution,
+# as otherwise we'll get a complaint that there's no corresponding
+# C++ bodies found for that zeek instance.
+if ( piped_exec("unset ZEEK_USE_CPP; zeek", cmds) != T )
 	exit(1);
 
 # Test null output.
 if ( piped_exec("cat > test.txt", "\x00\x00hello\x00\x00") != T )
 	exit(1);
 
+# Test program argument containing embedded double quotes
+if ( piped_exec("sh -c \"tr a-z A-Z > quoted.txt\"", "hello") != T )
+	exit(1);
+
+print "success!";

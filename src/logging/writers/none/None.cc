@@ -1,3 +1,5 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #include "zeek/logging/writers/none/None.h"
 
 #include <algorithm>
@@ -5,53 +7,46 @@
 
 #include "zeek/logging/writers/none/none.bif.h"
 
-namespace zeek::logging::writer::detail
-	{
+namespace zeek::logging::writer::detail {
 
-bool None::DoInit(const WriterInfo& info, int num_fields, const threading::Field* const* fields)
-	{
-	if ( BifConst::LogNone::debug )
-		{
-		std::cout << "[logging::writer::None]" << std::endl;
-		std::cout << "  path=" << info.path << std::endl;
-		std::cout << "  rotation_interval=" << info.rotation_interval << std::endl;
-		std::cout << "  rotation_base=" << info.rotation_base << std::endl;
+bool None::DoInit(const WriterInfo& info, int num_fields, const threading::Field* const* fields) {
+    if ( BifConst::LogNone::debug ) {
+        std::cout << "[logging::writer::None]\n";
+        std::cout << "  path=" << info.path << "\n";
+        std::cout << "  rotation_interval=" << info.rotation_interval << "\n";
+        std::cout << "  rotation_base=" << info.rotation_base << "\n";
 
-		// Output the config sorted by keys.
+        // Output the config sorted by keys.
 
-		std::vector<std::pair<std::string, std::string>> keys;
+        std::vector<std::pair<std::string, std::string>> keys;
 
-		for ( WriterInfo::config_map::const_iterator i = info.config.begin();
-		      i != info.config.end(); i++ )
-			keys.push_back(std::make_pair(i->first, i->second));
+        for ( const auto& [key, value] : info.config )
+            keys.emplace_back(key, value);
 
-		std::sort(keys.begin(), keys.end());
+        std::ranges::sort(keys);
 
-		for ( std::vector<std::pair<std::string, std::string>>::const_iterator i = keys.begin();
-		      i != keys.end(); i++ )
-			std::cout << "  config[" << (*i).first << "] = " << (*i).second << std::endl;
+        for ( const auto& [key, value] : keys )
+            std::cout << "  config[" << key << "] = " << value << "\n";
 
-		for ( int i = 0; i < num_fields; i++ )
-			{
-			const threading::Field* field = fields[i];
-			std::cout << "  field " << field->name << ": " << type_name(field->type) << std::endl;
-			}
+        for ( int i = 0; i < num_fields; i++ ) {
+            const threading::Field* field = fields[i];
+            std::cout << "  field " << field->name << ": " << type_name(field->type) << "\n";
+        }
 
-		std::cout << std::endl;
-		}
+        std::cout << "\n";
+        std::cout << std::flush;
+    }
 
-	return true;
-	}
+    return true;
+}
 
-bool None::DoRotate(const char* rotated_path, double open, double close, bool terminating)
-	{
-	if ( ! FinishedRotation("/dev/null", Info().path, open, close, terminating) )
-		{
-		Error(Fmt("error rotating %s", Info().path));
-		return false;
-		}
+bool None::DoRotate(const char* rotated_path, double open, double close, bool terminating) {
+    if ( ! FinishedRotation("/dev/null", Info().path, open, close, terminating) ) {
+        Error(Fmt("error rotating %s", Info().path));
+        return false;
+    }
 
-	return true;
-	}
+    return true;
+}
 
-	} // namespace zeek::logging::writer::detail
+} // namespace zeek::logging::writer::detail

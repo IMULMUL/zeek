@@ -1,11 +1,10 @@
-# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.trace %INPUT >output
+# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.pcap %INPUT >output
 # @TEST-EXEC: btest-diff output
 # @TEST-EXEC: btest-diff conn.log
 
 @load base/protocols/conn
 @load base/protocols/http
 @load base/protocols/dns
-@load base/frameworks/dpd
 
 redef enum PcapFilterID += { A, B };
 
@@ -34,4 +33,3 @@ event zeek_init()
 	if ( ! Pcap::precompile_pcap_filter(B, "port 53") )
 		print "error 2";
 	}
-

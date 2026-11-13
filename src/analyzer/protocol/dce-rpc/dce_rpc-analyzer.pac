@@ -87,10 +87,10 @@ refine connection DCE_RPC_Conn += {
 
 			// Remove the null from the end of the string if it's there.
 			if ( ${bind.sec_addr}.length() > 0 &&
-			     *(${bind.sec_addr}.begin() + ${bind.sec_addr}.length()) == 0 )
-				sec_addr = zeek::make_intrusive<zeek::StringVal>(${bind.sec_addr}.length()-1, (const char*) ${bind.sec_addr}.begin());
+			     *(${bind.sec_addr}.begin() + ${bind.sec_addr}.length() - 1) == 0 )
+				sec_addr = zeek::make_intrusive<zeek::StringVal>(${bind.sec_addr}.length()-1, reinterpret_cast<const char*>(${bind.sec_addr}.begin()));
 			else
-				sec_addr = zeek::make_intrusive<zeek::StringVal>(${bind.sec_addr}.length(), (const char*) ${bind.sec_addr}.begin());
+				sec_addr = zeek::make_intrusive<zeek::StringVal>(${bind.sec_addr}.length(), reinterpret_cast<const char*>(${bind.sec_addr}.begin()));
 
 			zeek::BifEvent::enqueue_dce_rpc_bind_ack(zeek_analyzer(),
 			                                   zeek_analyzer()->Conn(),
@@ -113,13 +113,16 @@ refine connection DCE_RPC_Conn += {
 
 	function process_dce_rpc_request(req: DCE_RPC_Request): bool
 		%{
+		int context_id = ${req.request_header.context_id};
+		int opnum = ${req.request_header.opnum};
+
 		if ( dce_rpc_request )
 			{
 			zeek::BifEvent::enqueue_dce_rpc_request(zeek_analyzer(),
 			                                  zeek_analyzer()->Conn(),
 			                                  fid,
-			                                  ${req.context_id},
-			                                  ${req.opnum},
+			                                  context_id,
+			                                  opnum,
 			                                  ${req.stub}.length());
 			}
 
@@ -127,24 +130,24 @@ refine connection DCE_RPC_Conn += {
 			zeek::BifEvent::enqueue_dce_rpc_request_stub(zeek_analyzer(),
 			                                  zeek_analyzer()->Conn(),
 			                                  fid,
-			                                  ${req.context_id},
-			                                  ${req.opnum},
+			                                  context_id,
+			                                  opnum,
 			                                  binpac::to_stringval(${req.stub}));
 
-		set_cont_id_opnum_map(${req.context_id},
-		                      ${req.opnum});
+		set_cont_id_opnum_map(context_id, opnum);
 		return true;
 		%}
 
 	function process_dce_rpc_response(resp: DCE_RPC_Response): bool
 		%{
+		int context_id = ${resp.response_header.context_id};
 		if ( dce_rpc_response )
 			{
 			zeek::BifEvent::enqueue_dce_rpc_response(zeek_analyzer(),
 			                                   zeek_analyzer()->Conn(),
 			                                   fid,
-			                                   ${resp.context_id},
-			                                   get_cont_id_opnum_map(${resp.context_id}),
+			                                   context_id,
+			                                   get_cont_id_opnum_map(context_id),
 			                                   ${resp.stub}.length());
 			}
 
@@ -152,8 +155,8 @@ refine connection DCE_RPC_Conn += {
 			zeek::BifEvent::enqueue_dce_rpc_response_stub(zeek_analyzer(),
 			                                   zeek_analyzer()->Conn(),
 			                                   fid,
-			                                   ${resp.context_id},
-			                                   get_cont_id_opnum_map(${resp.context_id}),
+			                                   context_id,
+			                                   get_cont_id_opnum_map(context_id),
 			                                   binpac::to_stringval(${resp.stub}));
 
 		return true;

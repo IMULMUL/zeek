@@ -1,20 +1,16 @@
-
-include(ZeekSubdir)
-
-include_directories(BEFORE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_subdirectory(protocol)
-
-set(analyzer_SRCS
+zeek_add_subdir_library(
+    analyzer
+    INTERNAL_DEPENDENCIES
+    ${BIF_BUILD_TARGET}
+    INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    SOURCES
     Analyzer.cc
-    Manager.cc
     Component.cc
-)
+    Manager.cc)
 
+# Treat BIFs as builtin (alternative mode).
 bif_target(analyzer.bif)
 
-bro_add_subdir_library(analyzer ${analyzer_SRCS})
-add_dependencies(bro_analyzer generate_outputs)
+add_subdirectory(protocol)

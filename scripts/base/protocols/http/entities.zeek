@@ -1,6 +1,7 @@
 ##! Analysis and logging for MIME entities found in HTTP sessions.
 
 @load base/frameworks/files
+@load base/frameworks/notice/weird
 @load base/utils/strings
 @load base/utils/files
 @load ./main
@@ -83,13 +84,19 @@ event http_begin_entity(c: connection, is_orig: bool) &priority=10
 
 event http_header(c: connection, is_orig: bool, name: string, value: string) &priority=3
 	{
+	if ( ! c$http?$current_entity )
+		{
+		Reporter::conn_weird("missing_HTTP_entity", c, "", "HTTP");
+		return;
+		}
+
 	if ( name == "CONTENT-DISPOSITION" &&
-	     /[fF][iI][lL][eE][nN][aA][mM][eE]/ in value )
+	     /[fF][iI][lL][eE][nN][aA][mM][eE][[:blank:]]*\*?=/ in value )
 		{
 		c$http$current_entity$filename = extract_filename_from_content_disposition(value);
 		}
 	else if ( name == "CONTENT-TYPE" &&
-	          /[nN][aA][mM][eE][:blank:]*=/ in value )
+	          /[nN][aA][mM][eE][[:blank:]]*=/ in value )
 		{
 		c$http$current_entity$filename = extract_filename_from_content_disposition(value);
 		}

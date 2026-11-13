@@ -82,7 +82,7 @@ event rsh_reply%(c: connection, client_user: string, server_user: string, line: 
 ##    configuration has not yet been ported, and
 ##    the analyzer is therefore not directly usable at the moment.
 ##
-## .. todo:: Zeeks's current default configuration does not activate the protocol
+## .. todo:: Zeek's current default configuration does not activate the protocol
 ##    analyzer that generates this event; the corresponding script has not yet
 ##    been ported. To still enable this event, one needs to add a
 ##    call to :zeek:see:`Analyzer::register_for_ports` or a DPD payload
@@ -146,7 +146,7 @@ event login_input_line%(c: connection, line: string%);
 ##
 ## c: The connection.
 ##
-## line: The ouput line.
+## line: The output line.
 ##
 ## .. zeek:see:: login_confused login_confused_text login_display login_failure
 ##    login_input_line  login_prompt login_success login_terminal rsh_reply
@@ -230,7 +230,7 @@ event login_terminal%(c: connection, terminal: string%);
 ##
 ## display: The DISPLAY transmitted.
 ##
-## .. zeek:see:: login_confused login_confused_text  login_failure login_input_line
+## .. zeek:see:: login_confused login_confused_text login_failure login_input_line
 ##    login_output_line login_prompt login_success login_terminal
 ##
 ## .. todo:: Zeek's current default configuration does not activate the protocol
@@ -245,7 +245,7 @@ event login_display%(c: connection, display: string%);
 ## option is sent from client to server and the server replies that it accepts
 ## the authentication, then the event engine generates this event.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## name: The authenticated name.
@@ -270,7 +270,7 @@ event authentication_accepted%(name: string, c: connection%);
 ## is sent from client to server and the server replies that it did not accept
 ## the authentication, then the event engine generates this event.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## name: The attempted authentication name.
@@ -293,7 +293,7 @@ event authentication_rejected%(name: string, c: connection%);
 ## Generated for Telnet/Rlogin sessions when a pattern match indicates
 ## that no authentication is performed.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.
@@ -318,7 +318,7 @@ event authentication_skipped%(c: connection%);
 ## This information is extracted out of environment variables sent as Telnet
 ## options.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.
@@ -339,7 +339,7 @@ event login_prompt%(c: connection, prompt: string%);
 ## protocol includes options for negotiating encryption. When such a series of
 ## options is successfully negotiated, the event engine generates this event.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.
@@ -357,7 +357,7 @@ event activating_encryption%(c: connection%);
 ## do, or what it itself offered in terms of options in the past, then the
 ## engine generates this event.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.
@@ -370,7 +370,7 @@ event inconsistent_option%(c: connection%);
 
 ## Generated for an ill-formed or unrecognized Telnet option.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.
@@ -389,7 +389,7 @@ event bad_option%(c: connection%);
 
 ## Generated for a Telnet option that's incorrectly terminated.
 ##
-## See `Wikipedia <http://en.wikipedia.org/wiki/Telnet>`__ for more information
+## See `Wikipedia <https://en.wikipedia.org/wiki/Telnet>`__ for more information
 ## about the Telnet protocol.
 ##
 ## c: The connection.

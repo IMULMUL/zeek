@@ -207,18 +207,18 @@ type Request_Data_Object(function_code: uint8, qualifier_field: uint8, object_ty
 		0x2202 -> ai_dead_32: empty;
 		0x2203 -> ai_dead_sp: empty;
 
-	# analog ouput status g40
+	# analog output status g40
 		0x2800 -> aos_default: empty;
 		0x2801 -> aos_32: empty;
 		0x2802 -> aos_16: empty;
 		0x2803 -> aos_sp: empty;
 		0x2804 -> aos_dp: empty;
 
-	# analog ouput g41
-		0x2901 -> ao_32: empty;
-		0x2902 -> ao_16: empty;
-		0x2903 -> ao_sp: empty;
-		0x2904 -> ao_dp: empty;
+	# analog output g41
+		0x2901 -> ao_32: AnaOut32;
+		0x2902 -> ao_16: AnaOut16;
+		0x2903 -> ao_sp: AnaOutSP;
+		0x2904 -> ao_dp: AnaOutDP;
 
 	# analog output event g42
 		0x2a00 -> aoe_default: empty;
@@ -317,7 +317,7 @@ type Request_Data_Object(function_code: uint8, qualifier_field: uint8, object_ty
 		0x7801 -> challenge: AuthChallenge(prefix.prefix_value);
 		0x7802 -> reply: AuthReply(prefix.prefix_value);
 		0x7803 -> aggrRequest: AuthAggrRequest(prefix.prefix_value);
-		0x7804 -> seesionKeyRequest: uint16;
+		0x7804 -> sessionKeyRequest: uint16;
 		0x7805 -> status: AuthSessionKeyStatus(prefix.prefix_value);
 		0x7806 -> keyChange: AuthSessionKeyChange(prefix.prefix_value);
 		0x7807 -> error: AuthError(prefix.prefix_value);
@@ -391,12 +391,13 @@ type Response_Data_Object(function_code: uint8, qualifier_field: uint8, object_t
 		0x0203 -> biewrtime: BinInEveRtime;
 
 	# double-bit Binary Input g3
-		0x0301 -> dbibytes: bytestring &restofdata; # don;t quit understand specification
+		0x0301 -> dbibytes: uint8; # four packed double-bit values
 		0x0302 -> dbiflag: uint8;
 
 	# double-bit Binary Input Event g4
-		0x0401 -> dbieatime: DoubleInEveAtime;
-		0x0402 -> dbiertime: DoubleInEveRtime;
+		0x0401 -> dbiewotime: uint8; # flags only
+		0x0402 -> dbieatime: DoubleInEveAtime;
+		0x0403 -> dbiertime: DoubleInEveRtime;
 
 	# binary output g10
 		0x0a01 -> bowoflag:  uint8;  # warning: returning integer index?
@@ -502,13 +503,13 @@ type Response_Data_Object(function_code: uint8, qualifier_field: uint8, object_t
 		0x2202 -> ai_dead_32: uint32;
 		0x2203 -> ai_dead_sp: uint32;
 
-	# analog ouput status g40
+	# analog output status g40
 		0x2801 -> aos_32: AnaOutStatus32;
 		0x2802 -> aos_16: AnaOutStatus16;
 		0x2803 -> aos_sp: AnaOutStatusSP;
 		0x2804 -> aos_dp: AnaOutStatusDP;
 
-	# analog ouput g41
+	# analog output g41
 		0x2901 -> ao_32: AnaOut32;
 		0x2902 -> ao_16: AnaOut16;
 		0x2903 -> ao_sp: AnaOutSP;
@@ -598,7 +599,7 @@ type Response_Data_Object(function_code: uint8, qualifier_field: uint8, object_t
 		0x7801 -> challenge: AuthChallenge(prefix.prefix_value);
 		0x7802 -> reply: AuthReply(prefix.prefix_value);
 		0x7803 -> aggrRequest: AuthAggrRequest(prefix.prefix_value);
-		0x7804 -> seesionKeyRequest: uint16;
+		0x7804 -> sessionKeyRequest: uint16;
 		0x7805 -> status: AuthSessionKeyStatus(prefix.prefix_value);
 		0x7806 -> keyChange: AuthSessionKeyChange(prefix.prefix_value);
 		0x7807 -> error: AuthError(prefix.prefix_value);
@@ -611,7 +612,7 @@ type Response_Data_Object(function_code: uint8, qualifier_field: uint8, object_t
 		0x780E -> update_key_sig: UpdateKeySig(prefix.prefix_value);
 		0x780F -> update_key_con: UpdateKeyCon(prefix.prefix_value);
 
-		#default -> unkonwndata: Debug_Byte; # &check( T );
+		#default -> unknowndata: Debug_Byte; # &check( T );
 		default -> unmatched: Default_Wrap(object_type_field);
 	};
 }
@@ -775,7 +776,7 @@ type FrozenCounter16woFlag = record {
 
 # g21v11 and g21v12 are obsolete
 
-# Conter event g22
+# Counter event g22
 
 # g22v1
 type CounterEve32wFlag = record {
@@ -807,7 +808,7 @@ type CounterEve16wFlagTime = record {
 
 # g22v7 g22v8 obsolete
 
-# Conter event g23
+# Counter event g23
 
 # g23v1
 type FrozenCounterEve32wFlag = record {
@@ -861,7 +862,7 @@ type AnalogInput16woFlag = record {
 	value: int16;
 } &byteorder = littleendian;
 
-# group: 30; variation: 5; singple precision 32 bit
+# group: 30; variation: 5; single precision 32 bit
 type AnalogInputSPwFlag = record {
 	flag: uint8;
 	value: uint32;
@@ -951,7 +952,7 @@ type AnalogInput16wTime = record {
 	time48: bytestring &length = 6;
 } &byteorder = littleendian;
 
-# group: 32; variation: 5; singple precision 32 bit
+# group: 32; variation: 5; single precision 32 bit
 type AnalogInputSPwoTime = record {
 	flag: uint8;
 	value: uint32;
@@ -1144,7 +1145,7 @@ type AnaOutEveDPwTime = record {
 	time48: bytestring &length = 6;
 } &byteorder = littleendian;
 
-## g43 data format is exacatly same as g42 so use g42 directly
+## g43 data format is exactly same as g42 so use g42 directly
 
 # g50v1
 type AbsTime = record {
@@ -1165,11 +1166,6 @@ type Last_AbsTime = record {
 # g51v1 and g51v2 are the same structure of g50v1. so reuse it
 
 # g70v1
-type Record_Obj = record {
-	record_size: uint16;
-	record_oct: bytestring &length = record_size;
-} &byteorder = littleendian;
-
 type File_Control_ID = record {
 	name_size: uint16;
 	type_code: uint8;
@@ -1185,7 +1181,10 @@ type File_Control_ID = record {
 	function_code: uint8;
 	status_code: uint8;
 	file_name: bytestring &length = name_size;
-	records: Record_Obj[];
+    # The records are a structured type, but lots of empty records end up allocating
+    # a lot of additional memory for those empty records. Store them as a byte array
+    # and let consumers do additional processing instead.
+    records: bytestring &restofdata &transient;
 } &byteorder = littleendian;
 
 # g70v2
@@ -1295,7 +1294,7 @@ type File_Spec_Str = record {
 type Dev_Store = record {
 	overflow: uint8;
 	obj_group: uint8;
-	variatiion: uint8;
+	variation: uint8;
 } &byteorder = littleendian;
 
 # device profile g82
@@ -1353,11 +1352,11 @@ type DescEle = record {
 
 # g86v1 is the same structure of DescEle
 
-# g86v3 does not quite understant specification description
+# g86v3 does not quite understand specification description
 
-# g87 doest not quite understand specfication description
+# g87 doest not quite understand specification description
 
-# g88 doest not quite understand specfication description
+# g88 doest not quite understand specification description
 
 # g90v1
 type App_Id(qualifier_field: uint8, object_size16: uint16) = record {
@@ -1386,7 +1385,7 @@ type StatusEle = record {
 # g101v3
 type BCD_Large = record {
 	value_low: uint32;
-	vlaue_high: uint32;
+	value_high: uint32;
 } &byteorder = littleendian;
 
 # authentication g120

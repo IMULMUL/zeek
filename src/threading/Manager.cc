@@ -1,286 +1,350 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #include "zeek/threading/Manager.h"
 
 #include <sys/socket.h>
-#include <unistd.h>
+#include <cstdint>
+#include <limits>
 
 #include "zeek/Event.h"
 #include "zeek/IPAddr.h"
-#include "zeek/NetVar.h"
 #include "zeek/RunState.h"
-#include "zeek/iosource/Manager.h"
+#include "zeek/telemetry/Manager.h"
 
-namespace zeek::threading
-	{
-namespace detail
-	{
+namespace zeek::threading {
+namespace detail {
 
-void HeartbeatTimer::Dispatch(double t, bool is_expire)
-	{
-	if ( is_expire )
-		return;
+void HeartbeatTimer::Dispatch(double t, bool is_expire) {
+    if ( is_expire )
+        return;
 
-	thread_mgr->SendHeartbeats();
-	thread_mgr->StartHeartbeatTimer();
-	}
+    thread_mgr->SendHeartbeats();
+    thread_mgr->StartHeartbeatTimer();
+}
 
-	} // namespace detail
+} // namespace detail
 
-Manager::Manager()
-	{
-	DBG_LOG(DBG_THREADING, "Creating thread manager ...");
+static std::vector<uint64_t> pending_bucket_brackets = {1, 10, 100, 1000, 10000, std::numeric_limits<uint64_t>::max()};
 
-	did_process = true;
-	next_beat = 0;
-	terminating = false;
-	}
+Manager::Manager() {
+    DBG_LOG(DBG_THREADING, "Creating thread manager ...");
 
-Manager::~Manager()
-	{
-	if ( all_threads.size() )
-		Terminate();
-	}
+    did_process = true;
+    next_beat = 0;
+    terminating = false;
+    terminated = false;
+}
 
-void Manager::Terminate()
-	{
-	DBG_LOG(DBG_THREADING, "Terminating thread manager ...");
-	terminating = true;
+Manager::~Manager() {
+    if ( ! all_threads.empty() )
+        Terminate();
+}
 
-	// First process remaining thread output for the message threads.
-	do
-		Flush();
-		while ( did_process );
+void Manager::InitPostScript() {
+    static auto get_message_thread_stats = []() -> const BucketedMessages* {
+        if ( ! thread_mgr->terminating ) {
+            double now = util::current_time();
+            if ( thread_mgr->bucketed_messages_last_updated < now - 1 ) {
+                thread_mgr->current_bucketed_messages.pending_in_total = 0;
+                thread_mgr->current_bucketed_messages.pending_out_total = 0;
+                for ( auto& m : thread_mgr->current_bucketed_messages.pending_in )
+                    m.second = 0;
+                for ( auto& m : thread_mgr->current_bucketed_messages.pending_out )
+                    m.second = 0;
 
-		// Signal all to stop.
+                MsgThread::Stats thread_stats;
+                for ( auto* t : thread_mgr->msg_threads ) {
+                    t->GetStats(&thread_stats);
 
-		for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-			(*i)->SignalStop();
+                    thread_mgr->current_bucketed_messages.pending_in_total += thread_stats.pending_in;
+                    thread_mgr->current_bucketed_messages.pending_out_total += thread_stats.pending_out;
 
-		for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-			(*i)->WaitForStop();
+                    for ( auto upper_limit : pending_bucket_brackets ) {
+                        if ( thread_stats.pending_in <= upper_limit )
+                            thread_mgr->current_bucketed_messages.pending_in[upper_limit]++;
 
-		// Then join them all.
-		for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-			{
-			(*i)->Join();
-			delete *i;
-			}
+                        if ( thread_stats.pending_out <= upper_limit )
+                            thread_mgr->current_bucketed_messages.pending_out[upper_limit]++;
+                    }
+                }
 
-		all_threads.clear();
-		msg_threads.clear();
-		terminating = false;
-	}
+                thread_mgr->bucketed_messages_last_updated = now;
+            }
+        }
 
-void Manager::AddThread(BasicThread* thread)
-	{
-	DBG_LOG(DBG_THREADING, "Adding thread %s ...", thread->Name());
-	all_threads.push_back(thread);
+        return &thread_mgr->current_bucketed_messages;
+    };
 
-	if ( ! heartbeat_timer_running )
-		StartHeartbeatTimer();
-	}
+    num_threads_metric =
+        telemetry_mgr->GaugeInstance("zeek", "msgthread_active_threads", {}, "Number of active threads", "", []() {
+            return thread_mgr ? static_cast<double>(thread_mgr->all_threads.size()) : 0.0;
+        });
 
-void Manager::AddMsgThread(MsgThread* thread)
-	{
-	DBG_LOG(DBG_THREADING, "%s is a MsgThread ...", thread->Name());
-	msg_threads.push_back(thread);
-	}
+    total_threads_metric = telemetry_mgr->CounterInstance("zeek", "msgthread_threads", {}, "Total number of threads");
+    total_messages_in_metric =
+        telemetry_mgr->CounterInstance("zeek", "msgthread_in_messages", {}, "Number of inbound messages received", "");
 
-void Manager::KillThreads()
-	{
-	DBG_LOG(DBG_THREADING, "Killing threads ...");
+    total_messages_out_metric =
+        telemetry_mgr->CounterInstance("zeek", "msgthread_out_messages", {}, "Number of outbound messages sent", "");
 
-	for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-		(*i)->Kill();
-	}
+    pending_messages_in_metric = telemetry_mgr->GaugeInstance("zeek", "msgthread_pending_in_messages", {},
+                                                              "Pending number of inbound messages", "", []() {
+                                                                  auto* s = get_message_thread_stats();
+                                                                  return static_cast<double>(s->pending_in_total);
+                                                              });
+    pending_messages_out_metric = telemetry_mgr->GaugeInstance("zeek", "msgthread_pending_out_messages", {},
+                                                               "Pending number of outbound messages", "", []() {
+                                                                   auto* s = get_message_thread_stats();
+                                                                   return static_cast<double>(s->pending_out_total);
+                                                               });
 
-void Manager::KillThread(BasicThread* thread)
-	{
-	DBG_LOG(DBG_THREADING, "Killing thread %s ...", thread->Name());
-	thread->Kill();
-	}
+    pending_message_in_buckets_fam =
+        telemetry_mgr->GaugeFamily("zeek", "msgthread_pending_messages_in_buckets", {"leq"},
+                                   "Number of threads with pending inbound messages split into buckets");
+    pending_message_out_buckets_fam =
+        telemetry_mgr->GaugeFamily("zeek", "msgthread_pending_messages_out_buckets", {"leq"},
+                                   "Number of threads with pending outbound messages split into buckets");
 
-void Manager::SendHeartbeats()
-	{
-	for ( MsgThread* thread : msg_threads )
-		thread->Heartbeat();
+    for ( auto upper_limit : pending_bucket_brackets ) {
+        std::string upper_limit_str;
+        if ( upper_limit == std::numeric_limits<uint64_t>::max() )
+            upper_limit_str = "inf";
+        else
+            upper_limit_str = std::to_string(upper_limit);
 
-	// Since this is a regular timer, this is also an ideal place to check whether we have
-	// and dead threads and to delete them.
-	all_thread_list to_delete;
-	for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-		{
-		BasicThread* t = *i;
+        current_bucketed_messages.pending_in[upper_limit] = 0;
+        current_bucketed_messages.pending_out[upper_limit] = 0;
 
-		if ( t->Killed() )
-			to_delete.push_back(t);
-		}
+        pending_message_in_buckets[upper_limit] =
+            pending_message_in_buckets_fam->GetOrAdd({{"leq", upper_limit_str}}, [upper_limit]() {
+                auto* s = get_message_thread_stats();
+                return static_cast<double>(s->pending_in.at(upper_limit));
+            });
+        pending_message_out_buckets[upper_limit] =
+            pending_message_out_buckets_fam->GetOrAdd({{"leq", upper_limit_str}}, [upper_limit]() {
+                auto* s = get_message_thread_stats();
+                return static_cast<double>(s->pending_out.at(upper_limit));
+            });
+    }
+}
 
-	for ( all_thread_list::iterator i = to_delete.begin(); i != to_delete.end(); i++ )
-		{
-		BasicThread* t = *i;
-		t->WaitForStop();
+void Manager::Terminate() {
+    DBG_LOG(DBG_THREADING, "Terminating thread manager ...");
+    terminating = true;
 
-		all_threads.remove(t);
+    // First process remaining thread output for the message threads.
+    do
+        Flush();
+    while ( did_process );
 
-		MsgThread* mt = dynamic_cast<MsgThread*>(t);
+    // Signal all to stop.
 
-		if ( mt )
-			msg_threads.remove(mt);
+    for ( auto* t : all_threads )
+        t->SignalStop();
 
-		t->Join();
-		delete t;
-		}
-	}
+    for ( auto* t : all_threads )
+        t->WaitForStop();
 
-void Manager::StartHeartbeatTimer()
-	{
-	heartbeat_timer_running = true;
-	zeek::detail::timer_mgr->Add(new detail::HeartbeatTimer(
-		run_state::network_time + BifConst::Threading::heartbeat_interval));
-	}
+    // Then join them all.
+    for ( auto* t : all_threads ) {
+        t->Join();
+        delete t;
+    }
+
+    all_threads.clear();
+    msg_threads.clear();
+    terminating = false;
+    terminated = true;
+}
+
+void Manager::AddThread(BasicThread* thread) {
+    DBG_LOG(DBG_THREADING, "Adding thread %s ...", thread->Name());
+
+    // This can happen when log writers or other threads are
+    // created during the shutdown phase and results in unclean
+    // shutdowns.
+    if ( terminated )
+        reporter->Warning("Thread %s added after threading manager terminated", thread->Name());
+
+    all_threads.push_back(thread);
+
+    if ( ! heartbeat_timer_running )
+        StartHeartbeatTimer();
+
+    total_threads_metric->Inc();
+}
+
+void Manager::AddMsgThread(MsgThread* thread) {
+    DBG_LOG(DBG_THREADING, "%s is a MsgThread ...", thread->Name());
+    msg_threads.push_back(thread);
+}
+
+void Manager::KillThreads() {
+    DBG_LOG(DBG_THREADING, "Killing threads ...");
+
+    for ( auto* t : all_threads )
+        t->Kill();
+}
+
+void Manager::KillThread(BasicThread* thread) {
+    DBG_LOG(DBG_THREADING, "Killing thread %s ...", thread->Name());
+    thread->Kill();
+}
+
+void Manager::SendHeartbeats() {
+    for ( MsgThread* thread : msg_threads )
+        thread->Heartbeat();
+
+    // Since this is a regular timer, this is also an ideal place to check whether we have
+    // and dead threads and to delete them.
+    all_thread_list to_delete;
+    for ( auto* t : all_threads ) {
+        if ( t->Killed() )
+            to_delete.push_back(t);
+    }
+
+    for ( auto* t : to_delete ) {
+        t->WaitForStop();
+
+        all_threads.remove(t);
+
+        MsgThread* mt = dynamic_cast<MsgThread*>(t);
+
+        if ( mt )
+            msg_threads.remove(mt);
+
+        t->Join();
+        delete t;
+    }
+}
+
+void Manager::StartHeartbeatTimer() {
+    heartbeat_timer_running = true;
+    zeek::detail::timer_mgr->Add(
+        new detail::HeartbeatTimer(run_state::network_time + BifConst::Threading::heartbeat_interval));
+}
+
+void Manager::MessageIn() { total_messages_in_metric->Inc(); }
+
+void Manager::MessageOut() { total_messages_out_metric->Inc(); }
 
 // Raise everything in here as warnings so it is passed to scriptland without
 // looking "fatal". In addition to these warnings, ReaderBackend will queue
 // one reporter message.
-bool Manager::SendEvent(MsgThread* thread, const std::string& name, const int num_vals,
-                        Value** vals) const
-	{
-	EventHandler* handler = event_registry->Lookup(name);
-	if ( handler == nullptr )
-		{
-		reporter->Warning("Thread %s: Event %s not found", thread->Name(), name.c_str());
-		Value::delete_value_ptr_array(vals, num_vals);
-		return false;
-		}
+bool Manager::SendEvent(MsgThread* thread, const std::string& name, const int num_vals, Value** vals) const {
+    EventHandler* handler = event_registry->Lookup(name);
+    if ( handler == nullptr ) {
+        reporter->Warning("Thread %s: Event %s not found", thread->Name(), name.c_str());
+        Value::delete_value_ptr_array(vals, num_vals);
+        return false;
+    }
 
 #ifdef DEBUG
-	DBG_LOG(DBG_INPUT, "Thread %s: SendEvent for event %s with %d vals", thread->Name(),
-	        name.c_str(), num_vals);
+    DBG_LOG(DBG_INPUT, "Thread %s: SendEvent for event %s with %d vals", thread->Name(), name.c_str(), num_vals);
 #endif
 
-	const auto& type = handler->GetType()->Params();
-	int num_event_vals = type->NumFields();
-	if ( num_vals != num_event_vals )
-		{
-		reporter->Warning("Thread %s: Wrong number of values for event %s", thread->Name(),
-		                  name.c_str());
-		Value::delete_value_ptr_array(vals, num_vals);
-		return false;
-		}
+    const auto& type = handler->GetType()->Params();
+    int num_event_vals = type->NumFields();
+    if ( num_vals != num_event_vals ) {
+        reporter->Warning("Thread %s: Wrong number of values for event %s", thread->Name(), name.c_str());
+        Value::delete_value_ptr_array(vals, num_vals);
+        return false;
+    }
 
-	bool convert_error = false;
+    bool convert_error = false;
 
-	Args vl;
-	vl.reserve(num_vals);
+    Args vl;
+    vl.reserve(num_vals);
 
-	for ( int j = 0; j < num_vals; j++ )
-		{
-		Val* v = Value::ValueToVal(std::string("thread ") + thread->Name(), vals[j], convert_error);
-		vl.emplace_back(AdoptRef{}, v);
+    for ( int j = 0; j < num_vals; j++ ) {
+        Val* v = Value::ValueToVal(std::string("thread ") + thread->Name(), vals[j], convert_error);
+        vl.emplace_back(AdoptRef{}, v);
 
-		if ( v && ! convert_error && ! same_type(type->GetFieldType(j), v->GetType()) )
-			{
-			convert_error = true;
-			type->GetFieldType(j)->Error("SendEvent types do not match", v->GetType().get());
-			}
-		}
+        if ( v && ! convert_error && ! same_type(type->GetFieldType(j), v->GetType()) ) {
+            convert_error = true;
+            type->GetFieldType(j)->Error("SendEvent types do not match", v->GetType().get());
+        }
+    }
 
-	Value::delete_value_ptr_array(vals, num_vals);
+    Value::delete_value_ptr_array(vals, num_vals);
 
-	if ( convert_error )
-		return false;
-	else if ( handler )
-		event_mgr.Enqueue(handler, std::move(vl), util::detail::SOURCE_LOCAL);
+    if ( convert_error )
+        return false;
+    else if ( handler )
+        event_mgr.Enqueue(handler, std::move(vl), util::detail::SOURCE_LOCAL);
 
-	return true;
-	}
+    return true;
+}
 
-void Manager::Flush()
-	{
-	bool do_beat = false;
+void Manager::Flush() {
+    bool do_beat = false;
 
-	if ( run_state::network_time && (run_state::network_time > next_beat || ! next_beat) )
-		{
-		do_beat = true;
-		next_beat = run_state::network_time + BifConst::Threading::heartbeat_interval;
-		}
+    if ( run_state::network_time && (run_state::network_time > next_beat || ! next_beat) ) {
+        do_beat = true;
+        next_beat = run_state::network_time + BifConst::Threading::heartbeat_interval;
+    }
 
-	did_process = false;
+    did_process = false;
 
-	for ( msg_thread_list::iterator i = msg_threads.begin(); i != msg_threads.end(); i++ )
-		{
-		MsgThread* t = *i;
+    for ( auto* t : msg_threads ) {
+        if ( do_beat )
+            t->Heartbeat();
 
-		if ( do_beat )
-			t->Heartbeat();
+        while ( t->HasOut() ) {
+            Message* msg = t->RetrieveOut();
+            assert(msg);
 
-		while ( t->HasOut() )
-			{
-			Message* msg = t->RetrieveOut();
-			assert(msg);
+            if ( msg->Process() ) {
+                if ( run_state::network_time )
+                    did_process = true;
+            }
 
-			if ( msg->Process() )
-				{
-				if ( run_state::network_time )
-					did_process = true;
-				}
+            else {
+                reporter->Error("%s failed, terminating thread", msg->Name());
+                t->SignalStop();
+            }
 
-			else
-				{
-				reporter->Error("%s failed, terminating thread", msg->Name());
-				t->SignalStop();
-				}
+            delete msg;
+        }
+    }
 
-			delete msg;
-			}
-		}
+    all_thread_list to_delete;
 
-	all_thread_list to_delete;
+    for ( auto* t : all_threads ) {
+        if ( t->Killed() )
+            to_delete.push_back(t);
+    }
 
-	for ( all_thread_list::iterator i = all_threads.begin(); i != all_threads.end(); i++ )
-		{
-		BasicThread* t = *i;
+    for ( auto* t : to_delete ) {
+        t->WaitForStop();
 
-		if ( t->Killed() )
-			to_delete.push_back(t);
-		}
+        all_threads.remove(t);
 
-	for ( all_thread_list::iterator i = to_delete.begin(); i != to_delete.end(); i++ )
-		{
-		BasicThread* t = *i;
-		t->WaitForStop();
+        MsgThread* mt = dynamic_cast<MsgThread*>(t);
 
-		all_threads.remove(t);
+        if ( mt )
+            msg_threads.remove(mt);
 
-		MsgThread* mt = dynamic_cast<MsgThread*>(t);
+        t->Join();
+        delete t;
+    }
 
-		if ( mt )
-			msg_threads.remove(mt);
+    // fprintf(stderr, "P %.6f %.6f do_beat=%d did_process=%d next_next=%.6f\n",
+    // run_state::network_time,
+    //         detail::timer_mgr->Time(), do_beat, (int)did_process, next_beat);
+}
 
-		t->Join();
-		delete t;
-		}
+const threading::Manager::msg_stats_list& threading::Manager::GetMsgThreadStats() {
+    stats.clear();
 
-	// fprintf(stderr, "P %.6f %.6f do_beat=%d did_process=%d next_next=%.6f\n",
-	// run_state::network_time,
-	//         detail::timer_mgr->Time(), do_beat, (int)did_process, next_beat);
-	}
+    for ( auto* t : msg_threads ) {
+        MsgThread::Stats s;
+        t->GetStats(&s);
 
-const threading::Manager::msg_stats_list& threading::Manager::GetMsgThreadStats()
-	{
-	stats.clear();
+        stats.emplace_back(t->Name(), s);
+    }
 
-	for ( msg_thread_list::iterator i = msg_threads.begin(); i != msg_threads.end(); i++ )
-		{
-		MsgThread* t = *i;
+    return stats;
+}
 
-		MsgThread::Stats s;
-		t->GetStats(&s);
-
-		stats.push_back(std::make_pair(t->Name(), s));
-		}
-
-	return stats;
-	}
-
-	} // namespace zeek::threading
+} // namespace zeek::threading

@@ -2,246 +2,223 @@
 
 #include "zeek/analyzer/protocol/ident/Ident.h"
 
-#include "zeek/zeek-config.h"
+#include <cctype>
 
-#include <ctype.h>
-
-#include "zeek/Event.h"
-#include "zeek/NetVar.h"
 #include "zeek/ZeekString.h"
 #include "zeek/analyzer/protocol/ident/events.bif.h"
 
-namespace zeek::analyzer::ident
-	{
+namespace zeek::analyzer::ident {
 
-Ident_Analyzer::Ident_Analyzer(Connection* conn)
-	: analyzer::tcp::TCP_ApplicationAnalyzer("IDENT", conn)
-	{
-	did_bad_reply = did_deliver = false;
+Ident_Analyzer::Ident_Analyzer(Connection* conn) : analyzer::tcp::TCP_ApplicationAnalyzer("IDENT", conn) {
+    did_bad_reply = did_deliver = false;
 
-	orig_ident = new analyzer::tcp::ContentLine_Analyzer(conn, true, 1000);
-	resp_ident = new analyzer::tcp::ContentLine_Analyzer(conn, false, 1000);
+    orig_ident = new analyzer::tcp::ContentLine_Analyzer(conn, true, 1000);
+    resp_ident = new analyzer::tcp::ContentLine_Analyzer(conn, false, 1000);
 
-	orig_ident->SetIsNULSensitive(true);
-	resp_ident->SetIsNULSensitive(true);
+    orig_ident->SetIsNULSensitive(true);
+    resp_ident->SetIsNULSensitive(true);
 
-	AddSupportAnalyzer(orig_ident);
-	AddSupportAnalyzer(resp_ident);
-	}
+    AddSupportAnalyzer(orig_ident);
+    AddSupportAnalyzer(resp_ident);
+}
 
-void Ident_Analyzer::Done()
-	{
-	analyzer::tcp::TCP_ApplicationAnalyzer::Done();
+void Ident_Analyzer::Done() {
+    analyzer::tcp::TCP_ApplicationAnalyzer::Done();
 
-	if ( TCP() )
-		if ( (! did_deliver || orig_ident->HasPartialLine()) &&
-		     (TCP()->OrigState() == analyzer::tcp::TCP_ENDPOINT_CLOSED ||
-		      TCP()->OrigPrevState() == analyzer::tcp::TCP_ENDPOINT_CLOSED) &&
-		     TCP()->OrigPrevState() != analyzer::tcp::TCP_ENDPOINT_PARTIAL &&
-		     TCP()->RespPrevState() != analyzer::tcp::TCP_ENDPOINT_PARTIAL &&
-		     TCP()->OrigPrevState() != analyzer::tcp::TCP_ENDPOINT_INACTIVE &&
-		     TCP()->RespPrevState() != analyzer::tcp::TCP_ENDPOINT_INACTIVE )
-			Weird("partial_ident_request");
-	}
+    if ( TCP() )
+        if ( (! did_deliver || orig_ident->HasPartialLine()) &&
+             (TCP()->OrigState() == analyzer::tcp::TCP_ENDPOINT_CLOSED ||
+              TCP()->OrigPrevState() == analyzer::tcp::TCP_ENDPOINT_CLOSED) &&
+             TCP()->OrigPrevState() != analyzer::tcp::TCP_ENDPOINT_PARTIAL &&
+             TCP()->RespPrevState() != analyzer::tcp::TCP_ENDPOINT_PARTIAL &&
+             TCP()->OrigPrevState() != analyzer::tcp::TCP_ENDPOINT_INACTIVE &&
+             TCP()->RespPrevState() != analyzer::tcp::TCP_ENDPOINT_INACTIVE )
+            Weird("partial_ident_request");
+}
 
-void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig)
-	{
-	analyzer::tcp::TCP_ApplicationAnalyzer::DeliverStream(length, data, is_orig);
+void Ident_Analyzer::DeliverStream(int length, const u_char* data, bool is_orig) {
+    analyzer::tcp::TCP_ApplicationAnalyzer::DeliverStream(length, data, is_orig);
 
-	int remote_port, local_port;
-	const char* line = (const char*)data;
-	const char* orig_line = line;
-	const char* end_of_line = line + length;
+    const char* line = reinterpret_cast<const char*>(data);
+    const char* orig_line = line;
+    const char* end_of_line = line + length;
 
-	analyzer::tcp::TCP_Endpoint* s = nullptr;
+    analyzer::tcp::TCP_Endpoint* s = nullptr;
 
-	if ( TCP() )
-		s = is_orig ? TCP()->Orig() : TCP()->Resp();
+    if ( TCP() )
+        s = is_orig ? TCP()->Orig() : TCP()->Resp();
 
-	if ( length == 0 )
-		return;
+    if ( length == 0 )
+        return;
 
-	if ( is_orig )
-		{
-		if ( ! ident_request )
-			return;
+    if ( is_orig ) {
+        if ( ! ident_request )
+            return;
 
-		line = ParsePair(line, end_of_line, remote_port, local_port);
-		if ( ! line )
-			{
-			if ( s && s->state == analyzer::tcp::TCP_ENDPOINT_CLOSED &&
-			     (s->prev_state == analyzer::tcp::TCP_ENDPOINT_INACTIVE ||
-			      s->prev_state == analyzer::tcp::TCP_ENDPOINT_PARTIAL) )
-				// not surprising the request is mangled.
-				return;
+        int remote_port;
+        int local_port;
+        line = ParsePair(line, end_of_line, remote_port, local_port);
 
-			BadRequest(length, orig_line);
-			return;
-			}
+        if ( ! line ) {
+            if ( s && s->state == analyzer::tcp::TCP_ENDPOINT_CLOSED &&
+                 (s->prev_state == analyzer::tcp::TCP_ENDPOINT_INACTIVE ||
+                  s->prev_state == analyzer::tcp::TCP_ENDPOINT_PARTIAL) )
+                // not surprising the request is mangled.
+                return;
 
-		if ( line != end_of_line )
-			{
-			String s((const u_char*)orig_line, length, true);
-			Weird("ident_request_addendum", s.CheckString());
-			}
+            BadRequest(length, orig_line);
+            return;
+        }
 
-		EnqueueConnEvent(ident_request, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
-		                 val_mgr->Port(remote_port, TRANSPORT_TCP));
+        if ( line != end_of_line ) {
+            String s(reinterpret_cast<const u_char*>(orig_line), length, true);
+            Weird("ident_request_addendum", s.CheckString());
+        }
 
-		did_deliver = true;
-		}
+        EnqueueConnEvent(ident_request, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
+                         val_mgr->Port(remote_port, TRANSPORT_TCP));
 
-	else
-		{
-		if ( ! ident_reply )
-			return;
+        did_deliver = true;
+    }
 
-		line = ParsePair(line, end_of_line, remote_port, local_port);
+    else {
+        if ( ! ident_reply )
+            return;
 
-		if ( ! line || line == end_of_line || line[0] != ':' )
-			{
-			if ( s && s->state == analyzer::tcp::TCP_ENDPOINT_CLOSED &&
-			     (s->prev_state == analyzer::tcp::TCP_ENDPOINT_INACTIVE ||
-			      s->prev_state == analyzer::tcp::TCP_ENDPOINT_PARTIAL) )
-				// not surprising the request is mangled.
-				return;
+        int remote_port;
+        int local_port;
+        line = ParsePair(line, end_of_line, remote_port, local_port);
 
-			BadReply(length, orig_line);
-			return;
-			}
+        if ( ! line || line == end_of_line || line[0] != ':' ) {
+            if ( s && s->state == analyzer::tcp::TCP_ENDPOINT_CLOSED &&
+                 (s->prev_state == analyzer::tcp::TCP_ENDPOINT_INACTIVE ||
+                  s->prev_state == analyzer::tcp::TCP_ENDPOINT_PARTIAL) )
+                // not surprising the request is mangled.
+                return;
 
-		line = util::skip_whitespace(line + 1, end_of_line);
-		int restlen = end_of_line - line;
+            BadReply(length, orig_line);
+            return;
+        }
 
-		int is_error;
-		if ( restlen >= 5 && ! strncmp(line, "ERROR", 5) )
-			{
-			is_error = 1;
-			line += 5;
-			}
-		else if ( restlen >= 6 && ! strncmp(line, "USERID", 6) )
-			{
-			is_error = 0;
-			line += 6;
-			}
-		else
-			{
-			BadReply(length, orig_line);
-			return;
-			}
+        line = util::skip_whitespace(line + 1, end_of_line);
+        int restlen = end_of_line - line;
 
-		line = util::skip_whitespace(line, end_of_line);
+        int is_error;
+        if ( restlen >= 5 && ! strncmp(line, "ERROR", 5) ) {
+            is_error = 1;
+            line += 5;
+        }
+        else if ( restlen >= 6 && ! strncmp(line, "USERID", 6) ) {
+            is_error = 0;
+            line += 6;
+        }
+        else {
+            BadReply(length, orig_line);
+            return;
+        }
 
-		if ( line >= end_of_line || line[0] != ':' )
-			{
-			BadReply(length, orig_line);
-			return;
-			}
+        line = util::skip_whitespace(line, end_of_line);
 
-		line = util::skip_whitespace(line + 1, end_of_line);
+        if ( line >= end_of_line || line[0] != ':' ) {
+            BadReply(length, orig_line);
+            return;
+        }
 
-		if ( is_error )
-			{
-			if ( ident_error )
-				EnqueueConnEvent(ident_error, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
-				                 val_mgr->Port(remote_port, TRANSPORT_TCP),
-				                 make_intrusive<StringVal>(end_of_line - line, line));
-			}
+        line = util::skip_whitespace(line + 1, end_of_line);
 
-		else
-			{
-			const char* sys_type = line;
-			assert(line <= end_of_line);
-			size_t n = end_of_line >= line ? end_of_line - line
-			                               : 0; // just to be sure if assertions aren't on.
-			const char* colon = reinterpret_cast<const char*>(memchr(line, ':', n));
-			const char* comma = reinterpret_cast<const char*>(memchr(line, ',', n));
-			if ( ! colon )
-				{
-				BadReply(length, orig_line);
-				return;
-				}
+        if ( is_error ) {
+            if ( ident_error )
+                EnqueueConnEvent(ident_error, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
+                                 val_mgr->Port(remote_port, TRANSPORT_TCP),
+                                 make_intrusive<StringVal>(end_of_line - line, line));
+        }
 
-			const char* sys_end = (comma && comma < colon) ? comma : colon;
+        else {
+            const char* sys_type = line;
+            assert(line <= end_of_line);
+            size_t n = end_of_line >= line ? end_of_line - line : 0; // just to be sure if assertions aren't on.
+            const char* colon = reinterpret_cast<const char*>(memchr(line, ':', n));
+            const char* comma = reinterpret_cast<const char*>(memchr(line, ',', n));
+            if ( ! colon ) {
+                BadReply(length, orig_line);
+                return;
+            }
 
-			while ( --sys_end > sys_type && isspace(*sys_end) )
-				;
+            const char* sys_end = (comma && comma < colon) ? comma : colon;
 
-			String* sys_type_s = new String((const u_char*)sys_type, sys_end - sys_type + 1, true);
+            for ( ; sys_end > sys_type && isspace(*sys_end); --sys_end )
+                ;
 
-			line = util::skip_whitespace(colon + 1, end_of_line);
+            String* sys_type_s = new String(reinterpret_cast<const u_char*>(sys_type), sys_end - sys_type + 1, true);
 
-			EnqueueConnEvent(ident_reply, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
-			                 val_mgr->Port(remote_port, TRANSPORT_TCP),
-			                 make_intrusive<StringVal>(end_of_line - line, line),
-			                 make_intrusive<StringVal>(sys_type_s));
-			}
-		}
-	}
+            line = util::skip_whitespace(colon + 1, end_of_line);
 
-const char* Ident_Analyzer::ParsePair(const char* line, const char* end_of_line, int& p1, int& p2)
-	{
-	line = ParsePort(line, end_of_line, p1);
-	if ( ! line )
-		{
-		return nullptr;
-		}
+            EnqueueConnEvent(ident_reply, ConnVal(), val_mgr->Port(local_port, TRANSPORT_TCP),
+                             val_mgr->Port(remote_port, TRANSPORT_TCP),
+                             make_intrusive<StringVal>(end_of_line - line, line),
+                             make_intrusive<StringVal>(sys_type_s));
+        }
+    }
+}
 
-	if ( line >= end_of_line || line[0] != ',' )
-		return nullptr;
+const char* Ident_Analyzer::ParsePair(const char* line, const char* end_of_line, int& p1, int& p2) {
+    line = ParsePort(line, end_of_line, p1);
+    if ( ! line ) {
+        return nullptr;
+    }
 
-	++line;
+    if ( line >= end_of_line || line[0] != ',' )
+        return nullptr;
 
-	line = ParsePort(line, end_of_line, p2);
-	if ( ! line )
-		return nullptr;
+    ++line;
 
-	return line;
-	}
+    line = ParsePort(line, end_of_line, p2);
+    if ( ! line )
+        return nullptr;
 
-const char* Ident_Analyzer::ParsePort(const char* line, const char* end_of_line, int& pn)
-	{
-	int n = 0;
+    return line;
+}
 
-	line = util::skip_whitespace(line, end_of_line);
-	if ( line >= end_of_line || ! isdigit(*line) )
-		return nullptr;
+const char* Ident_Analyzer::ParsePort(const char* line, const char* end_of_line, int& pn) {
+    int n = 0;
 
-	const char* l = line;
+    line = util::skip_whitespace(line, end_of_line);
+    if ( line >= end_of_line || ! isdigit(*line) )
+        return nullptr;
 
-	do
-		{
-		n = n * 10 + (*line - '0');
-		++line;
-		} while ( line < end_of_line && isdigit(*line) );
+    const char* l = line;
 
-	line = util::skip_whitespace(line, end_of_line);
+    do {
+        // Stop accumulating once the value is out of range to avoid
+        // signed overflow; the check below still flags it as bad.
+        if ( n <= 65535 )
+            n = n * 10 + (*line - '0');
+        ++line;
+    } while ( line < end_of_line && isdigit(*line) );
 
-	if ( n < 0 || n > 65535 )
-		{
-		Weird("bad_ident_port", l);
-		n = 0;
-		}
+    line = util::skip_whitespace(line, end_of_line);
 
-	pn = n;
+    if ( n < 0 || n > 65535 ) {
+        Weird("bad_ident_port", l);
+        n = 0;
+    }
 
-	return line;
-	}
+    pn = n;
 
-void Ident_Analyzer::BadRequest(int length, const char* line)
-	{
-	String s((const u_char*)line, length, true);
-	Weird("bad_ident_request", s.CheckString());
-	}
+    return line;
+}
 
-void Ident_Analyzer::BadReply(int length, const char* line)
-	{
-	if ( ! did_bad_reply )
-		{
-		String s((const u_char*)line, length, true);
-		Weird("bad_ident_reply", s.CheckString());
-		did_bad_reply = true;
-		}
-	}
+void Ident_Analyzer::BadRequest(int length, const char* line) {
+    String s(reinterpret_cast<const u_char*>(line), length, true);
+    Weird("bad_ident_request", s.CheckString());
+}
 
-	} // namespace zeek::analyzer::ident
+void Ident_Analyzer::BadReply(int length, const char* line) {
+    if ( ! did_bad_reply ) {
+        String s(reinterpret_cast<const u_char*>(line), length, true);
+        Weird("bad_ident_reply", s.CheckString());
+        did_bad_reply = true;
+    }
+}
+
+} // namespace zeek::analyzer::ident

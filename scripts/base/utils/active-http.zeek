@@ -91,14 +91,21 @@ function request(req: Request): ActiveHTTP::Response
 		return resp;
 		}
 
-	local tmpfile     = "/tmp/zeek-activehttp-" + unique_id("");
+	local tmp_dir = getenv("TEMP");
+	if ( tmp_dir == "" )
+		tmp_dir = getenv("TMPDIR");
+	if ( tmp_dir == "" )
+		tmp_dir = "/tmp";
+	tmp_dir = gsub(tmp_dir, /\\/, "/");
+
+	local tmpfile     = tmp_dir + "/zeek-activehttp-" + unique_id("");
 	local bodyfile    = fmt("%s_body", tmpfile);
 	local headersfile = fmt("%s_headers", tmpfile);
 
 	local cmd = request2curl(req, bodyfile, headersfile);
 	local stdin_data = req?$client_data ? req$client_data : "";
 
-	return when ( local result = Exec::run([$cmd=cmd, $stdin=stdin_data, $read_files=set(bodyfile, headersfile)]) )
+	return when [req, resp, cmd, stdin_data, bodyfile, headersfile] ( local result = Exec::run(Exec::Command($cmd=cmd, $stdin=stdin_data, $read_files=set(bodyfile, headersfile))) )
 		{
 		# If there is no response line then nothing else will work either.
 		if ( ! (result?$files && headersfile in result$files) )
@@ -117,7 +124,7 @@ function request(req: Request): ActiveHTTP::Response
 				if ( |response_line| != 3 )
 					return resp;
 
-				resp$code = to_count(response_line[1]);
+				resp$code = response_line[1] as count;
 				resp$msg = response_line[2];
 				resp$body = join_string_vec(result$files[bodyfile], "");
 				}

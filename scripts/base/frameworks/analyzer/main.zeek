@@ -33,7 +33,7 @@ export {
 	## tag: The tag of the analyzer to enable.
 	##
 	## Returns: True if the analyzer was successfully enabled.
-	global enable_analyzer: function(tag: Analyzer::Tag) : bool;
+	global enable_analyzer: function(tag: AllAnalyzers::Tag) : bool;
 
 	## Disables an analyzer. Once disabled, the analyzer will not be used
 	## further for analysis of future connections.
@@ -41,7 +41,7 @@ export {
 	## tag: The tag of the analyzer to disable.
 	##
 	## Returns: True if the analyzer was successfully disabled.
-	global disable_analyzer: function(tag: Analyzer::Tag) : bool;
+	global disable_analyzer: function(tag: AllAnalyzers::Tag) : bool;
 
 	## Registers a set of well-known ports for an analyzer. If a future
 	## connection on one of these ports is seen, the analyzer will be
@@ -50,10 +50,15 @@ export {
 	##
 	## tag: The tag of the analyzer.
 	##
-	## ports: The set of well-known ports to associate with the analyzer.
+	## server_ports: The set of well-known server ports to associate with the analyzer.
+	##               These ports will automatically be added to :zeek:see:`likely_server_ports`.
+	##
+	## non_server_ports: The set of well-known non-server ports (e.g., client ports)
+	##                  to associate with the analyzer. These ports will not be added
+	##                  to :zeek:see:`likely_server_ports`.
 	##
 	## Returns: True if the ports were successfully registered.
-	global register_for_ports: function(tag: Analyzer::Tag, ports: set[port]) : bool;
+	global register_for_ports: function(tag: Analyzer::Tag, server_ports: set[port], non_server_ports: set[port] &default=set()) : bool;
 
 	## Registers an individual well-known port for an analyzer. If a future
 	## connection on this port is seen, the analyzer will be automatically
@@ -88,7 +93,30 @@ export {
 	## Returns: The analyzer name corresponding to the tag.
 	global name: function(tag: Analyzer::Tag) : string;
 
+	## Translates an analyzer type to a string with the analyzer's type.
+	##
+	## Possible values are "protocol", "packet", "file", or "unknown".
+	##
+	## tag: The analyzer tag.
+	##
+	## Returns: The analyzer kind corresponding to the tag.
+	global kind: function(tag: Analyzer::Tag) : string;
+
+	## Check whether the given analyzer name exists.
+	##
+	## This can be used before calling :zeek:see:`Analyzer::get_tag` to
+	## verify that the given name as string is a valid analyzer name.
+	##
+	## name: The analyzer name.
+	##
+	## Returns: True if the given name is a valid analyzer, else false.
+	global has_tag: function(name: string): bool;
+
 	## Translates an analyzer's name to a tag enum value.
+	##
+	## The analyzer is assumed to exist; call
+	## :zeek:see:`Analyzer::has_tag` first to verify that name is a
+	## valid analyzer name.
 	##
 	## name: The analyzer name.
 	##
@@ -130,7 +158,7 @@ export {
 
 	## A set of analyzers to disable by default at startup. The default set
 	## contains legacy analyzers that are no longer supported.
-	global disabled_analyzers: set[Analyzer::Tag] = {
+	global disabled_analyzers: set[AllAnalyzers::Tag] = {
 		ANALYZER_TCPSTATS,
 	} &redef;
 
@@ -139,9 +167,38 @@ export {
 	## Analyzer::register_for_port(s) and packet analyzers can add to this
 	## using PacketAnalyzer::register_for_port(s).
 	global ports: table[AllAnalyzers::Tag] of set[port];
+
+	## A set of protocol, packet or file analyzer tags requested to
+	## be enabled during startup.
+	##
+	## By default, all analyzers in Zeek are enabled. When all analyzers
+	## are disabled through :zeek:see:`Analyzer::disable_all`, this set
+	## set allows to record analyzers to be enabled during Zeek startup.
+	##
+	## This set can be added to via :zeek:see:`redef`.
+	global requested_analyzers: set[AllAnalyzers::Tag] = {} &redef;
+
+	## Event that is raised when an analyzer raised a service violation and was
+	## removed.
+	##
+	## The event is also raised if the analyzer already was no longer active by
+	## the time that the violation was handled - so if it happens at the very
+	## end of a connection.
+	##
+	## Currently this event is only raised for protocol analyzers, as packet
+	## and file analyzers are never actively removed/disabled.
+	##
+	## ts: time at which the violation occurred
+	##
+	## atype: atype: The analyzer tag, such as ``Analyzer::ANALYZER_HTTP``.
+	##
+	##info: Details about the violation. This record should include a :zeek:type:`connection`
+	global analyzer_failed: event(ts: time, atype: AllAnalyzers::Tag, info: AnalyzerViolationInfo);
 }
 
 @load base/bif/analyzer.bif
+@load base/bif/file_analysis.bif
+@load base/bif/packet_analysis.bif
 
 event zeek_init() &priority=5
 	{
@@ -152,25 +209,52 @@ event zeek_init() &priority=5
 		disable_analyzer(a);
 	}
 
-function enable_analyzer(tag: Analyzer::Tag) : bool
+event zeek_init() &priority=-5
 	{
+	for ( a in requested_analyzers )
+		Analyzer::enable_analyzer(a);
+	}
+
+function enable_analyzer(tag: AllAnalyzers::Tag) : bool
+	{
+	if ( is_packet_analyzer(tag) )
+		return PacketAnalyzer::__enable_analyzer(tag);
+
+	if ( is_file_analyzer(tag) )
+		return Files::__enable_analyzer(tag);
+
 	return __enable_analyzer(tag);
 	}
 
-function disable_analyzer(tag: Analyzer::Tag) : bool
+function disable_analyzer(tag: AllAnalyzers::Tag) : bool
 	{
+	if ( is_packet_analyzer(tag) )
+		return PacketAnalyzer::__disable_analyzer(tag);
+
+	if ( is_file_analyzer(tag) )
+		return Files::__disable_analyzer(tag);
+
 	return __disable_analyzer(tag);
 	}
 
-function register_for_ports(tag: Analyzer::Tag, ports: set[port]) : bool
+function register_for_ports(tag: Analyzer::Tag, server_ports: set[port], non_server_ports: set[port] &default=set()) : bool
 	{
 	local rc = T;
 
-	for ( p in ports )
+	for ( p in server_ports )
 		{
 		if ( ! register_for_port(tag, p) )
 			rc = F;
 		}
+
+	for ( p in non_server_ports )
+		{
+		if ( ! register_for_port(tag, p) )
+			rc = F;
+		}
+
+	# Automatically update likely_server_ports with server_ports
+	likely_server_ports += server_ports;
 
 	return rc;
 	}
@@ -200,6 +284,24 @@ function all_registered_ports(): table[AllAnalyzers::Tag] of set[port]
 function name(atype: AllAnalyzers::Tag) : string
 	{
 	return __name(atype);
+	}
+
+function kind(atype: AllAnalyzers::Tag): string
+	{
+	if ( is_protocol_analyzer(atype) )
+		return "protocol";
+	else if ( is_packet_analyzer(atype) )
+		return "packet";
+	else if ( is_file_analyzer(atype) )
+		return "file";
+
+	Reporter::warning(fmt("Unknown kind of analyzer %s", atype));
+	return "unknown";
+	}
+
+function has_tag(name: string): bool
+	{
+	return __has_tag(name);
 	}
 
 function get_tag(name: string): AllAnalyzers::Tag

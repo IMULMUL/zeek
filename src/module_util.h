@@ -1,13 +1,14 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 //
-// These functions are used by both Bro and bifcl.
+// These functions are used by both Zeek and bifcl.
 //
 
 #pragma once
 
 #include <string>
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 static constexpr const char* GLOBAL_MODULE_NAME = "GLOBAL";
 
@@ -19,4 +20,4 @@ extern std::string normalized_module_name(const char* module_name); // w/o ::
 // qualified, in which case it is returned unmodified.
 extern std::string make_full_var_name(const char* module_name, const char* var_name);
 
-	} // namespace zeek::detail
+} // namespace zeek::detail

@@ -1,28 +1,33 @@
 
 #pragma once
 
-#include "analyzer/protocol/tcp/TCP.h"
-#include "analyzer/protocol/pia/PIA.h"
+#include "zeek/Stmt.h"
+#include "zeek/analyzer/protocol/pia/PIA.h"
+#include "zeek/analyzer/protocol/tcp/TCP.h"
 
-namespace binpac  { namespace Foo { class Foo_Conn; } }
+namespace binpac {
+namespace Foo {
+class Foo_Conn;
+}
+} // namespace binpac
 
 namespace btest::plugin::Demo_Foo {
 
 class Foo : public zeek::analyzer::tcp::TCP_ApplicationAnalyzer {
 public:
-	Foo(zeek::Connection* conn);
-	~Foo();
+    Foo(zeek::Connection* conn);
+    ~Foo();
 
-	virtual void Done();
-	virtual void DeliverStream(int len, const u_char* data, bool orig);
-	virtual void Undelivered(uint64_t seq, int len, bool orig);
-	virtual void EndpointEOF(bool is_orig);
+    virtual void Done();
+    virtual void DeliverStream(int len, const u_char* data, bool orig);
+    virtual void Undelivered(uint64_t seq, int len, bool orig);
+    virtual void EndpointEOF(bool is_orig);
 
-	static zeek::analyzer::Analyzer* Instantiate(zeek::Connection* conn)
-		{ return new Foo(conn); }
+    static zeek::analyzer::Analyzer* Instantiate(zeek::Connection* conn) { return new Foo(conn); }
+    void ConnectionEstablishedHandler(const zeek::Args& args, zeek::detail::StmtFlowType& flow);
 
 protected:
-	binpac::Foo::Foo_Conn* interp;
+    binpac::Foo::Foo_Conn* interp;
 };
 
-}
+} // namespace btest::plugin::Demo_Foo

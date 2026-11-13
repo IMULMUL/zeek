@@ -14,7 +14,19 @@ export {
 		## An informational status update.
 		STATUS,
 		## An error situation.
-		ERROR
+		ERROR,
+		## Fatal event, normal operation has most likely broken down.
+		CRITICAL_EVENT,
+		## Unrecoverable event that imparts at least part of the system.
+		ERROR_EVENT,
+		## Unexpected or conspicuous event that may still be recoverable.
+		WARNING_EVENT,
+		## Noteworthy event during normal operation.
+		INFO_EVENT,
+		## Information that might be relevant for a user to understand system behavior.
+		VERBOSE_EVENT,
+		## An event that is relevant only for troubleshooting and debugging.
+		DEBUG_EVENT,
 	};
 
 	## A record type containing the column fields of the Broker log.
@@ -35,17 +47,17 @@ export {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Broker::LOG, [$columns=Info, $path="broker", $policy=log_policy]);
+	Log::create_stream(Broker::LOG, Log::Stream($columns=Info, $path="broker", $policy=log_policy));
 	}
 
 function log_status(ev: string, endpoint: EndpointInfo, msg: string)
 	{
 	local r: Info;
 
-	r = [$ts = network_time(),
-	     $ev = ev,
-	     $ty = STATUS,
-	     $message = msg];
+	r = Broker::Info($ts = network_time(),
+	                 $ev = ev,
+	                 $ty = STATUS,
+	                 $message = msg);
 
 	if ( endpoint?$network )
 		r$peer = endpoint$network;
@@ -75,11 +87,36 @@ event Broker::error(code: ErrorCode, msg: string)
 	ev = subst_string(ev, "_", "-");
 	ev = to_lower(ev);
 
-	Log::write(Broker::LOG, [$ts = network_time(),
+	Log::write(Broker::LOG, Info($ts = network_time(),
 	           $ev = ev,
 	           $ty = ERROR,
-	           $message = msg]);
+	           $message = msg));
 
 	Reporter::error(fmt("Broker error (%s): %s", code, msg));
 	}
 
+event Broker::internal_log_event(lvl: LogSeverityLevel, id: string, description: string)
+	{
+	local severity = Broker::CRITICAL_EVENT;
+	switch lvl {
+		case Broker::LOG_ERROR:
+			severity = Broker::ERROR_EVENT;
+			break;
+		case Broker::LOG_WARNING:
+			severity = Broker::WARNING_EVENT;
+			break;
+		case Broker::LOG_INFO:
+			severity = Broker::INFO_EVENT;
+			break;
+		case Broker::LOG_VERBOSE:
+			severity = Broker::VERBOSE_EVENT;
+			break;
+		case Broker::LOG_DEBUG:
+			severity = Broker::DEBUG_EVENT;
+			break;
+	}
+	Log::write(Broker::LOG, Info($ts = network_time(),
+	           $ty = severity,
+	           $ev = id,
+	           $message = description));
+	}

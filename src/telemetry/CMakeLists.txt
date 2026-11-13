@@ -1,19 +1,19 @@
-include(ZeekSubdir)
-
-include_directories(BEFORE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-set(telemetry_SRCS
+zeek_add_subdir_library(
+    telemetry
+    SOURCES
     Counter.cc
     Gauge.cc
     Histogram.cc
     Manager.cc
-    MetricFamily.cc
-)
+    Opaques.cc
+    ProcessStats.cc
+    Utils.cc)
 
-bif_target(telemetry.bif)
+# BIFs are loaded in src/CMakeLists.txt so they are available early on, to allow
+# our own frameworks to establish metrics in the script layer.
 
-bro_add_subdir_library(telemetry ${telemetry_SRCS})
-
+# We don't need to include the civetweb headers across the whole project, only
+# here in the telemetry framework.
+target_include_directories(
+    zeek_telemetry_obj BEFORE
+    PUBLIC ${PROJECT_SOURCE_DIR}/auxil/prometheus-cpp/3rdparty/civetweb/include)

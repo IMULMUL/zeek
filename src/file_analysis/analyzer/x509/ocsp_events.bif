@@ -23,6 +23,8 @@ event ocsp_request%(f: fa_file, version: count%);
 ##
 ## hashAlgorithm: The hash algorithm used for the issuerKeyHash.
 ##
+## issuerNameHash: Hash of the issuer's distinguished name.
+##
 ## issuerKeyHash: Hash of the issuers public key.
 ##
 ## serialNumber: Serial number of the certificate for which the status is requested.
@@ -39,7 +41,7 @@ event ocsp_request_certificate%(f: fa_file, hashAlgorithm: string, issuerNameHas
 ##
 ## f: The file.
 ##
-## status: The status of the OCSP response (e.g. succesful, malformedRequest, tryLater).
+## status: The status of the OCSP response (e.g. successful, malformedRequest, tryLater).
 ##
 ## .. zeek:see:: ocsp_request ocsp_request_certificate
 ##              ocsp_response_bytes ocsp_response_certificate ocsp_extension
@@ -52,7 +54,7 @@ event ocsp_response_status%(f: fa_file, status: string%);
 ##
 ## f: The file.
 ##
-## status: The status of the OCSP response (e.g. succesful, malformedRequest, tryLater).
+## status: The status of the OCSP response (e.g. successful, malformedRequest, tryLater).
 ##
 ## version: Version of the OCSP response (typically - for version 1).
 ##
@@ -87,11 +89,11 @@ event ocsp_response_bytes%(f: fa_file, status: string, version: count, responder
 ##
 ## revokeTime: Time the certificate was revoked, 0 if not revoked.
 ##
-## revokeTeason: Reason certificate was revoked; empty string if not revoked or not specified.
+## revokeReason: Reason certificate was revoked; empty string if not revoked or not specified.
 ##
 ## thisUpdate: Time this response was generated.
 ##
-## nextUpdate: Time next response will be ready; 0 if not supploed.
+## nextUpdate: Time next response will be ready; 0 if not supplied.
 ##
 ## .. zeek:see:: ocsp_request ocsp_request_certificate ocsp_response_status
 ##              ocsp_response_bytes ocsp_extension

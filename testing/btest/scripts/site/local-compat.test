@@ -1,4 +1,4 @@
-# @TEST-EXEC: zeek local-`cat $DIST/VERSION | sed 's/\([0-9].[0-9]\).*/\1/g'`.zeek
+# @TEST-EXEC: zeek local-`$PYTHON $DIST/tools/get-version.py --source $DIST | cut -d. -f1,2`.zeek
 
 # This tests the compatibility of the past release's site/local.zeek
 # script with the current version of Zeek.
@@ -15,7 +15,7 @@
 # # simply update this test's TEST-START-FILE with the latest contents
 # site/local.zeek.
 
-@TEST-START-FILE local-4.2.zeek
+# @TEST-START-FILE local-9.1.zeek
 ##! Local site policy. Customize as appropriate.
 ##!
 ##! This file will not be overwritten when upgrading or reinstalling!
@@ -26,9 +26,6 @@ redef digest_salt = "Please change this value.";
 
 # This script logs which scripts were loaded during each run.
 @load misc/loaded-scripts
-
-# Apply the default tuning scripts for common tuning settings.
-@load tuning/defaults
 
 # Estimate and log capture loss.
 @load misc/capture-loss
@@ -98,7 +95,7 @@ redef digest_salt = "Please change this value.";
 @load protocols/ssh/interesting-hostnames
 
 # Detect SQL injection attacks.
-@load protocols/http/detect-sqli
+@load protocols/http/detect-sql-injection
 
 #### Network File Handling ####
 
@@ -125,4 +122,4 @@ redef digest_salt = "Please change this value.";
 
 # Uncomment this to source zkg's package state
 # @load packages
-@TEST-END-FILE
+# @TEST-END-FILE

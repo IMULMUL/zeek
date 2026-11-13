@@ -1,208 +1,177 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #include "zeek/PrefixTable.h"
 
 #include "zeek/Reporter.h"
 #include "zeek/Val.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-prefix_t* PrefixTable::MakePrefix(const IPAddr& addr, int width)
-	{
-	prefix_t* prefix = (prefix_t*)util::safe_malloc(sizeof(prefix_t));
+prefix_t* PrefixTable::MakePrefix(const IPAddr& addr, int width) {
+    prefix_t* prefix = reinterpret_cast<prefix_t*>(util::safe_malloc(sizeof(prefix_t)));
 
-	addr.CopyIPv6(&prefix->add.sin6);
-	prefix->family = AF_INET6;
-	prefix->bitlen = width;
-	prefix->ref_count = 1;
+    addr.CopyIPv6(&prefix->add.sin6);
+    prefix->family = AF_INET6;
+    prefix->bitlen = width;
+    prefix->ref_count = 1;
 
-	return prefix;
-	}
+    return prefix;
+}
 
-IPPrefix PrefixTable::PrefixToIPPrefix(prefix_t* prefix)
-	{
-	return IPPrefix(
-		IPAddr(IPv6, reinterpret_cast<const uint32_t*>(&prefix->add.sin6), IPAddr::Network),
-		prefix->bitlen, true);
-	}
+IPPrefix PrefixTable::PrefixToIPPrefix(prefix_t* prefix) {
+    return {IPAddr(IPv6, reinterpret_cast<const uint32_t*>(&prefix->add.sin6), IPAddr::Network),
+            static_cast<uint8_t>(prefix->bitlen), true};
+}
 
-void* PrefixTable::Insert(const IPAddr& addr, int width, void* data)
-	{
-	prefix_t* prefix = MakePrefix(addr, width);
-	patricia_node_t* node = patricia_lookup(tree, prefix);
-	Deref_Prefix(prefix);
+void* PrefixTable::Insert(const IPAddr& addr, int width, void* data) {
+    prefix_t* prefix = MakePrefix(addr, width);
+    patricia_node_t* node = patricia_lookup(tree, prefix);
+    Deref_Prefix(prefix);
 
-	if ( ! node )
-		{
-		reporter->InternalWarning("Cannot create node in patricia tree");
-		return nullptr;
-		}
+    if ( ! node ) {
+        reporter->InternalWarning("Cannot create node in patricia tree");
+        return nullptr;
+    }
 
-	void* old = node->data;
+    void* old = node->data;
 
-	// If there is no data to be associated with addr, we take the
-	// node itself.
-	node->data = data ? data : node;
+    // If there is no data to be associated with addr, we take the
+    // node itself.
+    node->data = data ? data : node;
 
-	return old;
-	}
+    return old;
+}
 
-void* PrefixTable::Insert(const Val* value, void* data)
-	{
-	// [elem] -> elem
-	if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
-		value = value->AsListVal()->Idx(0).get();
+void* PrefixTable::Insert(const Val* value, void* data) {
+    // [elem] -> elem
+    if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
+        value = value->AsListVal()->Idx(0).get();
 
-	switch ( value->GetType()->Tag() )
-		{
-		case TYPE_ADDR:
-			return Insert(value->AsAddr(), 128, data);
-			break;
+    switch ( value->GetType()->Tag() ) {
+        case TYPE_ADDR: return Insert(value->AsAddr(), 128, data); break;
 
-		case TYPE_SUBNET:
-			return Insert(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6(), data);
-			break;
+        case TYPE_SUBNET: return Insert(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6(), data); break;
 
-		default:
-			reporter->InternalWarning("Wrong index type for PrefixTable");
-			return nullptr;
-		}
-	}
+        default: reporter->InternalWarning("Wrong index type for PrefixTable"); return nullptr;
+    }
+}
 
-std::list<std::tuple<IPPrefix, void*>> PrefixTable::FindAll(const IPAddr& addr, int width) const
-	{
-	std::list<std::tuple<IPPrefix, void*>> out;
-	prefix_t* prefix = MakePrefix(addr, width);
+std::list<std::tuple<IPPrefix, void*>> PrefixTable::FindAll(const IPAddr& addr, int width) const {
+    std::list<std::tuple<IPPrefix, void*>> out;
+    prefix_t* prefix = MakePrefix(addr, width);
 
-	int elems = 0;
-	patricia_node_t** list = nullptr;
+    int elems = 0;
+    patricia_node_t** list = nullptr;
 
-	patricia_search_all(tree, prefix, &list, &elems);
+    patricia_search_all(tree, prefix, &list, &elems);
 
-	for ( int i = 0; i < elems; ++i )
-		out.push_back(std::make_tuple(PrefixToIPPrefix(list[i]->prefix), list[i]->data));
+    for ( int i = 0; i < elems; ++i )
+        out.emplace_back(PrefixToIPPrefix(list[i]->prefix), list[i]->data);
 
-	Deref_Prefix(prefix);
-	free(list);
-	return out;
-	}
+    Deref_Prefix(prefix);
 
-std::list<std::tuple<IPPrefix, void*>> PrefixTable::FindAll(const SubNetVal* value) const
-	{
-	return FindAll(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6());
-	}
+    // clang-tidy reports a bugprone-multi-level-implicit-pointer-conversion warning here
+    // because the double-pointer is implicitly converted to a void* for the call to
+    // free(). The double-pointer was calloc'd in patricia_search_all as an array of
+    // pointers, so it's safe to free. Explicitly cast it to void* to silence the warning.
+    free(static_cast<void*>(list));
+    return out;
+}
 
-void* PrefixTable::Lookup(const IPAddr& addr, int width, bool exact) const
-	{
-	prefix_t* prefix = MakePrefix(addr, width);
-	patricia_node_t* node = exact ? patricia_search_exact(tree, prefix)
-	                              : patricia_search_best(tree, prefix);
+std::list<std::tuple<IPPrefix, void*>> PrefixTable::FindAll(const SubNetVal* value) const {
+    return FindAll(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6());
+}
 
-	int elems = 0;
-	patricia_node_t** list = nullptr;
+void* PrefixTable::Lookup(const IPAddr& addr, int width, bool exact) const {
+    prefix_t* prefix = MakePrefix(addr, width);
+    patricia_node_t* node = exact ? patricia_search_exact(tree, prefix) : patricia_search_best(tree, prefix);
 
-	Deref_Prefix(prefix);
-	return node ? node->data : nullptr;
-	}
+    int elems = 0;
+    patricia_node_t** list = nullptr;
 
-void* PrefixTable::Lookup(const Val* value, bool exact) const
-	{
-	// [elem] -> elem
-	if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
-		value = value->AsListVal()->Idx(0).get();
+    Deref_Prefix(prefix);
+    return node ? node->data : nullptr;
+}
 
-	switch ( value->GetType()->Tag() )
-		{
-		case TYPE_ADDR:
-			return Lookup(value->AsAddr(), 128, exact);
-			break;
+void* PrefixTable::Lookup(const Val* value, bool exact) const {
+    // [elem] -> elem
+    if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
+        value = value->AsListVal()->Idx(0).get();
 
-		case TYPE_SUBNET:
-			return Lookup(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6(), exact);
-			break;
+    switch ( value->GetType()->Tag() ) {
+        case TYPE_ADDR: return Lookup(value->AsAddr(), 128, exact); break;
 
-		default:
-			reporter->InternalWarning("Wrong index type %d for PrefixTable",
-			                          value->GetType()->Tag());
-			return nullptr;
-		}
-	}
+        case TYPE_SUBNET: return Lookup(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6(), exact); break;
 
-void* PrefixTable::Remove(const IPAddr& addr, int width)
-	{
-	prefix_t* prefix = MakePrefix(addr, width);
-	patricia_node_t* node = patricia_search_exact(tree, prefix);
-	Deref_Prefix(prefix);
+        default:
+            reporter->InternalWarning("Wrong index type %d for PrefixTable", value->GetType()->Tag());
+            return nullptr;
+    }
+}
 
-	if ( ! node )
-		return nullptr;
+void* PrefixTable::Remove(const IPAddr& addr, int width) {
+    prefix_t* prefix = MakePrefix(addr, width);
+    patricia_node_t* node = patricia_search_exact(tree, prefix);
+    Deref_Prefix(prefix);
 
-	void* old = node->data;
-	patricia_remove(tree, node);
+    if ( ! node )
+        return nullptr;
 
-	return old;
-	}
+    void* old = node->data;
+    patricia_remove(tree, node);
 
-void* PrefixTable::Remove(const Val* value)
-	{
-	// [elem] -> elem
-	if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
-		value = value->AsListVal()->Idx(0).get();
+    return old;
+}
 
-	switch ( value->GetType()->Tag() )
-		{
-		case TYPE_ADDR:
-			return Remove(value->AsAddr(), 128);
-			break;
+void* PrefixTable::Remove(const Val* value) {
+    // [elem] -> elem
+    if ( value->GetType()->Tag() == TYPE_LIST && value->AsListVal()->Length() == 1 )
+        value = value->AsListVal()->Idx(0).get();
 
-		case TYPE_SUBNET:
-			return Remove(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6());
-			break;
+    switch ( value->GetType()->Tag() ) {
+        case TYPE_ADDR: return Remove(value->AsAddr(), 128); break;
 
-		default:
-			reporter->InternalWarning("Wrong index type for PrefixTable");
-			return nullptr;
-		}
-	}
+        case TYPE_SUBNET: return Remove(value->AsSubNet().Prefix(), value->AsSubNet().LengthIPv6()); break;
 
-PrefixTable::iterator PrefixTable::InitIterator()
-	{
-	iterator i;
-	i.Xsp = i.Xstack;
-	i.Xrn = tree->head;
-	i.Xnode = nullptr;
-	return i;
-	}
+        default: reporter->InternalWarning("Wrong index type for PrefixTable"); return nullptr;
+    }
+}
 
-void* PrefixTable::GetNext(iterator* i)
-	{
-	while ( true )
-		{
-		i->Xnode = i->Xrn;
-		if ( ! i->Xnode )
-			return nullptr;
+PrefixTable::iterator PrefixTable::InitIterator() {
+    iterator i = {};
+    i.Xsp = i.Xstack;
+    i.Xrn = tree->head;
+    i.Xnode = nullptr;
+    return i;
+}
 
-		if ( i->Xrn->l )
-			{
-			if ( i->Xrn->r )
-				*i->Xsp++ = i->Xrn->r;
+void* PrefixTable::GetNext(iterator* i) {
+    while ( true ) {
+        i->Xnode = i->Xrn;
+        if ( ! i->Xnode )
+            return nullptr;
 
-			i->Xrn = i->Xrn->l;
-			}
+        if ( i->Xrn->l ) {
+            if ( i->Xrn->r )
+                *i->Xsp++ = i->Xrn->r;
 
-		else if ( i->Xrn->r )
-			i->Xrn = i->Xrn->r;
+            i->Xrn = i->Xrn->l;
+        }
 
-		else if ( i->Xsp != i->Xstack )
-			i->Xrn = *(--i->Xsp);
+        else if ( i->Xrn->r )
+            i->Xrn = i->Xrn->r;
 
-		else
-			i->Xrn = (patricia_node_t*)nullptr;
+        else if ( i->Xsp != i->Xstack )
+            i->Xrn = *(--i->Xsp);
 
-		if ( i->Xnode->prefix )
-			return (void*)i->Xnode->data;
-		}
+        else
+            i->Xrn = nullptr;
 
-	// Not reached.
-	}
+        if ( i->Xnode->prefix )
+            return i->Xnode->data;
+    }
 
-	} // namespace zeek::detail
+    // Not reached.
+}
+
+} // namespace zeek::detail

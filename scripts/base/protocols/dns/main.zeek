@@ -11,6 +11,9 @@ export {
 	## The DNS logging stream identifier.
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for DNS traffic.
+	const ports = { 53/udp, 53/tcp, 137/udp, 5353/udp, 5355/udp } &redef;
+
 	## A default logging policy hook for the stream.
 	global log_policy: Log::PolicyHook;
 
@@ -60,8 +63,9 @@ export {
 		## The Recursion Available bit in a response message indicates
 		## that the name server supports recursive queries.
 		RA:            bool               &log &default=F;
-		## A reserved field that is usually zero in
-		## queries and responses.
+		## A reserved field that is zero in queries and responses unless
+		## using DNSSEC. This field represents the 3-bit Z field using
+		## the specification from RFC 1035.
 		Z:             count              &log &default=0;
 		## The set of resource descriptions in the query answer.
 		answers:       vector of string   &log &optional;
@@ -70,6 +74,10 @@ export {
 		TTLs:          vector of interval &log &optional;
 		## The DNS query was rejected by the server.
 		rejected:      bool               &log &default=F;
+		## The opcode value of the DNS request/response.
+		opcode:        count              &log &optional;
+		## A descriptive string for the opcode.
+		opcode_name:   string             &log &optional;
 
 		## The total number of resource records in a reply message's
 		## answer section.
@@ -117,6 +125,12 @@ export {
 	## DNS message query/transaction ID.
 	type PendingMessages: table[count] of Queue::Queue;
 
+	## Multicast subnets. DNS messages sent to multicast destinations
+	## (e.g. mDNS, LLMNR) cannot be correlated by transaction ID since
+	## replies arrive on different connections. Messages to these
+	## destinations are logged individually without query/response pairing.
+	option multicast_subnets: set[subnet] = { 224.0.0.0/4, [ff00::]/8 };
+
 	## Give up trying to match pending DNS queries or replies for a given
 	## query/transaction ID once this number of unmatched queries or replies
 	## is reached (this shouldn't happen unless either the DNS server/resolver
@@ -158,12 +172,9 @@ redef record connection += {
 	dns_state: State &optional;
 };
 
-const ports = { 53/udp, 53/tcp, 137/udp, 5353/udp, 5355/udp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(DNS::LOG, [$columns=Info, $ev=log_dns, $path="dns", $policy=log_policy]);
+	Log::create_stream(DNS::LOG, Log::Stream($columns=Info, $ev=log_dns, $path="dns", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_DNS, ports);
 	}
 
@@ -191,7 +202,7 @@ function log_unmatched_msgs_queue(q: Queue::Queue)
 
 function log_unmatched_msgs(msgs: PendingMessages)
 	{
-	for ( trans_id, q in msgs )
+	for ( _, q in msgs )
 		{
 		log_unmatched_msgs_queue(q);
 		}
@@ -243,7 +254,19 @@ hook set_session(c: connection, msg: dns_msg, is_query: bool) &priority=5
 		Conn::register_removal_hook(c, finalize_dns);
 		}
 
-	if ( is_query )
+	# Skip query/response association for multicast destinations (mDNS,
+	# LLMNR, etc.) — replies arrive on different connections so correlation
+	# by transaction ID is impossible and causes incorrect pairing.
+	if ( c$id$resp_h in multicast_subnets )
+		{
+		c$dns = new_session(c, msg$id);
+		# Set both flags so dns_end logs this message immediately
+		# rather than waiting for a paired query/reply that will
+		# never arrive on a multicast connection.
+		c$dns$saw_query = T;
+		c$dns$saw_reply = T;
+		}
+	else if ( is_query )
 		{
 		if ( c$dns_state?$pending_replies && msg$id in c$dns_state$pending_replies &&
 		     Queue::len(c$dns_state$pending_replies[msg$id]) > 0 )
@@ -342,12 +365,18 @@ hook set_session(c: connection, msg: dns_msg, is_query: bool) &priority=5
 		if ( msg$rcode != 0 && msg$num_queries == 0 )
 			c$dns$rejected = T;
 		}
+
+	c$dns$opcode = msg$opcode;
+	if ( msg$is_netbios )
+		c$dns$opcode_name = netbios_opcodes[msg$opcode];
+	else
+		c$dns$opcode_name = opcodes[msg$opcode];
 	}
 
 event dns_message(c: connection, is_orig: bool, msg: dns_msg, len: count) &priority=5
 	{
-	if ( msg$opcode != 0 )
-		# Currently only standard queries are tracked.
+	if ( msg$opcode != DNS_OP_QUERY && msg$opcode != DNS_OP_DYNAMIC_UPDATE && msg$opcode != DNS_OP_NOTIFY )
+		# Currently only standard queries and dynamic updates are tracked. Also DNS notify messages.
 		return;
 
 	hook set_session(c, msg, ! msg$QR);
@@ -355,8 +384,8 @@ event dns_message(c: connection, is_orig: bool, msg: dns_msg, len: count) &prior
 
 hook DNS::do_reply(c: connection, msg: dns_msg, ans: dns_answer, reply: string) &priority=5
 	{
-	if ( msg$opcode != 0 )
-		# Currently only standard queries are tracked.
+	if ( msg$opcode != DNS_OP_QUERY && msg$opcode != DNS_OP_DYNAMIC_UPDATE && msg$opcode != DNS_OP_NOTIFY )
+		# Currently only standard queries and dynamic updates are tracked. Also DNS notify messages
 		return;
 
 	if ( ! msg$QR )
@@ -364,34 +393,39 @@ hook DNS::do_reply(c: connection, msg: dns_msg, ans: dns_answer, reply: string) 
 		# the request, which is not what we want to track.
 		return;
 
-	if ( ans$answer_type == DNS_ANS )
+	if ( ans$answer_type != DNS_ANS &&
+	     ans$answer_type != DNS_PREREQUISITE &&
+	     ans$answer_type != DNS_UPDATE )
+		return;
+
+	if ( ! c$dns?$query )
+		c$dns$query = ans$query;
+
+	c$dns$AA    = msg$AA;
+	c$dns$RA    = msg$RA;
+
+	if ( ! c$dns?$rtt )
 		{
-		if ( ! c$dns?$query )
-			c$dns$query = ans$query;
+		c$dns$rtt = network_time() - c$dns$ts;
+		# This could mean that only a reply was seen since
+		# we assume there must be some passage of time between
+		# request and response.
+		if ( c$dns$rtt == 0secs )
+			delete c$dns$rtt;
+		}
 
-		c$dns$AA    = msg$AA;
-		c$dns$RA    = msg$RA;
+	if ( reply != "" )
+		{
+		if ( msg$opcode == DNS_OP_DYNAMIC_UPDATE && ans$answer_type == DNS_UPDATE && ! starts_with(reply, "del:") )
+			reply = fmt("add: %s", reply);
 
-		if ( ! c$dns?$rtt )
-			{
-			c$dns$rtt = network_time() - c$dns$ts;
-			# This could mean that only a reply was seen since
-			# we assume there must be some passage of time between
-			# request and response.
-			if ( c$dns$rtt == 0secs )
-				delete c$dns$rtt;
-			}
+		if ( ! c$dns?$answers )
+			c$dns$answers = vector();
+		c$dns$answers += reply;
 
-		if ( reply != "" )
-			{
-			if ( ! c$dns?$answers )
-				c$dns$answers = vector();
-			c$dns$answers += reply;
-
-			if ( ! c$dns?$TTLs )
-				c$dns$TTLs = vector();
-			c$dns$TTLs += ans$TTL;
-			}
+		if ( ! c$dns?$TTLs )
+			c$dns$TTLs = vector();
+		c$dns$TTLs += ans$TTL;
 		}
 	}
 
@@ -417,8 +451,8 @@ event dns_end(c: connection, msg: dns_msg) &priority=-5
 
 event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count) &priority=5
 	{
-	if ( msg$opcode != 0 )
-		# Currently only standard queries are tracked.
+	if ( msg$opcode != DNS_OP_QUERY && msg$opcode != DNS_OP_DYNAMIC_UPDATE && msg$opcode != DNS_OP_NOTIFY )
+		# Currently only standard queries and dynamic updates are tracked.
 		return;
 
 	c$dns$RD          = msg$RD;
@@ -457,7 +491,10 @@ event dns_unknown_reply(c: connection, msg: dns_msg, ans: dns_answer) &priority=
 
 event dns_A_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
 	{
-	hook DNS::do_reply(c, msg, ans, fmt("%s", a));
+	if ( msg$opcode == DNS_OP_DYNAMIC_UPDATE && ! msg$is_netbios )
+		hook DNS::do_reply(c, msg, ans, fmt("A %s %s", ans$query, a));
+	else
+		hook DNS::do_reply(c, msg, ans, fmt("%s", a));
 	}
 
 event dns_TXT_reply(c: connection, msg: dns_msg, ans: dns_answer, strs: string_vec) &priority=5
@@ -492,12 +529,18 @@ event dns_SPF_reply(c: connection, msg: dns_msg, ans: dns_answer, strs: string_v
 
 event dns_AAAA_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
 	{
-	hook DNS::do_reply(c, msg, ans, fmt("%s", a));
+	if ( msg$opcode == DNS_OP_DYNAMIC_UPDATE && ! msg$is_netbios )
+		hook DNS::do_reply(c, msg, ans, fmt("AAAA %s %s", ans$query, a));
+	else
+		hook DNS::do_reply(c, msg, ans, fmt("%s", a));
 	}
 
 event dns_A6_reply(c: connection, msg: dns_msg, ans: dns_answer, a: addr) &priority=5
 	{
-	hook DNS::do_reply(c, msg, ans, fmt("%s", a));
+	if ( msg$opcode == DNS_OP_DYNAMIC_UPDATE && ! msg$is_netbios )
+		hook DNS::do_reply(c, msg, ans, fmt("A6 %s %s", ans$query, a));
+	else
+		hook DNS::do_reply(c, msg, ans, fmt("%s", a));
 	}
 
 event dns_NS_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string) &priority=5
@@ -516,6 +559,12 @@ event dns_MX_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string,
 	hook DNS::do_reply(c, msg, ans, name);
 	}
 
+event dns_CAA_reply(c: connection, msg: dns_msg, ans: dns_answer, flags: count, tag: string,
+                    value: string) &priority=5
+	{
+	hook DNS::do_reply(c, msg, ans, fmt("CAA %d %s %s", flags, tag, value));
+	}
+
 event dns_PTR_reply(c: connection, msg: dns_msg, ans: dns_answer, name: string) &priority=5
 	{
 	hook DNS::do_reply(c, msg, ans, name);
@@ -531,9 +580,45 @@ event dns_WKS_reply(c: connection, msg: dns_msg, ans: dns_answer) &priority=5
 	hook DNS::do_reply(c, msg, ans, "");
 	}
 
+event dns_HINFO_reply(c: connection, msg: dns_msg, ans: dns_answer, cpu: string, os: string) &priority=5
+	{
+	hook DNS::do_reply(c, msg, ans, fmt("HINFO %s %s", cpu, os));
+	}
+
 event dns_SRV_reply(c: connection, msg: dns_msg, ans: dns_answer, target: string, priority: count, weight: count, p: count) &priority=5
 	{
 	hook DNS::do_reply(c, msg, ans, target);
+	}
+
+event dns_SVCB(c: connection, msg: dns_msg, ans: dns_answer, svcb: dns_svcb_rr) &priority=5
+	{
+	hook DNS::do_reply(c, msg, ans, fmt("SVCB %d %s", svcb$svc_priority, svcb$target_name));
+	}
+
+event dns_HTTPS(c: connection, msg: dns_msg, ans: dns_answer, https: dns_svcb_rr) &priority=5
+	{
+	hook DNS::do_reply(c, msg, ans, fmt("HTTPS %d %s", https$svc_priority, https$target_name));
+	}
+
+event dns_NAPTR_reply(c: connection, msg: dns_msg, ans: dns_answer, naptr: dns_naptr_rr) &priority=5
+	{
+	# Just encode all the fields for NAPTR RR in the reply string.
+	local tmp = "";
+
+	if ( |naptr$regexp| > 0 )
+		tmp += naptr$regexp;
+
+	if ( |naptr$replacement| > 0 )
+		{
+		if ( |tmp| > 0 )
+			tmp += " ";
+
+		tmp += naptr$replacement;
+		}
+
+	local r = fmt("NAPTR %s %s %s %s %s", naptr$order, naptr$preference, naptr$flags, naptr$service, tmp);
+
+	hook DNS::do_reply(c, msg, ans, r);
 	}
 
 # TODO: figure out how to handle these
@@ -616,6 +701,44 @@ event dns_rejected(c: connection, msg: dns_msg, query: string, qtype: count, qcl
 	{
 	if ( c?$dns )
 		c$dns$rejected = T;
+	}
+
+event dns_dynamic_update_pre(c: connection, msg: dns_msg, ans: dns_answer) &priority=5
+	{
+	local what: string;
+	if ( ans$qclass == DNS::NONE && ans$qtype == DNS::ANY )
+		# name is not in use
+		what = fmt("NameNotInUse %s", ans$query);
+	else if ( ans$qclass == DNS::ANY && ans$qtype == DNS::ANY )
+		# name is not in use
+		what = fmt("NameInUse %s", ans$query);
+	else if ( ans$qclass == DNS::NONE)
+		# rrset does not exist
+		what = fmt("NoRRSet %s %s", query_types[ans$qtype], ans$query);
+	else
+		# rrset exists. This covers both dependent and independent.
+		what = fmt("RRSetExists %s %s", query_types[ans$qtype], ans$query);
+
+	local s: string = fmt("pre: %s", what);
+	hook DNS::do_reply(c, msg, ans, s);
+	}
+
+event dns_dynamic_update_del(c: connection, msg: dns_msg, ans: dns_answer) &priority=5
+	{
+	local what: string;
+
+	if ( ans$qclass == DNS::ANY && ans$qtype == DNS::ANY )
+		# Deleting all RRs for a name
+		what = fmt("RRSet * %s", ans$query);
+	else if ( ans$qclass == DNS::NONE )
+		# Deleting a specific RR type for a name
+		what = fmt("RR %s %s", query_types[ans$qtype], ans$query);
+	else
+		# Deleting all RRs of a specific type.
+		what = fmt("RRSet %s", query_types[ans$qtype]);
+
+	local s: string = fmt("del: %s", what);
+	hook DNS::do_reply(c, msg, ans, s);
 	}
 
 hook finalize_dns(c: connection)

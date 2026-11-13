@@ -2,46 +2,51 @@
 
 #pragma once
 
-#include "zeek/zeek-config.h"
+#include <cstdint>
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 class TraversalCallback;
 
-enum TraversalCode
-	{
-	TC_CONTINUE = 0,
-	TC_ABORTALL = 1,
-	TC_ABORTSTMT = 2,
-	};
+enum TraversalCode : uint8_t {
+    TC_CONTINUE = 0,
+    TC_ABORTALL = 1,
+    TC_ABORTSTMT = 2,
+};
 
-#define HANDLE_TC_STMT_PRE(code)                                                                   \
-		{                                                                                          \
-		if ( (code) == zeek::detail::TC_ABORTALL )                                                 \
-			return (code);                                                                         \
-		else if ( (code) == zeek::detail::TC_ABORTSTMT )                                           \
-			return zeek::detail::TC_CONTINUE;                                                      \
-		}
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+#define HANDLE_TC_STMT_PRE(code)                                                                                       \
+    {                                                                                                                  \
+        switch ( code ) {                                                                                              \
+            case zeek::detail::TC_ABORTALL: return (code);                                                             \
+            case zeek::detail::TC_ABORTSTMT: return zeek::detail::TC_CONTINUE;                                         \
+            case zeek::detail::TC_CONTINUE:                                                                            \
+            default: break;                                                                                            \
+        }                                                                                                              \
+    }
 
-#define HANDLE_TC_STMT_POST(code)                                                                  \
-		{                                                                                          \
-		if ( (code) == zeek::detail::TC_ABORTALL )                                                 \
-			return (code);                                                                         \
-		else if ( (code) == zeek::detail::TC_ABORTSTMT )                                           \
-			return zeek::detail::TC_CONTINUE;                                                      \
-		else                                                                                       \
-			return (code);                                                                         \
-		}
+#define HANDLE_TC_STMT_POST(code)                                                                                      \
+    {                                                                                                                  \
+        switch ( code ) {                                                                                              \
+            case zeek::detail::TC_ABORTSTMT: return zeek::detail::TC_CONTINUE;                                         \
+            case zeek::detail::TC_ABORTALL:                                                                            \
+            case zeek::detail::TC_CONTINUE:                                                                            \
+            default: return (code);                                                                                    \
+        }                                                                                                              \
+    }
 
-#define HANDLE_TC_EXPR_PRE(code)                                                                   \
-		{                                                                                          \
-		if ( (code) == zeek::detail::TC_ABORTALL )                                                 \
-			return (code);                                                                         \
-		else if ( (code) == zeek::detail::TC_ABORTSTMT )                                           \
-			return zeek::detail::TC_CONTINUE;                                                      \
-		}
-
+#define HANDLE_TC_EXPR_PRE(code) HANDLE_TC_STMT_PRE(code)
 #define HANDLE_TC_EXPR_POST(code) return (code);
 
-	} // namespace zeek::detail
+#define HANDLE_TC_TYPE_PRE(code) HANDLE_TC_STMT_PRE(code)
+#define HANDLE_TC_TYPE_POST(code) return (code);
+
+#define HANDLE_TC_ATTRS_PRE(code) HANDLE_TC_STMT_PRE(code)
+#define HANDLE_TC_ATTRS_POST(code) return (code);
+
+#define HANDLE_TC_ATTR_PRE(code) HANDLE_TC_STMT_PRE(code)
+#define HANDLE_TC_ATTR_POST(code) return (code);
+
+// NOLINTEND(cppcoreguidelines-macro-usage)
+
+} // namespace zeek::detail

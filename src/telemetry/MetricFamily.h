@@ -2,75 +2,47 @@
 
 #pragma once
 
+#include <span>
 #include <string>
-#include <string_view>
-#include <utility>
+#include <vector>
 
-#include "zeek/Span.h"
+#include "zeek/util-types.h"
 
-namespace zeek::telemetry
-	{
-
-/**
- * A key-value pair for a single label dimension.
- */
-using LabelView = std::pair<std::string_view, std::string_view>;
+namespace zeek::telemetry {
 
 /**
  * Manages a collection (family) of metrics. All members of the family share
  * the same prefix (namespace), name, and label dimensions.
  */
-class MetricFamily
-	{
+class MetricFamily {
 public:
-	struct Impl;
+    virtual ~MetricFamily() = default;
 
-	MetricFamily() = delete;
-	MetricFamily(const MetricFamily&) noexcept = default;
-	MetricFamily& operator=(const MetricFamily&) noexcept = default;
+    virtual zeek_int_t MetricType() const = 0;
 
-	/**
-	 * @return The prefix (namespace) this family belongs to. Builtin metrics
-	 *         of Zeek return @c zeek. Custom metrics, e.g., created in a
-	 *         script, may use a prefix that represents the application/script
-	 *         or protocol (e.g. @c http) name.
-	 */
-	std::string_view Prefix() const noexcept;
+    std::vector<std::string> LabelNames() const { return label_names; }
 
-	/**
-	 * @return The human-readable name of the metric, e.g.,
-	 *          @p open-connections.
-	 */
-	std::string_view Name() const noexcept;
+    virtual void RunCallbacks() = 0;
 
-	/**
-	 * @return The names for all label dimensions.
-	 */
-	Span<const std::string> LabelNames() const noexcept;
-
-	/**
-	 * @return A short explanation of the metric.
-	 */
-	std::string_view Helptext() const noexcept;
-
-	/**
-	 * @return The unit of measurement, preferably a base unit such as
-	 *         @c bytes or @c seconds. Dimensionless counts return the
-	 *         pseudo-unit @c 1.
-	 */
-	std::string_view Unit() const noexcept;
-
-	/**
-	 * @return Whether metrics of this family accumulate values, where only the
-	 *         total value is of interest. For example, the total number of
-	 *         HTTP requests.
-	 */
-	bool IsSum() const noexcept;
+    /**
+     * @return The name in Prometheus-underscore style, including the prefix.
+     */
+    const std::string& Name() const { return name; }
+    const std::string& Unit() const { return unit; }
+    const std::string& HelpText() const { return helptext; }
 
 protected:
-	explicit MetricFamily(Impl* ptr) : pimpl(ptr) { }
+    MetricFamily(std::span<const std::string_view> labels, std::string_view name, std::string_view unit,
+                 std::string_view helptext)
+        : name(std::string(name)), unit(std::string(unit)), helptext(std::string(helptext)) {
+        for ( const auto& lbl : labels )
+            label_names.emplace_back(lbl);
+    }
 
-	Impl* pimpl;
-	};
+    std::vector<std::string> label_names;
+    std::string name;
+    std::string unit;
+    std::string helptext;
+};
 
-	} // namespace zeek::telemetry
+} // namespace zeek::telemetry

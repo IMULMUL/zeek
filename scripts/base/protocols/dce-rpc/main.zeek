@@ -1,11 +1,13 @@
 @load ./consts
-@load base/frameworks/dpd
 @load base/protocols/conn/removal-hooks
 
 module DCE_RPC;
 
 export {
 	redef enum Log::ID += { LOG };
+
+	## Well-known ports for DCE/RPC.
+	const ports = { 135/tcp } &redef;
 
 	global log_policy: Log::PolicyHook;
 
@@ -22,6 +24,18 @@ export {
 		rtt        : interval &log &optional;
 
 		## Remote pipe name.
+		##
+		## Note that this value is from the "sec_addr" field in the
+		## protocol. Zeek uses the "named_pipe" name for historical reasons,
+		## but it may also contain local port numbers rather than named pipes.
+		##
+		## If you prefer to use the "secondary address" name, consider
+		## using :zeek:see:`Log::default_field_name_map`, a ``Log::Filter``'s
+		## :zeek:field:`Log::Filter$field_name_map` field, or removing
+		## the :zeek:attr:`&log` attribute from this field, adding a
+		## new :zeek:field:`sec_addr` field and populating it in a custom
+		## :zeek:see:`dce_rpc_bind_ack` event handler based on the
+		## :zeek:field:`named_pipe` value.
 		named_pipe : string   &log &optional;
 		## Endpoint name looked up from the uuid.
 		endpoint   : string   &log &optional;
@@ -62,12 +76,9 @@ redef record connection += {
 	dce_rpc_backing: table[count] of BackingState &optional;
 };
 
-const ports = { 135/tcp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(DCE_RPC::LOG, [$columns=Info, $path="dce_rpc", $policy=log_policy]);
+	Log::create_stream(DCE_RPC::LOG, Log::Stream($columns=Info, $path="dce_rpc", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_DCE_RPC, ports);
 	}
 
@@ -89,8 +100,6 @@ function set_state(c: connection, state_x: BackingState)
 		c$dce_rpc$endpoint = uuid_endpoint_map[c$dce_rpc_state$uuid];
 	if ( c$dce_rpc_state?$named_pipe )
 		c$dce_rpc$named_pipe = c$dce_rpc_state$named_pipe;
-
-	Conn::register_removal_hook(c, finalize_dce_rpc);
 	}
 
 function set_session(c: connection, fid: count)
@@ -98,7 +107,9 @@ function set_session(c: connection, fid: count)
 	if ( ! c?$dce_rpc_backing )
 		{
 		c$dce_rpc_backing = table();
+		Conn::register_removal_hook(c, finalize_dce_rpc);
 		}
+
 	if ( fid !in c$dce_rpc_backing )
 		{
 		local info = Info($ts=network_time(),$id=c$id,$uid=c$uid);
@@ -217,13 +228,30 @@ event dce_rpc_response(c: connection, fid: count, ctx_id: count, opnum: count, s
 		}
 	}
 
+event smb_discarded_dce_rpc_analyzers(c: connection)
+	{
+	# This event is raised when the DCE-RPC analyzers table
+	# grew too large. Assume things are broken and wipe
+	# the backing table.
+	delete c$dce_rpc_backing;
+	Reporter::conn_weird("SMB_discarded_dce_rpc_analyzers", c, "", "SMB");
+	}
+
+# If a fid representing a pipe was closed, remove it from dce_rpc_backing.
+event smb2_close_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID) &priority=-5
+	{
+	local fid = file_id$persistent + file_id$volatile;
+	if ( c?$dce_rpc_backing )
+		delete c$dce_rpc_backing[fid];
+	}
+
 hook finalize_dce_rpc(c: connection)
 	{
 	if ( ! c?$dce_rpc )
 		return;
 
 	# TODO: Go through any remaining dce_rpc requests that haven't been processed with replies.
-	for ( i, x in c$dce_rpc_backing )
+	for ( _, x in c$dce_rpc_backing )
 		{
 		set_state(c, x);
 

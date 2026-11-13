@@ -1,5 +1,5 @@
 # @TEST-EXEC-FAIL: zeek -b %INPUT >out 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff out
+# @TEST-EXEC: btest-diff-remove-abspath out
 
 type MyVec: vector of count;
 
@@ -43,4 +43,17 @@ event zeek_init()
 event zeek_init()
     {
     local lea: MyVec = vector("thousand-three"); # type clash
+    }
+
+# check operation that's okay as a scalar but not as a vector
+event zeek_init()
+    {
+    if ( "foo" == /fo*/ )
+	print "should not complain";
+    }
+
+event zeek_init()
+    {
+    if ( vector("foo") == vector(/fo*/) )
+	print "should complain";
     }

@@ -1,8 +1,12 @@
 # See the file "COPYING" in the main distribution directory for copyright.
 #
 # All information is from the MySQL internals documentation at:
-# <http://dev.mysql.com/doc/internals/en/client-server-protocol.html>
+# <https://dev.mysql.com/doc/dev/mysql-server/latest/PAGE_PROTOCOL.html>
 #
+
+%extern{
+#include "zeek/analyzer/protocol/mysql/consts.bif.h"
+%}
 
 # Basic Types
 
@@ -48,6 +52,7 @@ type LengthEncodedStringArg(first_byte: uint8) = record {
 		public:
 		int operator()(uint24le* num) const
 			{
+			// Convert 24bit little endian int parsed as 3 uint8 into host endianness.
 			return (num->byte1() << 16) | (num->byte2() << 8) | num->byte3();
 			}
 
@@ -139,36 +144,167 @@ enum state {
 	COMMAND_PHASE    = 1,
 };
 
+enum ConnectionExpected {
+	EXPECT_HANDSHAKE,
+	EXPECT_AUTH_DATA,
+};
+
 enum Expected {
 	NO_EXPECTATION,
 	EXPECT_STATUS,
 	EXPECT_COLUMN_DEFINITION,
 	EXPECT_COLUMN_DEFINITION_OR_EOF,
 	EXPECT_COLUMN_COUNT,
-	EXPECT_EOF,
+	EXPECT_EOF_THEN_RESULTSET,
 	EXPECT_RESULTSET,
 	EXPECT_REST_OF_PACKET,
-	EXPECT_AUTH_SWITCH,
+};
+
+enum EOFType {
+	EOF_INTERMEDIATE,  # column definition to result row transition
+	EOF_END,
 };
 
 enum Client_Capabilities {
-	# Expects an OK (instead of EOF) after the resultset rows of a Text Resultset. 
+	CLIENT_CONNECT_WITH_DB = 0x00000008,
+	CLIENT_SSL           = 0x00000800,
+	CLIENT_PLUGIN_AUTH   = 0x00080000,
+	CLIENT_CONNECT_ATTRS = 0x00100000,
+	# Expects an OK (instead of EOF) after the resultset rows of a Text Resultset.
 	CLIENT_DEPRECATE_EOF = 0x01000000,
+	CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x04000000,
+	CLIENT_QUERY_ATTRIBUTES = 0x08000000,
+};
+
+# Binary Protocol Resultset encoding.
+#
+# https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html
+#
+# Values taken from here: https://dev.mysql.com/doc/dev/mysql-server/latest/namespaceclassic__protocol_1_1field__type.html
+enum field_types {
+	TYPE_DECIMAL = 0x00,
+	TYPE_TINY = 0x01,
+	TYPE_SHORT = 0x02,
+	TYPE_LONG = 0x03,
+	TYPE_FLOAT = 0x04,
+	TYPE_DOUBLE = 0x05,
+	TYPE_NULL = 0x06,
+	TYPE_TIMESTAMP = 0x07,
+	TYPE_LONGLONG = 0x08,
+	TYPE_INT24 = 0x09,
+	TYPE_DATE = 0x0a,
+	TYPE_TIME = 0x0b,
+	TYPE_DATETIME = 0x0c,
+	TYPE_YEAR = 0x0d,
+	TYPE_VARCHAR = 0x0f,
+	TYPE_BIT = 0x10,
+	TYPE_TIMESTAMP2 = 0x11,
+	TYPE_JSON = 0xf5,
+	TYPE_NEWDECIMAL = 0xf6,
+	TYPE_ENUM = 0xf7,
+	TYPE_SET = 0xf8,
+	TYPE_TINYBLOB = 0xf9,
+	TYPE_MEDIUMBLOB = 0xfa,
+	TYPE_LONGBLOB = 0xfb,
+	TYPE_BLOB = 0xfc,
+	TYPE_VARSTRING = 0xfd,
+	TYPE_STRING = 0xfe,
+	TYPE_GEOMETRY = 0xff,
+};
+
+type Date = record {
+	year : int16;
+	month: int8;
+	day  : int8;
+};
+
+type Time = record {
+	hour  : int8;
+	minute: int8;
+	second: int8;
+};
+
+type BinaryDate = record {
+	len: uint8 &enforce(len == 0 || len == 4 || len == 7 || len == 11);
+	have_date: case ( len > 0 ) of {
+		true  -> date  : Date;
+		false -> none_1: empty;
+	};
+	have_time: case ( len > 4 ) of {
+		true  -> time  : Time;
+		false -> none_2: empty;
+	};
+	have_micros: case ( len > 7 ) of {
+		true  -> micros: int32;
+		false -> none_3: empty;
+	};
+};
+
+type DurationTime = record {
+	is_negative: int8 &enforce(is_negative == 0 || is_negative == 1);
+	days       : int32;
+	time       : Time;
+};
+
+type BinaryTime = record {
+	len: uint8 &enforce(len == 0 || len == 8 || len == 12);
+	have_time: case ( len > 0 ) of {
+		true  -> time  : DurationTime;
+		false -> none_1: empty;
+	};
+	have_micros: case ( len > 8 ) of {
+		true  -> micros: int32;
+		false -> none_2: empty;
+	};
+};
+
+type BinaryValue(type: uint16) = record {
+	value:  case ( type ) of {
+		TYPE_DECIMAL -> decimal_val: LengthEncodedInteger;
+		TYPE_TINY -> tiny_val: int8;
+		TYPE_SHORT -> short_val: int16;
+		TYPE_LONG -> long_val: int32;
+		TYPE_FLOAT -> float_val: bytestring &length=4;
+		TYPE_DOUBLE -> double_val: bytestring &length=8;
+		TYPE_NULL -> null_val: empty;  # in null_bitmap
+		TYPE_TIMESTAMP -> timestamp_val: BinaryDate;
+		TYPE_LONGLONG -> longlong_val: int64;
+		TYPE_INT24 -> int24_val: int32;
+		TYPE_DATE -> date_val: BinaryDate;
+		TYPE_TIME -> time_val: BinaryTime;
+		TYPE_DATETIME -> datetime_val: BinaryDate;
+		TYPE_YEAR -> year_val: int16;
+		TYPE_VARCHAR -> varchar_val: LengthEncodedString;
+		TYPE_BIT -> bit_val: LengthEncodedString;
+		TYPE_TIMESTAMP2 -> timestamp2_val: BinaryDate;
+		TYPE_JSON -> json_val: LengthEncodedString;
+		TYPE_NEWDECIMAL -> newdecimal_val: LengthEncodedString;
+		TYPE_ENUM -> enum_val: LengthEncodedString;
+		TYPE_SET -> set_val: LengthEncodedString;
+		TYPE_TINYBLOB -> tinyblob_val: LengthEncodedString;
+		TYPE_MEDIUMBLOB -> mediumblob_val: LengthEncodedString;
+		TYPE_LONGBLOB -> longblob_val: LengthEncodedString;
+		TYPE_BLOB -> blob_val: LengthEncodedString;
+		TYPE_VARSTRING -> varstring_val: LengthEncodedString;
+		TYPE_STRING -> string_val: LengthEncodedString;
+		TYPE_GEOMETRY -> geometry_val: LengthEncodedString;
+	};
 };
 
 type NUL_String = RE/[^\0]*\0/;
+type EmptyOrNUL_String = RE/([^\0]*\0)?/;
 
 # MySQL PDU
 
 type MySQL_PDU(is_orig: bool) = record {
 	hdr  : Header;
 	msg  : case is_orig of {
-		false -> server_msg: Server_Message(hdr.seq_id, hdr.len);
-		true  -> client_msg: Client_Message(state);
+		false -> server_msg: Server_Message(hdr.seq_id, hdr.len, state);
+		true  -> client_msg: Client_Message(hdr.len, state);
 	} &requires(state);
 } &let {
 	state: int = $context.connection.get_state();
-} &length=hdr.len &byteorder=bigendian;
+} &length=hdr.len &byteorder=littleendian;
 
 type Header = record {
 	le_len: uint24le;
@@ -177,17 +313,17 @@ type Header = record {
 	len   : uint32 = to_int()(le_len) + 4;
 } &length=4;
 
-type Server_Message(seq_id: uint8, pkt_len: uint32) = case is_initial of {
-	true  -> initial_handshake: Initial_Handshake_Packet;
-	false -> command_response : Command_Response(pkt_len);
-} &let {
+type Server_Message(seq_id: uint8, pkt_len: uint32, state: int) = case state of {
+	CONNECTION_PHASE -> connection_phase: Server_Connection_Phase(is_initial);
+	COMMAND_PHASE    -> command_response: Command_Response(pkt_len);
+} &requires(is_initial) &let {
 	is_initial : bool = (seq_id == 0) && ($context.connection.get_previous_seq_id() != 255);
 	update_seq_id : bool = $context.connection.set_previous_seq_id(seq_id);
 };
 
-type Client_Message(state: int) = case state of {
-	CONNECTION_PHASE -> connection_phase: Handshake_Response_Packet;
-	COMMAND_PHASE    -> command_phase   : Command_Request_Packet;
+type Server_Connection_Phase(is_initial: bool) = case is_initial of {
+	true  -> initial_handshake: Initial_Handshake_Packet;
+	false -> subsequent_handshake: Server_Connection_Phase_Packets;
 };
 
 # Handshake Request
@@ -212,14 +348,41 @@ type Handshake_v10 = record {
 	character_set          : uint8;
 	status_flags           : uint16;
 	capability_flags_2     : uint16;
-	auth_plugin_data_len   : uint8;
-	auth_plugin_name       : NUL_String;
+	auth_plugin_data_len   : uint8 &enforce( auth_plugin_data_len==0 || auth_plugin_data_len >= 21);
+	reserved               : padding[10];
+	auth_plugin_data_part_2: bytestring &length=auth_plugin_data_part_2_len;
+	have_plugin : case ( ( capability_flags_2 << 16 ) & CLIENT_PLUGIN_AUTH ) of {
+		CLIENT_PLUGIN_AUTH -> auth_plugin: NUL_String;
+		0x0 -> none    : empty;
+	};
+} &let {
+	# The length of auth_plugin_data_part_2 is at least 13 bytes,
+	# or auth_plugin_data_len - 8 if that is larger, check for
+	# auth_plugin_data_len > 21 (8 + 13) to prevent underflow for
+	# when subtracting 8.
+	#
+	# https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
+	auth_plugin_data_part_2_len = auth_plugin_data_len > 21 ? auth_plugin_data_len - 8 : 13;
+	server_query_attrs: bool = $context.connection.set_server_query_attrs(( capability_flags_2 << 16 ) & CLIENT_QUERY_ATTRIBUTES);
 };
 
 type Handshake_v9 = record {
 	server_version: NUL_String;
 	connection_id : uint32;
 	scramble      : NUL_String;
+};
+
+# While in the CONNECTION_PHASE, handle the following packets. Note that
+# this is subtly different from Command_Response_Status which interprets
+# 0xfe as EOF packet and also has does not support AuthMoreData.
+type Server_Connection_Phase_Packets = record {
+	pkt_type: uint8;
+	packet: case pkt_type of {
+		0x00 -> data_ok: OK_Packet;
+		0x01 -> auth_more_data: AuthMoreData(false);
+		0xfe -> auth_switch_request: AuthSwitchRequest;
+		0xff -> data_err: ERR_Packet;
+	};
 };
 
 # Handshake Response
@@ -229,17 +392,61 @@ type Handshake_Response_Packet = case $context.connection.get_version() of {
 	9  -> v9_response : Handshake_Response_Packet_v9;
 } &let {
 	version: uint8 = $context.connection.get_version();
-} &byteorder=bigendian;
+};
+
+type Handshake_Credentials_v10 = record {
+	username : NUL_String;
+	password : LengthEncodedString;
+};
+
+type Connection_Attribute = record {
+	name  : LengthEncodedString;
+	value : LengthEncodedString;
+};
+
+type Handshake_Connection_Attributes = record {
+	length : uint8;
+	attrs  : Connection_Attribute[] &until($input.length() == 0);
+} &length = length+1;
+
+type Handshake_Plain_v10(cap_flags: uint32) = record {
+	credentials: Handshake_Credentials_v10;
+	have_db     : case ( cap_flags & CLIENT_CONNECT_WITH_DB ) of {
+		CLIENT_CONNECT_WITH_DB -> database: NUL_String;
+		0x0 -> none_1    : empty;
+	};
+	have_plugin : case ( cap_flags & CLIENT_PLUGIN_AUTH ) of {
+		CLIENT_PLUGIN_AUTH -> auth_plugin: EmptyOrNUL_String;
+		0x0 -> none_2    : empty;
+	};
+	have_attrs  : case ( cap_flags & CLIENT_CONNECT_ATTRS ) of {
+		CLIENT_CONNECT_ATTRS -> conn_attrs: Handshake_Connection_Attributes;
+		0x0 -> none_3    : empty;
+	};
+	have_zstd   : case ( cap_flags & CLIENT_ZSTD_COMPRESSION_ALGORITHM ) of {
+		CLIENT_ZSTD_COMPRESSION_ALGORITHM -> zstd_compression_level: uint8;
+		0x0 -> none_4    : empty;
+	};
+} &let {
+	# Switch client state into expecting more auth data. If the server responds
+	# with an OK_Packet before, will switch into COMMAND_PHASE.
+	update_conn_expectation: bool = $context.connection.set_next_conn_expected(EXPECT_AUTH_DATA)
+		&if( cap_flags & CLIENT_PLUGIN_AUTH );
+};
 
 type Handshake_Response_Packet_v10 = record {
 	cap_flags   : uint32;
 	max_pkt_size: uint32;
 	char_set    : uint8;
 	pad         : padding[23];
-	username    : NUL_String;
-	password    : bytestring &restofdata;
+	use_ssl     : case ( cap_flags & CLIENT_SSL ) of {
+		CLIENT_SSL -> none    : empty;
+		default -> plain: Handshake_Plain_v10(cap_flags);
+	};
 } &let {
 	deprecate_eof: bool = $context.connection.set_deprecate_eof(cap_flags & CLIENT_DEPRECATE_EOF);
+	client_query_attrs: bool = $context.connection.set_client_query_attrs(cap_flags & CLIENT_QUERY_ATTRIBUTES);
+	proc_cap_flags: bool = $context.connection.set_client_capabilities(cap_flags);
 };
 
 type Handshake_Response_Packet_v9 = record {
@@ -247,21 +454,112 @@ type Handshake_Response_Packet_v9 = record {
 	max_pkt_size : uint24le;
 	username     : NUL_String;
 	auth_response: NUL_String;
-	have_db      : case ( cap_flags & 0x8 ) of {
-		0x8 -> database: NUL_String;
+	have_db      : case ( cap_flags & CLIENT_CONNECT_WITH_DB ) of {
+		CLIENT_CONNECT_WITH_DB -> database: NUL_String;
 		0x0 -> none    : empty;
 	};
 	password     : bytestring &restofdata;
 };
 
+# Connection Phase
+
+type Client_Message(pkt_len: uint32, state: int) = case state of {
+	CONNECTION_PHASE -> connection_phase: Connection_Phase_Packets;
+	COMMAND_PHASE    -> command_phase   : Command_Request_Packet(pkt_len);
+};
+
+type Connection_Phase_Packets = case $context.connection.get_conn_expectation() of {
+	EXPECT_HANDSHAKE        -> handshake_resp: Handshake_Response_Packet;
+	EXPECT_AUTH_DATA        -> auth_data: AuthMoreData(true);
+};
+
+# Query attribute handling for COM_QUERY
+#
+type AttributeTypeAndName = record {
+	type: uint8;
+	unsigned_flag: uint8;
+	name: LengthEncodedString;
+};
+
+type AttributeValue(is_null: bool, type: uint8) = record {
+	null: case is_null of {
+		false -> val: BinaryValue(type);
+		true -> null_val: empty;
+	};
+} &let {
+	# Move parsing the next query attribute.
+	done = $context.connection.next_query_attr();
+};
+
+type Attributes(count: int) = record {
+	null_bitmap         : bytestring &length=(count + 7) / 8;
+	send_types_to_server: uint8 &enforce(send_types_to_server == 1);
+	names               : AttributeTypeAndName[count];
+	values              : AttributeValue(
+		# Check if null_bitmap contains this attribute index. This
+		# will pass true if the attribute value is NULL and parsing
+		# skipped in AttributeValue above.
+		(null_bitmap[$context.connection.query_attr_idx() / 8] >> ($context.connection.query_attr_idx() % 8)) & 0x01,
+		names[$context.connection.query_attr_idx()].type
+	)[] &until($context.connection.query_attr_idx() >= count);
+};
+
+type Query_Attributes = record {
+	count    : LengthEncodedInteger &enforce(to_int()(count) >= 0 && to_int()(count) <= $context.connection.max_com_query_attributes());
+	set_count: LengthEncodedInteger;
+	have_attr: case ( attr_count > 0 ) of {
+		true  -> attrs: Attributes(attr_count);
+		false -> none: empty;
+	} &requires(new_query_attrs);
+} &let {
+	attr_count: int = to_int()(count);
+	new_query_attrs = $context.connection.new_query_attrs();
+};
+
 # Command Request
 
-type Command_Request_Packet = record {
+type Command_Request_Packet(pkt_len: uint32) = record {
 	command: uint8;
+	attrs  : case ( command == COM_QUERY && $context.connection.get_client_query_attrs() && $context.connection.get_server_query_attrs() ) of {
+		true  -> query_attrs: Query_Attributes;
+		false -> none: empty;
+	};
+
+	have_change_user: case is_change_user of {
+		true  -> change_user: Change_User_Packet(pkt_len);
+		false -> none_change_user: empty;
+	};
+
 	arg    : bytestring &restofdata;
 } &let {
+	is_change_user = command == COM_CHANGE_USER;
 	update_expectation: bool = $context.connection.set_next_expected_from_command(command);
 };
+
+# Command from the client to switch the user mid-session.
+#
+# https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_change_user.html
+type Change_User_Packet(pkt_len: uint32) = record {
+	username : NUL_String;
+	auth_plugin_data_len: uint8;
+	auth_plugin_data: bytestring &length=auth_plugin_data_len;
+	database: NUL_String;
+	charset: uint16;
+
+	auth_plugin_name_case: case have_auth_plugin_name of {
+		true -> auth_plugin_name: NUL_String;
+		false -> no_more_data1: empty;
+	};
+
+	conn_attrs_case: case have_conn_attrs of {
+		true -> conn_attrs: Handshake_Connection_Attributes;
+		false -> no_conn_attrs: empty;
+	};
+} &let {
+	have_more_data = offsetof(auth_plugin_name_case) < pkt_len;
+	have_auth_plugin_name = have_more_data && ($context.connection.get_client_capabilities() & CLIENT_PLUGIN_AUTH) == CLIENT_PLUGIN_AUTH;
+	have_conn_attrs = have_more_data && ($context.connection.get_client_capabilities() & CLIENT_CONNECT_ATTRS) == CLIENT_CONNECT_ATTRS;
+} &exportsourcedata;
 
 # Command Response
 
@@ -272,8 +570,7 @@ type Command_Response(pkt_len: uint32) = case $context.connection.get_expectatio
 	EXPECT_RESULTSET                -> resultset     : Resultset(pkt_len);
 	EXPECT_REST_OF_PACKET           -> rest          : bytestring &restofdata;
 	EXPECT_STATUS                   -> status        : Command_Response_Status;
-	EXPECT_AUTH_SWITCH              -> auth_switch   : AuthSwitchRequest;
-	EXPECT_EOF                      -> eof           : EOFIfLegacy(pkt_len);
+	EXPECT_EOF_THEN_RESULTSET       -> eof           : EOFIfLegacyThenResultset(pkt_len);
 	default                         -> unknown       : empty;
 };
 
@@ -281,7 +578,7 @@ type Command_Response_Status = record {
 	pkt_type: uint8;
 	response: case pkt_type of {
 		0x00    -> data_ok:  OK_Packet;
-		0xfe    -> data_eof: EOF_Packet;
+		0xfe    -> data_eof: EOF_Packet(EOF_END);
 		0xff    -> data_err: ERR_Packet;
 		default -> unknown:  empty;
 	};
@@ -311,49 +608,47 @@ type ColumnDefinition = record {
 	def  : ColumnDefinition41(dummy);
 } &let {
 	update_remain     : bool = $context.connection.dec_remaining_cols();
-	update_expectation: bool = $context.connection.set_next_expected($context.connection.get_remaining_cols() > 0 ? EXPECT_COLUMN_DEFINITION : EXPECT_EOF);
+	update_expectation: bool = $context.connection.set_next_expected($context.connection.get_remaining_cols() > 0 ? EXPECT_COLUMN_DEFINITION : EXPECT_EOF_THEN_RESULTSET);
 };
 
-type EOFOrOK = case $context.connection.get_deprecate_eof() of {
-	false -> eof: EOF_Packet;
+# Only used to indicate the end of a result, no intermediate eofs here.
+# MySQL spec says "You must check whether the packet length is less than 9
+# to make sure that it is a EOF_Packet packet" so the value of 13 here
+# comes from that 9, plus a 4-byte header.
+type EOFOrOK(pkt_len: uint32) = case ( $context.connection.get_deprecate_eof() || pkt_len > 13 ) of {
+	false -> eof: EOF_Packet(EOF_END);
 	true  -> ok: OK_Packet;
 };
 
 type ColumnDefinitionOrEOF(pkt_len: uint32) = record {
 	marker    : uint8;
-	def_or_eof: case is_eof of {
-		true  -> eof: EOFOrOK;
+	def_or_eof: case is_eof_or_ok of {
+		true  -> eof: EOFOrOK(pkt_len);
 		false -> def: ColumnDefinition41(marker);
-	} &requires(is_eof);
+	} &requires(is_eof_or_ok);
 } &let {
-	# MySQL spec says "You must check whether the packet length is less than 9
-	# to make sure that it is a EOF_Packet packet" so the value of 13 here
-	# comes from that 9, plus a 4-byte header.
-	is_eof: bool = (marker == 0xfe && pkt_len < 13);
+	is_eof_or_ok: bool = (marker == 0xfe);
 };
 
 
-type EOFIfLegacy(pkt_len: uint32) = case $context.connection.get_deprecate_eof() of {
-	false -> eof: EOF_Packet;
+type EOFIfLegacyThenResultset(pkt_len: uint32) = case $context.connection.get_deprecate_eof() of {
+	false -> eof: EOF_Packet_With_Marker(EOF_INTERMEDIATE);
 	true  -> resultset: Resultset(pkt_len);
 } &let {
 	update_result_seen: bool = $context.connection.set_results_seen(0);
-	update_expectation: bool = $context.connection.set_next_expected(EXPECT_RESULTSET);
+	update_expectation: bool = $context.connection.set_next_expected(EXPECT_RESULTSET) &if( ! $context.connection.get_deprecate_eof() );
 };
 
 type Resultset(pkt_len: uint32) = record {
 	marker    : uint8;
-	row_or_eof: case is_eof of {
-		true  -> eof: EOFOrOK;
+	row_or_eof: case is_eof_or_ok of {
+		true  -> eof: EOFOrOK(pkt_len);
 		false -> row: ResultsetRow(marker);
-	} &requires(is_eof);
+	} &requires(is_eof_or_ok);
 } &let {
-	# MySQL spec says "You must check whether the packet length is less than 9
-	# to make sure that it is a EOF_Packet packet" so the value of 13 here
-	# comes from that 9, plus a 4-byte header.
-	is_eof            : bool = (marker == 0xfe && pkt_len < 13);
+	is_eof_or_ok      : bool = (marker == 0xfe);
 	update_result_seen: bool = $context.connection.inc_results_seen();
-	update_expectation: bool = $context.connection.set_next_expected(is_eof ? NO_EXPECTATION : EXPECT_RESULTSET);
+	update_expectation: bool = $context.connection.set_next_expected(is_eof_or_ok ? NO_EXPECTATION : EXPECT_RESULTSET);
 };
 
 type ResultsetRow(first_byte: uint8) = record {
@@ -377,10 +672,18 @@ type ColumnDefinition41(first_byte: uint8) = record {
 	filler   : padding[2];
 };
 
+# Opaque auth data exchanged during the connection phase between client and server.
+type AuthMoreData(is_orig: bool) = record {
+	data  : bytestring &restofdata;
+};
+
 type AuthSwitchRequest = record {
-	status: uint8;
 	name  : NUL_String;
 	data  : bytestring &restofdata;
+} &let {
+	update_conn_expectation: bool = $context.connection.set_next_conn_expected(EXPECT_AUTH_DATA);
+	# After an AuthSwitchRequest, server replies with OK_Packet, ERR_Packet or AuthMoreData.
+	update_expectation: bool = $context.connection.set_next_expected(EXPECT_STATUS);
 };
 
 type ColumnDefinition320 = record {
@@ -408,9 +711,14 @@ type ERR_Packet = record {
 	update_state: bool = $context.connection.update_state(COMMAND_PHASE);
 };
 
-type EOF_Packet = record {
+type EOF_Packet(typ: EOFType) = record {
 	warnings: uint16;
 	status  : uint16;
+};
+
+type EOF_Packet_With_Marker(typ: EOFType) = record {
+	marker : uint8;
+	payload: EOF_Packet(typ);
 } &let {
 	update_state: bool = $context.connection.update_state(COMMAND_PHASE);
 };
@@ -423,10 +731,16 @@ refine connection MySQL_Conn += {
 		uint8 previous_seq_id_;
 		int state_;
 		Expected expected_;
+		ConnectionExpected conn_expected_;
 		uint32 col_count_;
 		uint32 remaining_cols_;
 		uint32 results_seen_;
 		bool deprecate_eof_;
+		bool server_query_attrs_;
+		bool client_query_attrs_;
+		uint32 client_capabilities_;
+		std::string auth_plugin_;
+		int query_attr_idx_;
 	%}
 
 	%init{
@@ -434,10 +748,15 @@ refine connection MySQL_Conn += {
 		previous_seq_id_ = 0;
 		state_ = CONNECTION_PHASE;
 		expected_ = EXPECT_STATUS;
+		conn_expected_ = EXPECT_HANDSHAKE;
 		col_count_ = 0;
 		remaining_cols_ = 0;
 		results_seen_ = 0;
 		deprecate_eof_ = false;
+		server_query_attrs_ = false;
+		client_query_attrs_ = false;
+		client_capabilities_ = 0;
+		query_attr_idx_ = 0;
 	%}
 
 	function get_version(): uint8
@@ -470,6 +789,10 @@ refine connection MySQL_Conn += {
 	function update_state(s: state): bool
 		%{
 		state_ = s;
+
+		if ( s == COMMAND_PHASE )
+			conn_expected_ = EXPECT_HANDSHAKE; // Reset connection phase expectation
+
 		return true;
 		%}
 
@@ -484,6 +807,39 @@ refine connection MySQL_Conn += {
 		return true;
 		%}
 
+	function get_server_query_attrs(): bool
+		%{
+		return server_query_attrs_;
+		%}
+
+	function set_server_query_attrs(q: bool): bool
+		%{
+		server_query_attrs_ = q;
+		return true;
+		%}
+
+	function get_client_query_attrs(): bool
+		%{
+		return client_query_attrs_;
+		%}
+
+	function set_client_query_attrs(q: bool): bool
+		%{
+		client_query_attrs_ = q;
+		return true;
+		%}
+
+	function set_client_capabilities(c: uint32): bool
+		%{
+		client_capabilities_ = c;
+		return true;
+		%}
+
+	function get_client_capabilities(): uint32
+		%{
+		return client_capabilities_;
+		%}
+
 	function get_expectation(): Expected
 		%{
 		return expected_;
@@ -495,105 +851,62 @@ refine connection MySQL_Conn += {
 		return true;
 		%}
 
+	function get_conn_expectation(): ConnectionExpected
+		%{
+		return conn_expected_;
+		%}
+
+	function set_next_conn_expected(c: ConnectionExpected): bool
+		%{
+		conn_expected_ = c;
+		return true;
+		%}
+
 	function set_next_expected_from_command(cmd: uint8): bool
 		%{
 		switch ( cmd ) {
 		case COM_SLEEP:
-			expected_ = EXPECT_STATUS;
-			break;
 		case COM_QUIT:
-			expected_ = EXPECT_STATUS;
-			break;
 		case COM_INIT_DB:
+		case COM_CREATE_DB:
+		case COM_DROP_DB:
+		case COM_REFRESH:
+		case COM_SHUTDOWN:
+		case COM_CONNECT:
+		case COM_PROCESS_KILL:
+		case COM_DEBUG:
+		case COM_PING:
+		case COM_TIME:
+		case COM_DELAYED_INSERT:
+		case COM_DAEMON:
+		case COM_RESET_CONNECTION:
 			expected_ = EXPECT_STATUS;
 			break;
 		case COM_QUERY:
+		case COM_PROCESS_INFO:
 			expected_ = EXPECT_COLUMN_COUNT;
 			break;
 		case COM_FIELD_LIST:
 			expected_ = EXPECT_COLUMN_DEFINITION_OR_EOF;
 			break;
-		case COM_CREATE_DB:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_DROP_DB:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_REFRESH:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_SHUTDOWN:
-			expected_ = EXPECT_STATUS;
-			break;
 		case COM_STATISTICS:
 			expected_ = EXPECT_REST_OF_PACKET;
 			break;
-		case COM_PROCESS_INFO:
-			expected_ = EXPECT_COLUMN_COUNT;
-			break;
-		case COM_CONNECT:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_PROCESS_KILL:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_DEBUG:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_PING:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_TIME:
-			expected_ = EXPECT_STATUS;
-			break;
-		case COM_DELAYED_INSERT:
-			expected_ = EXPECT_STATUS;
-			break;
 		case COM_CHANGE_USER:
-			expected_ = EXPECT_AUTH_SWITCH;
+			update_state(CONNECTION_PHASE);
 			break;
 		case COM_BINLOG_DUMP:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_TABLE_DUMP:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_CONNECT_OUT:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_REGISTER_SLAVE:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_PREPARE:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_EXECUTE:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_SEND_LONG_DATA:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_CLOSE:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_RESET:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_SET_OPTION:
-			expected_ = NO_EXPECTATION;
-			break;
 		case COM_STMT_FETCH:
-			expected_ = NO_EXPECTATION;
-			break;
-		case COM_DAEMON:
-			expected_ = EXPECT_STATUS;
-			break;
 		case COM_BINLOG_DUMP_GTID:
-			expected_ = NO_EXPECTATION;
-			break;
-		case COM_RESET_CONNECTION:
-			expected_ = EXPECT_STATUS;
-			break;
 		default:
 			expected_ = NO_EXPECTATION;
 			break;
@@ -643,6 +956,34 @@ refine connection MySQL_Conn += {
 	function inc_results_seen(): bool
 		%{
 		++results_seen_;
+		return true;
+		%}
+
+	function max_com_query_attributes(): int
+		%{
+		// Hard-code 2^16-1 as maximum here just to avoid running
+		// into potential INT_MAX overflows elsewhere.
+		const auto limit = zeek::BifConst::MySQL::max_com_query_attributes;
+		if ( limit == 0 || limit > 65535 )
+			return 65535;
+
+		return static_cast<int>(limit);
+		%}
+
+	function query_attr_idx(): int
+		%{
+		return query_attr_idx_;
+		%}
+
+	function new_query_attrs(): bool
+		%{
+		query_attr_idx_ = 0;
+		return true;
+		%}
+
+	function next_query_attr(): bool
+		%{
+		query_attr_idx_++;
 		return true;
 		%}
 };

@@ -40,7 +40,7 @@ function describe_file(f: fa_file): string
 	if ( f$source != "HTTP" )
 		return "";
 
-	for ( cid, c in f$conns )
+	for ( _, c in f$conns )
 		{
 		if ( c?$http )
 			return build_url_http(c$http);
@@ -51,6 +51,6 @@ function describe_file(f: fa_file): string
 event zeek_init() &priority=5
 	{
 	Files::register_protocol(Analyzer::ANALYZER_HTTP,
-	                         [$get_file_handle = HTTP::get_file_handle,
-	                          $describe        = HTTP::describe_file]);
+	                         Files::ProtoRegistration($get_file_handle = HTTP::get_file_handle,
+	                                                  $describe        = HTTP::describe_file));
 	}

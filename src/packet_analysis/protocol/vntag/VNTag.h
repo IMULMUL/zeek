@@ -2,24 +2,18 @@
 
 #pragma once
 
+#include "zeek/iosource/Packet.h"
 #include "zeek/packet_analysis/Analyzer.h"
-#include "zeek/packet_analysis/Component.h"
 
-namespace zeek::packet_analysis::VNTag
-	{
+namespace zeek::packet_analysis::VNTag {
 
-class VNTagAnalyzer : public Analyzer
-	{
+class VNTagAnalyzer : public Analyzer {
 public:
-	VNTagAnalyzer();
-	~VNTagAnalyzer() override = default;
+    VNTagAnalyzer();
 
-	bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
+    bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
 
-	static zeek::packet_analysis::AnalyzerPtr Instantiate()
-		{
-		return std::make_shared<VNTagAnalyzer>();
-		}
-	};
+    static zeek::packet_analysis::AnalyzerPtr Instantiate() { return std::make_shared<VNTagAnalyzer>(); }
+};
 
-	}
+} // namespace zeek::packet_analysis::VNTag

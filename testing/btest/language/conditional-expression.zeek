@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
 	{
@@ -20,13 +21,22 @@ function f2(): bool
 	return F;
 	}
 
+# The following needs to be a global to test for a ZAM regression where
+# the ZAM optimizer will optimize away the problematic condition if the
+# value is constant.
+global false = F;
+
+global a: count;
+global b: count;
+global res: count;
+global res2: bool;
+
+global s: set[string] = { "one", "two", "three" };
+global t: table[count] of string = { [1] = "one", [2] = "two", [3] = "three" };
+global v: vector of string = { "one", "two", "three" };
+
 event zeek_init()
 	{
-	local a: count;
-	local b: count;
-	local res: count;
-	local res2: bool;
-
 	# Test that the correct operand is evaluated
 
 	a = b = 0;
@@ -62,21 +72,18 @@ event zeek_init()
 	test_case( "associativity", ct == 2 );
 
 	# Test for unspecified set coercion
-	local s: set[string] = { "one", "two", "three" };
 	local sT = T ? set() : s;
 	local sF = F ? s : set();
 	print |sT|, type_name(sT);
 	print |sF|, type_name(sF);
 
 	# Test for unspecified table coercion
-	local t: table[count] of string = { [1] = "one", [2] = "two", [3] = "three" };
 	local tT = T ? table() : t;
 	local tF = F ? t : table();
 	print |tT|, type_name(tT);
 	print |tF|, type_name(tF);
 
 	# Test for unspecified vector coercion
-	local v: vector of string = { "one", "two", "three" };
 	local vT = T ? vector() : v;
 	local vF = F ? v : vector();
 	print |vT|, type_name(vT);
@@ -86,4 +93,8 @@ event zeek_init()
 	local tvc = vector(T, F, T);
 	local tvr = tvc ? vector(1, 2, 3) : vector(4, 5, 6);
 	print tvr, type_name(tvr);
+
+	# Test for ternary results
+	local tvr2 = false ? vector(1, 2, 3) : vector(4, 5, 6);
+	print tvr2, type_name(tvr2);
 	}

@@ -8,109 +8,110 @@
 #include "zeek/script_opt/IDOptInfo.h"
 #include "zeek/script_opt/ProfileFunc.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-class GenIDDefs : public TraversalCallback
-	{
+class GenIDDefs : public TraversalCallback {
 public:
-	GenIDDefs(std::shared_ptr<ProfileFunc> _pf, const Func* f, ScopePtr scope, StmtPtr body);
+    GenIDDefs(std::shared_ptr<ProfileFunc> _pf, const FuncPtr& f, ScopePtr scope, StmtPtr body);
 
 private:
-	// Traverses the given function body, using the first two
-	// arguments for context.
-	void TraverseFunction(const Func* f, ScopePtr scope, StmtPtr body);
+    // Traverses the given function body, using the first two
+    // arguments for context.
+    void TraverseFunction(const FuncPtr& f, ScopePtr scope, StmtPtr body);
 
-	TraversalCode PreStmt(const Stmt*) override;
-	TraversalCode PostStmt(const Stmt*) override;
-	TraversalCode PreExpr(const Expr*) override;
-	TraversalCode PostExpr(const Expr*) override;
+    TraversalCode PreStmt(const Stmt*) override;
+    void AnalyzeSwitch(const SwitchStmt* sw);
 
-	// Analyzes the target of an assignment.  Returns true if the LHS
-	// was an expression for which we can track it as a definition
-	// (e.g., assignments to variables, but not to elements of
-	// aggregates).  "rhs" gives the expression used for simple direct
-	// assignments.
-	bool CheckLHS(const ExprPtr& lhs, const ExprPtr& rhs = nullptr);
+    TraversalCode PostStmt(const Stmt*) override;
+    TraversalCode PreExpr(const Expr*) override;
+    TraversalCode PostExpr(const Expr*) override;
 
-	// True if the given expression directly represents an aggregate.
-	bool IsAggr(const ExprPtr& e) const { return IsAggr(e.get()); }
-	bool IsAggr(const Expr* e) const;
+    // Analyzes the target of an assignment.  Returns true if the LHS
+    // was an expression for which we can track it as a definition
+    // (e.g., assignments to variables, but not to elements of
+    // aggregates).  "rhs" gives the expression used for simple direct
+    // assignments.
+    bool CheckLHS(const ExprPtr& lhs, const ExprPtr& rhs = nullptr);
 
-	// If -u is active, checks for whether the given identifier present
-	// in the given expression is undefined at that point.
-	void CheckVarUsage(const Expr* e, const ID* id);
+    // True if the given expression directly represents an aggregate.
+    bool IsAggr(const ExprPtr& e) const { return IsAggr(e.get()); }
+    bool IsAggr(const Expr* e) const;
 
-	// Begin a new confluence block with the given statement.
-	void StartConfluenceBlock(const Stmt* s);
+    // If -u is active, checks for whether the given identifier present
+    // in the given expression is undefined at that point.
+    void CheckVarUsage(const Expr* e, const IDPtr& id);
 
-	// Finish up the current confluence block.  If no_orig_flow is true,
-	// then there's no control flow from the origin (the statement that
-	// starts the block).
-	void EndConfluenceBlock(bool no_orig_flow = false);
+    // Begin a new confluence block with the given statement.
+    void StartConfluenceBlock(const Stmt* s);
 
-	// Note branches from the given "from" statement back up to the
-	// beginning of, or just past, the "to" statement.  If "close_all"
-	// is true then the nature of the branch is that it terminates
-	// all pending confluence blocks.
-	void BranchBackTo(const Stmt* from, const Stmt* to, bool close_all);
-	void BranchBeyond(const Stmt* from, const Stmt* to, bool close_all);
+    // Finish up the current confluence block.  If no_orig_flow is true,
+    // then there's no control flow from the origin (the statement that
+    // starts the block).
+    void EndConfluenceBlock(bool no_orig_flow = false);
 
-	// These search back through the active confluence blocks looking
-	// for either the innermost loop, or the innermost block for which
-	// a "break" would target going beyond that block.
-	const Stmt* FindLoop();
-	const Stmt* FindBreakTarget();
+    // Note branches from the given "from" statement back up to the
+    // beginning of, or just past, the "to" statement.  If "close_all"
+    // is true then the nature of the branch is that it terminates
+    // all pending confluence blocks.
+    void BranchBackTo(const Stmt* from, const Stmt* to, bool close_all);
+    void BranchBeyond(const Stmt* from, const Stmt* to, bool close_all);
 
-	// Note that the given statement executes a "return" (which could
-	// instead be an outer "break" for a hook).
-	void ReturnAt(const Stmt* s);
+    // These search back through the active confluence blocks looking
+    // for either the innermost loop, or the innermost block for which
+    // a "break" would target going beyond that block.
+    const Stmt* FindLoop();
+    const Stmt* FindBreakTarget();
 
-	// Tracks that the given identifier is defined at the current
-	// statement in the current confluence block.  'e' is the
-	// expression used to define the identifier, for simple direct
-	// assignments.
-	void TrackID(const IDPtr& id, const ExprPtr& e = nullptr) { TrackID(id.get(), e); }
-	void TrackID(const ID* id, const ExprPtr& e = nullptr);
+    // Note that the given statement executes a "return" (which could
+    // instead be an outer "break" for a hook).
+    void ReturnAt(const Stmt* s);
 
-	// Profile for the function.  Currently, all we actually need from
-	// this is the list of globals and locals.
-	std::shared_ptr<ProfileFunc> pf;
+    // Tracks that the given identifier is defined at the current
+    // statement in the current confluence block.  'e' is the
+    // expression used to define the identifier, for simple direct
+    // assignments.
+    void TrackID(const IDPtr& id, const ExprPtr& e = nullptr);
 
-	// Whether the Func is an event/hook/function.  We currently only
-	// need to know whether it's a hook, so we correctly interpret an
-	// outer "break" in that context.
-	FunctionFlavor func_flavor;
+    // Profile for the function.  Currently, all we actually need from
+    // this is the list of globals and locals.
+    std::shared_ptr<ProfileFunc> pf;
 
-	// The statement we are currently traversing.
-	const Stmt* curr_stmt = nullptr;
+    // Whether the Func is an event/hook/function.  We currently only
+    // need to know whether it's a hook, so we correctly interpret an
+    // outer "break" in that context.
+    FunctionFlavor func_flavor;
 
-	// Used to number Stmt objects found during AST traversal.
-	int stmt_num;
+    // The most recently traversed statement.
+    const Stmt* last_stmt_traversed = nullptr;
 
-	// A stack of confluence blocks, with the innermost at the top/back.
-	std::vector<const Stmt*> confluence_blocks;
+    // > 0 when we're inside a table constructor. A counter rather than
+    // a boolean to support the possibility of nested constructors.
+    int in_table_constructor = 0;
 
-	// Index into confluence_blocks of "barrier" blocks that
-	// represent unavoidable confluence blocks (no branching
-	// out of them).  These include the outermost block and
-	// any catch-return blocks.  We track these because
-	// (1) there's no need for an IDOptInfo to track previously
-	// unseen confluence regions outer to those, and (2) they
-	// can get quite deep due when inlining, so there are savings
-	// to avoid having to track outer to them.
-	std::vector<bro_uint_t> barrier_blocks;
+    // Used to number Stmt objects found during AST traversal.
+    int stmt_num;
 
-	// The following is parallel to confluence_blocks except
-	// the front entry tracks identifiers at the outermost
-	// (non-confluence) scope.  Thus, to index it for a given
-	// confluence block i, we need to use i+1.
-	std::vector<std::unordered_set<const ID*>> modified_IDs;
+    // A stack of confluence blocks, with the innermost at the top/back.
+    std::vector<const Stmt*> confluence_blocks;
 
-	// If non-zero, indicates we should suspend any generation
-	// of usage errors.  A counter rather than a boolean because
-	// such situations might nest.
-	int suppress_usage = 0;
-	};
+    // Stack of confluence blocks corresponding to activate catch-return
+    // statements.  We used to stop identifier definitions at these
+    // boundaries, but given there's limited confluence (i.e., the body of
+    // the catch-return *will* execute, up through its first return), we
+    // can do broader optimization if we don't treat them as their own
+    // (new) confluence blocks.
+    std::vector<zeek_uint_t> cr_active;
 
-	} // zeek::detail
+    // The following is parallel to confluence_blocks except
+    // the front entry tracks identifiers at the outermost
+    // (non-confluence) scope.  Thus, to index it for a given
+    // confluence block i, we need to use i+1.
+    std::vector<IDSet> modified_IDs;
+
+    // If non-zero, indicates we should suspend any generation
+    // of usage errors.  A counter rather than a boolean because
+    // such situations might nest.
+    int suppress_usage = 0;
+};
+
+} // namespace zeek::detail

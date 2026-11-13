@@ -1,3 +1,5 @@
+%gen-native
+
 ##! Definitions of built-in functions related to loading compiled-to-C++
 ##! scripts.
 
@@ -26,18 +28,10 @@ function load_CPP%(h: count%): bool
 	     ! detail::CPP_init_hook )
 		{
 		reporter->Error("load of non-existing C++ code (%" PRIu64 ")", h);
-		return zeek::val_mgr->False();
+		return false;
 		}
 
-	// Ensure that any compiled scripts are used.  If instead
-	// the AST is used, then when we activate the standalone
-	// scripts, they won't be able to avoid installing redundant
-	// event handlers.
-	detail::analysis_options.use_CPP = true;
+	(*cb->second)();
 
-	// Mark this script as one we should activate after loading
-	// compiled scripts.
-	detail::standalone_activations.push_back(cb->second);
-
-	return zeek::val_mgr->True();
+	return true;
 	%}

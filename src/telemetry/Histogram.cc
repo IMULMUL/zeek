@@ -2,101 +2,43 @@
 
 #include "zeek/telemetry/Histogram.h"
 
-#include <cassert>
+#include <algorithm>
+#include <span>
 
-#include "zeek/telemetry/Detail.h"
+using namespace zeek::telemetry;
 
-#include "caf/telemetry/histogram.hpp"
-#include "caf/telemetry/metric_family.hpp"
-#include "caf/telemetry/metric_family_impl.hpp"
+double Histogram::Sum() const noexcept {
+    auto metric = handle.Collect();
+    return static_cast<double>(metric.histogram.sample_sum);
+}
 
-namespace zeek::telemetry
-	{
+Histogram::Histogram(FamilyType* family, const prometheus::Labels& labels,
+                     const prometheus::Histogram::BucketBoundaries& bounds) noexcept
+    : handle(family->Add(labels, bounds)), labels(labels) {}
 
-// -- IntHistogram ---------------------------------------------------------------
+std::shared_ptr<Histogram> HistogramFamily::GetOrAdd(std::span<const LabelView> labels) {
+    prometheus::Labels p_labels = detail::BuildPrometheusLabels(labels);
 
-void IntHistogram::Observe(int64_t value) noexcept
-	{
-	deref(pimpl).observe(value);
-	}
+    auto check = [&](const std::shared_ptr<Histogram>& histo) { return histo->CompareLabels(p_labels); };
 
-int64_t IntHistogram::Sum() const noexcept
-	{
-	return deref(pimpl).sum();
-	}
+    if ( auto it = std::ranges::find_if(histograms, check); it != histograms.end() )
+        return *it;
 
-size_t IntHistogram::NumBuckets() const noexcept
-	{
-	return deref(pimpl).buckets().size();
-	}
+    auto histogram = std::make_shared<Histogram>(family, p_labels, boundaries);
+    histograms.push_back(histogram);
+    return histogram;
+}
 
-int64_t IntHistogram::CountAt(size_t index) const noexcept
-	{
-	auto xs = deref(pimpl).buckets();
-	assert(index < xs.size());
-	return xs[index].count.value();
-	}
+/**
+ * @copydoc GetOrAdd
+ */
+std::shared_ptr<Histogram> HistogramFamily::GetOrAdd(std::initializer_list<LabelView> labels) {
+    return GetOrAdd(std::span{labels.begin(), labels.size()});
+}
 
-int64_t IntHistogram::UpperBoundAt(size_t index) const noexcept
-	{
-	auto xs = deref(pimpl).buckets();
-	assert(index < xs.size());
-	return xs[index].upper_bound;
-	}
-
-IntHistogramFamily::IntHistogramFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
-
-IntHistogram IntHistogramFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return IntHistogram{hdl};
-							  });
-	}
-
-// -- DblHistogram ---------------------------------------------------------------
-
-void DblHistogram::Observe(double amount) noexcept
-	{
-	deref(pimpl).observe(amount);
-	}
-
-double DblHistogram::Sum() const noexcept
-	{
-	return deref(pimpl).sum();
-	}
-
-size_t DblHistogram::NumBuckets() const noexcept
-	{
-	return deref(pimpl).buckets().size();
-	}
-
-int64_t DblHistogram::CountAt(size_t index) const noexcept
-	{
-	auto xs = deref(pimpl).buckets();
-	assert(index < xs.size());
-	return xs[index].count.value();
-	}
-
-double DblHistogram::UpperBoundAt(size_t index) const noexcept
-	{
-	auto xs = deref(pimpl).buckets();
-	assert(index < xs.size());
-	return xs[index].upper_bound;
-	}
-
-DblHistogramFamily::DblHistogramFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
-
-DblHistogram DblHistogramFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return DblHistogram{hdl};
-							  });
-	}
-
-	} // namespace zeek::telemetry
+HistogramFamily::HistogramFamily(prometheus::Family<prometheus::Histogram>* family, std::span<const double> bounds,
+                                 std::span<const std::string_view> labels, std::string_view unit,
+                                 std::string_view helptext)
+    : MetricFamily(labels, family->GetName(), unit, helptext), family(family) {
+    std::ranges::copy(bounds, std::back_inserter(boundaries));
+}

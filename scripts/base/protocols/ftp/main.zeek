@@ -10,6 +10,7 @@
 @load base/utils/numbers
 @load base/utils/addrs
 @load base/frameworks/cluster
+@load base/frameworks/notice/weird
 @load base/protocols/conn/removal-hooks
 
 module FTP;
@@ -17,6 +18,9 @@ module FTP;
 export {
 	## The FTP protocol logging stream identifier.
 	redef enum Log::ID += { LOG };
+
+	## Well-known ports for FTP.
+	const ports = { 21/tcp, 2811/tcp } &redef;
 
 	## A default logging policy hook for the stream.
 	global log_policy: Log::PolicyHook;
@@ -51,6 +55,42 @@ export {
 	## FTP data finalization hook.  Expected FTP data channel state may
 	## get purged when called.
 	global finalize_ftp_data: hook(c: connection);
+
+	## Allow a client to send this many commands before the server
+	## sends a reply. If this value is exceeded a weird named
+	## FTP_too_many_pending_commands is logged for the connection.
+	option max_pending_commands = 20;
+
+	## Truncate the user field in the log to that many bytes to avoid
+	## excessive logging volume as this values is replicated in each
+	## of the entries related to an FTP session.
+	option max_user_length = 128;
+
+	## Truncate the password field in the log to that many bytes to avoid
+	## excessive logging volume as this values is replicated in each
+	## of the entries related to an FTP session.
+	option max_password_length = 128;
+
+	## Truncate the arg field in the log to that many bytes to avoid
+	## excessive logging volume.
+	option max_arg_length = 4096;
+
+	## Truncate the reply_msg field in the log to that many bytes to avoid
+	## excessive logging volume.
+	option max_reply_msg_length = 4096;
+
+	## The maximum number of expected data channels to track. This caps the
+	## size of the ftp_data_expected table. When reached, workers will cease
+	## storing additional entries and skip publishing to other nodes to
+	## prevent unbounded state growth and unreasonable cluster load.
+	## A FTP_too_many_expected_data_channels weird is produced every time
+	## the limit is reached, but will be subject to weird rate-limiting.
+	## Setting this variable to 0 disables the limit.
+	option max_expected_data_channels = 100000;
+
+	## If true, log a summary entry for FTP sessions where a user was
+	## seen but no logged_commands were issued.
+	option log_at_least_one_command = T;
 }
 
 # Add the state tracking information variable to the connection record
@@ -59,19 +99,16 @@ redef record connection += {
 	ftp_data_reuse: bool &default=F;
 };
 
-const ports = { 21/tcp, 2811/tcp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(FTP::LOG, [$columns=Info, $ev=log_ftp, $path="ftp", $policy=log_policy]);
+	Log::create_stream(FTP::LOG, Log::Stream($columns=Info, $ev=log_ftp, $path="ftp", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_FTP, ports);
 	}
 
 # Establish the variable for tracking expected connections.
 global ftp_data_expected: table[addr, port] of Info &read_expire=5mins;
 
-function minimize_info(info: Info): Info
+function minimize_info(info: Info): Info &is_used
 	{
 	# Just minimal data for sending to other remote Zeek processes.
 	# Generally, only data that's consistent across an entire FTP session or
@@ -103,7 +140,7 @@ const directory_cmds = {
 	["XPWD", 257],
 };
 
-function ftp_relay_topic(): string
+function ftp_relay_topic(): string &is_used
 	{
 	local rval = Cluster::rr_topic(Cluster::proxy_pool, "ftp_transfer_rr_key");
 
@@ -141,12 +178,20 @@ function set_ftp_session(c: connection)
 		Conn::register_removal_hook(c, finalize_ftp);
 
 		# Add a shim command so the server can respond with some init response.
-		add_pending_cmd(c$ftp$pending_commands, "<init>", "");
+		add_pending_cmd(c$ftp$pending_commands, ++c$ftp$command_seq, "<init>", "");
 		}
 	}
 
-function ftp_message(s: Info)
+function should_hide_password(s: Info) : bool
 	{
+	return ! s$capture_password && to_lower(s$user) !in guest_ids;
+	}
+
+function ftp_message(c: connection)
+	{
+	if ( ! c?$ftp ) return;
+	local password_hidden_string = "<hidden>";
+	local s: Info = c$ftp;
 	s$ts=s$cmdarg$ts;
 	s$command=s$cmdarg$cmd;
 
@@ -154,34 +199,57 @@ function ftp_message(s: Info)
 	if ( s$cmdarg$cmd in file_cmds )
 		s$arg = build_url_ftp(s);
 
+	# Avoid logging arg or reply_msg that are too big.
+	if ( |s$arg| > max_arg_length )
+		{
+		Reporter::conn_weird("FTP_arg_too_long", c, cat(|s$arg|), "FTP");
+		s$arg = s$arg[:max_arg_length];
+		}
+
+	if ( s?$reply_msg && |s$reply_msg| > max_reply_msg_length )
+		{
+		Reporter::conn_weird("FTP_reply_msg_too_long", c, cat(|s$reply_msg|), "FTP");
+		s$reply_msg = s$reply_msg[:max_reply_msg_length];
+		}
+
+	# In case of logging PASS command, the password will appear in arg column and might need hiding
+	if ( s$command == "PASS" && should_hide_password(s))
+		s$arg = password_hidden_string;
+
 	if ( s$arg == "" )
 		delete s$arg;
 
-	if ( s?$password &&
-	     ! s$capture_password &&
-	     to_lower(s$user) !in guest_ids )
-		{
-		s$password = "<hidden>";
-		}
+	if ( s?$password && should_hide_password(s))
+		s$password = password_hidden_string;
 
 	if ( s?$cmdarg && s$command in logged_commands)
+		{
 		Log::write(FTP::LOG, s);
+		c$ftp$logged_command_seen = T;
+		}
 
-	# The MIME and file_size fields are specific to file transfer commands
-	# and may not be used in all commands so they need reset to "blank"
-	# values after logging.
+	# The MIME and file_size, data_channel and fuid fields are specific to
+	# file transfer commands and may not be used in all commands so they
+	# need reset to "blank" values after logging.
 	delete s$mime_type;
 	delete s$file_size;
-	# Same with data channel.
 	delete s$data_channel;
+	delete s$fuid;
 	}
 
-event sync_add_expected_data(s: Info, chan: ExpectedDataChannel)
+event sync_add_expected_data(s: Info, chan: ExpectedDataChannel) &is_used
 	{
 @if ( Cluster::local_node_type() == Cluster::PROXY ||
       Cluster::local_node_type() == Cluster::MANAGER )
-	Broker::publish(Cluster::worker_topic, sync_add_expected_data, minimize_info(s), chan);
+	Cluster::publish(Cluster::worker_topic, sync_add_expected_data, minimize_info(s), chan);
 @else
+	if ( [chan$resp_h, chan$resp_p] !in ftp_data_expected &&
+	     max_expected_data_channels > 0 && |ftp_data_expected| >= max_expected_data_channels )
+		{
+		Reporter::net_weird("FTP_too_many_expected_data_channels", cat(|ftp_data_expected|), "FTP");
+		return;
+		}
+
 	ftp_data_expected[chan$resp_h, chan$resp_p] = s;
 	Analyzer::schedule_analyzer(chan$orig_h, chan$resp_h, chan$resp_p,
 	                            Analyzer::ANALYZER_FTP_DATA,
@@ -189,11 +257,11 @@ event sync_add_expected_data(s: Info, chan: ExpectedDataChannel)
 @endif
 	}
 
-event sync_remove_expected_data(resp_h: addr, resp_p: port)
+event sync_remove_expected_data(resp_h: addr, resp_p: port) &is_used
 	{
 @if ( Cluster::local_node_type() == Cluster::PROXY ||
       Cluster::local_node_type() == Cluster::MANAGER )
-	Broker::publish(Cluster::worker_topic, sync_remove_expected_data, resp_h, resp_p);
+	Cluster::publish(Cluster::worker_topic, sync_remove_expected_data, resp_h, resp_p);
 @else
 	delete ftp_data_expected[resp_h, resp_p];
 @endif
@@ -201,6 +269,13 @@ event sync_remove_expected_data(resp_h: addr, resp_p: port)
 
 function add_expected_data_channel(s: Info, chan: ExpectedDataChannel)
 	{
+	if ( [chan$resp_h, chan$resp_p] !in ftp_data_expected &&
+	     max_expected_data_channels > 0 && |ftp_data_expected| >= max_expected_data_channels )
+		{
+		Reporter::net_weird("FTP_too_many_expected_data_channels", cat(|ftp_data_expected|), "FTP");
+		return;
+		}
+
 	s$passive = chan$passive;
 	s$data_channel = chan;
 	ftp_data_expected[chan$resp_h, chan$resp_p] = s;
@@ -208,7 +283,7 @@ function add_expected_data_channel(s: Info, chan: ExpectedDataChannel)
 	                            Analyzer::ANALYZER_FTP_DATA,
 	                            5mins);
 @if ( Cluster::is_enabled() )
-	Broker::publish(ftp_relay_topic(), sync_add_expected_data, minimize_info(s), chan);
+	Cluster::publish(ftp_relay_topic(), sync_add_expected_data, minimize_info(s), chan);
 @endif
 	}
 
@@ -221,22 +296,40 @@ event ftp_request(c: connection, command: string, arg: string) &priority=5
 	# attackers.
 	if ( c?$ftp && c$ftp?$cmdarg && c$ftp?$reply_code )
 		{
-		remove_pending_cmd(c$ftp$pending_commands, c$ftp$cmdarg);
-		ftp_message(c$ftp);
+		if ( remove_pending_cmd(c$ftp$pending_commands, c$ftp$cmdarg) )
+			ftp_message(c);
 		}
 
 	local id = c$id;
 	set_ftp_session(c);
 
 	# Queue up the new command and argument
-	add_pending_cmd(c$ftp$pending_commands, command, arg);
+	if ( |c$ftp$pending_commands| < max_pending_commands )
+		add_pending_cmd(c$ftp$pending_commands, ++c$ftp$command_seq, command, arg);
+	else
+		Reporter::conn_weird("FTP_too_many_pending_commands", c,
+				     cat(|c$ftp$pending_commands|), "FTP");
 
 	if ( command == "USER" )
+		{
+		if ( |arg| > max_user_length )
+			{
+			Reporter::conn_weird("FTP_user_too_long", c, cat(|arg|), "FTP");
+			arg = arg[:max_user_length];
+			}
+
 		c$ftp$user = arg;
-
+		}
 	else if ( command == "PASS" )
-		c$ftp$password = arg;
+		{
+		if ( |arg| > max_password_length )
+			{
+			Reporter::conn_weird("FTP_password_too_long", c, cat(|arg|), "FTP");
+			arg = arg[:max_password_length];
+			}
 
+		c$ftp$password = arg;
+		}
 	else if ( command == "PORT" || command == "EPRT" )
 		{
 		local data = (command == "PORT") ?
@@ -244,8 +337,8 @@ event ftp_request(c: connection, command: string, arg: string) &priority=5
 
 		if ( data$valid )
 			{
-			add_expected_data_channel(c$ftp, [$passive=F, $orig_h=id$resp_h,
-			                                  $resp_h=data$h, $resp_p=data$p]);
+			add_expected_data_channel(c$ftp, ExpectedDataChannel($passive=F, $orig_h=id$resp_h,
+			                                                     $resp_h=data$h, $resp_p=data$p));
 			}
 		else
 			{
@@ -258,15 +351,61 @@ event ftp_request(c: connection, command: string, arg: string) &priority=5
 event ftp_reply(c: connection, code: count, msg: string, cont_resp: bool) &priority=5
 	{
 	set_ftp_session(c);
+
+	# Skip matching up intermediate reply lines (that do not have a
+	# valid status code) with pending commands. Because they may not
+	# have a proper status code, there's little point setting whatever
+	# their reply_code and reply_msg are on the command.
+	#
+	# There's a quirk: Some FTP servers return(ed?) replies like the
+	# following, violating the multi-line reply protocol:
+	#
+	#  c: STOR intermol.ps
+	#  s: 150 Opening ASCII mode data connection for 'intermol.ps'.
+	#  s: 230- WARNING! 4 bare linefeeds received in ASCII mode
+	#  s:    File may not have transferred correctly.
+	#  s: 226 Transfer complete.
+	#
+	# This is a multiline response started with 230-, but never finalized
+	# with the same status code. It should have been completed with
+	# "230 <some final message>", but instead was completed with "226 ...".
+	# This confuses our parser, returning cont_resp = T for all following
+	# server messages. This caused a regression as the current command wasn't
+	# updated for logging.
+	#
+	# The regex below is a best effort to keep existing behavior
+	# in face of such traffic. It matches on messages that look
+	# like valid status codes (starting with 3 digits followed by
+	# at least 10 ASCII characters).
+	#
+	# There's the following in RFC 959, so in the future we could push
+	# the detection/logic down into the parser instead of here.
+	#
+	#   If an intermediary line begins with a 3-digit number, the Server
+	#   must pad the front to avoid confusion.
+	#
+	if ( cont_resp && code == 0 && c$ftp?$reply_code )
+		{
+		if ( /^[1-9][0-9]{2} [[:print:]]{10}.*/ !in msg )
+			return;
+		else
+			{
+			# This might be worth a weird, but not sure it's
+			# worth it and how trigger happy it could be.
+			# Reporter::conn_weird("FTP_intermediate_line_with_reply_code", c, msg, "FTP");
+			}
+		}
+
 	c$ftp$cmdarg = get_pending_cmd(c$ftp$pending_commands, code, msg);
 	c$ftp$reply_code = code;
 	c$ftp$reply_msg = msg;
 
-	# TODO: figure out what to do with continued FTP response (not used much)
-	if ( cont_resp ) return;
+	# Do not parse out information from any but the first reply line.
+	if ( cont_resp )
+		return;
 
 	# TODO: do some sort of generic clear text login processing here.
-	local response_xyz = parse_ftp_reply_code(code);
+	#local response_xyz = parse_ftp_reply_code(code);
 	#if ( response_xyz$x == 2 &&  # successful
 	#     session$cmdarg$cmd == "PASS" )
 	#	do_ftp_login(c, session);
@@ -294,8 +433,8 @@ event ftp_reply(c: connection, code: count, msg: string, cont_resp: bool) &prior
 			if ( code == 229 && data$h == [::] )
 				data$h = c$id$resp_h;
 
-			add_expected_data_channel(c$ftp, [$passive=T, $orig_h=c$id$orig_h,
-			                          $resp_h=data$h, $resp_p=data$p]);
+			add_expected_data_channel(c$ftp, ExpectedDataChannel($passive=T, $orig_h=c$id$orig_h,
+			                                                     $resp_h=data$h, $resp_p=data$p));
 			}
 		else
 			{
@@ -303,8 +442,10 @@ event ftp_reply(c: connection, code: count, msg: string, cont_resp: bool) &prior
 			}
 		}
 
-	if ( [c$ftp$cmdarg$cmd, code] in directory_cmds )
+	if ( [c$ftp$cmdarg$cmd, code] in directory_cmds && ! c$ftp$cmdarg$cwd_consumed )
 		{
+		c$ftp$cmdarg$cwd_consumed = T;
+
 		if ( c$ftp$cmdarg$cmd == "CWD" )
 			c$ftp$cwd = build_path_compressed(c$ftp$cwd, c$ftp$cmdarg$arg);
 
@@ -321,7 +462,7 @@ event ftp_reply(c: connection, code: count, msg: string, cont_resp: bool) &prior
 	if ( |c$ftp$pending_commands| > 1 )
 		{
 		remove_pending_cmd(c$ftp$pending_commands, c$ftp$cmdarg);
-		ftp_message(c$ftp);
+		ftp_message(c);
 		}
 	}
 
@@ -359,7 +500,7 @@ hook finalize_ftp_data(c: connection)
 		{
 		delete ftp_data_expected[c$id$resp_h, c$id$resp_p];
 @if ( Cluster::is_enabled() )
-		Broker::publish(ftp_relay_topic(), sync_remove_expected_data, c$id$resp_h, c$id$resp_p);
+		Cluster::publish(ftp_relay_topic(), sync_remove_expected_data, c$id$resp_h, c$id$resp_p);
 @endif
 		}
 	}
@@ -369,9 +510,15 @@ hook finalize_ftp(c: connection)
 	{
 	if ( ! c?$ftp ) return;
 
-	for ( ca, cmdarg in c$ftp$pending_commands )
+	for ( _, cmdarg in c$ftp$pending_commands )
 		{
 		c$ftp$cmdarg = cmdarg;
-		ftp_message(c$ftp);
+		ftp_message(c);
+		}
+
+	if ( c$ftp?$user && ! c$ftp$logged_command_seen && log_at_least_one_command )
+		{
+		local s: Info = c$ftp;
+		Log::write(FTP::LOG, s);
 		}
 	}

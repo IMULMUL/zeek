@@ -48,6 +48,9 @@ export {
 
 		## Indicate if the filter was applied successfully.
 		success: bool  &log &default=T;
+
+		## A string reason why the filter failed to be created/installed.
+		failure_reason: string &log &optional;
 	};
 
 	## The BPF filter that is used by default to define what traffic should
@@ -97,6 +100,16 @@ export {
 	## Returns: A boolean value to indicate if the filter was successfully
 	##          installed or not.
 	global exclude_for: function(filter_id: string, filter: string, span: interval): bool;
+
+	## Remove a previously added exclude filter fragment by name. The
+	## traffic that was being filtered will be allowed through the filter
+	## after calling this function.
+	##
+	## filter_id: The name given to the filter fragment which you'd like to remove.
+	##
+	## Returns: A boolean value to indicate if a filter fragment with the given name
+	##          actually installed.
+	global remove_exclude: function(filter_id: string): bool;
 
 	## Call this function to build and install a new dynamically built
 	## packet filter.
@@ -162,7 +175,7 @@ event filter_change_tracking()
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(PacketFilter::LOG, [$columns=Info, $path="packet_filter", $policy=log_policy]);
+	Log::create_stream(PacketFilter::LOG, Log::Stream($columns=Info, $path="packet_filter", $policy=log_policy));
 
 	# Preverify the capture and restrict filters to give more granular failure messages.
 	for ( id, cf in capture_filters )
@@ -192,11 +205,18 @@ function register_filter_plugin(fp: FilterPlugin)
 
 event remove_dynamic_filter(filter_id: string)
 	{
+	remove_exclude(filter_id);
+	}
+
+function remove_exclude(filter_id: string): bool
+	{
 	if ( filter_id in dynamic_restrict_filters )
 		{
 		delete dynamic_restrict_filters[filter_id];
 		install();
+		return T;
 		}
+	return F;
 	}
 
 function exclude(filter_id: string, filter: string): bool
@@ -237,7 +257,7 @@ function build(): string
 	if ( |capture_filters| == 0 && ! enable_auto_protocol_capture_filters )
 		cfilter = default_capture_filter;
 
-	for ( id, cf in capture_filters )
+	for ( _, cf in capture_filters )
 		cfilter = combine_filters(cfilter, "or", cf);
 
 	if ( enable_auto_protocol_capture_filters )
@@ -245,11 +265,11 @@ function build(): string
 
 	# Apply the restriction filters.
 	local rfilter = "";
-	for ( id, rf in restrict_filters )
+	for ( _, rf in restrict_filters )
 		rfilter = combine_filters(rfilter, "and", rf);
 
 	# Apply the dynamic restriction filters.
-	for ( filt, drf in dynamic_restrict_filters )
+	for ( _, drf in dynamic_restrict_filters )
 		rfilter = combine_filters(rfilter, "and", string_cat("not (", drf, ")"));
 
 	# Finally, join them into one filter.
@@ -276,20 +296,38 @@ function install(): bool
 		return F;
 
 	local ts = current_time();
+
 	if ( ! Pcap::precompile_pcap_filter(DefaultPcapFilter, tmp_filter) )
 		{
-		NOTICE([$note=Compile_Failure,
-		        $msg=fmt("Compiling packet filter failed"),
-		        $sub=tmp_filter]);
-		if ( network_time() == 0.0 )
-			Reporter::fatal(fmt("Bad pcap filter '%s'", tmp_filter));
-		else
-			Reporter::warning(fmt("Bad pcap filter '%s'", tmp_filter));
+		local state = Pcap::get_filter_state(DefaultPcapFilter);
+		local error_string : string;
+		if ( state == Pcap::fatal )
+			{
+			NOTICE(Notice::Info($note=Compile_Failure,
+			                    $msg=fmt("Compiling packet filter failed"),
+			                    $sub=tmp_filter));
+
+			error_string = fmt("Bad pcap filter '%s': %s", tmp_filter,
+			                   Pcap::get_filter_state_string(DefaultPcapFilter));
+
+			if ( network_time() == 0.0 )
+				Reporter::fatal(error_string);
+			else
+				Reporter::warning(error_string);
+			}
+		else if ( state == Pcap::warning )
+			{
+			error_string = fmt("Warning while compiling pcap filter '%s': %s",
+			                   tmp_filter,
+			                   Pcap::get_filter_state_string(DefaultPcapFilter));
+
+			Reporter::warning(error_string);
+			}
 		}
 	local diff = current_time()-ts;
 	if ( diff > max_filter_compile_time )
-		NOTICE([$note=Too_Long_To_Compile_Filter,
-		        $msg=fmt("A BPF filter is taking longer than %0.1f seconds to compile", diff)]);
+		NOTICE(Notice::Info($note=Too_Long_To_Compile_Filter,
+		                    $msg=fmt("A BPF filter is taking longer than %0.1f seconds to compile", diff)));
 
 	# Set it to the current filter if it passed precompiling
 	current_filter = tmp_filter;
@@ -310,9 +348,11 @@ function install(): bool
 		{
 		# Installing the filter failed for some reason.
 		info$success = F;
-		NOTICE([$note=Install_Failure,
-		        $msg=fmt("Installing packet filter failed"),
-		        $sub=current_filter]);
+		info$failure_reason = Pcap::get_filter_state_string(DefaultPcapFilter);
+
+		NOTICE(Notice::Info($note=Install_Failure,
+		                    $msg=fmt("Installing packet filter failed"),
+		                    $sub=current_filter));
 		}
 
 	if ( reading_live_traffic() || reading_traces() )

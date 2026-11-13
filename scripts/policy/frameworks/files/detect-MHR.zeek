@@ -1,5 +1,5 @@
 ##! Detect file downloads that have hash values matching files in Team
-##! Cymru's Malware Hash Registry (https://www.team-cymru.com/mhr.html).
+##! Cymru's Malware Hash Registry (https://www.team-cymru.com/mhr).
 
 @load base/frameworks/files
 @load base/frameworks/notice
@@ -16,7 +16,7 @@ export {
 
 	## File types to attempt matching against the Malware Hash Registry.
 	option match_file_types = /application\/x-dosexec/ |
-	                         /application\/vnd.ms-cab-compressed/ |
+	                         /application\/vnd\.ms-cab-compressed/ |
 	                         /application\/pdf/ |
 	                         /application\/x-shockwave-flash/ |
 	                         /application\/x-java-applet/ |
@@ -39,18 +39,18 @@ function do_mhr_lookup(hash: string, fi: Notice::FileInfo)
 	{
 	local hash_domain = fmt("%s.malware.hash.cymru.com", hash);
 
-	when ( local MHR_result = lookup_hostname_txt(hash_domain) )
+	when [hash, fi, hash_domain] ( local MHR_result = lookup_hostname_txt(hash_domain) )
 		{
 		# Data is returned as "<dateFirstDetected> <detectionRate>"
 		local MHR_answer = split_string1(MHR_result, / /);
 
 		if ( |MHR_answer| == 2 )
 			{
-			local mhr_detect_rate = to_count(MHR_answer[1]);
+			local mhr_detect_rate = MHR_answer[1] as count;
 
 			if ( mhr_detect_rate >= notice_threshold )
 				{
-				local mhr_first_detected = double_to_time(to_double(MHR_answer[0]));
+				local mhr_first_detected = (MHR_answer[0] as double) as time;
 				local readable_first_detected = strftime("%Y-%m-%d %H:%M:%S", mhr_first_detected);
 				local message = fmt("Malware Hash Registry Detection rate: %d%%  Last seen: %s", mhr_detect_rate, readable_first_detected);
 				local virustotal_url = fmt(match_sub_url, hash);

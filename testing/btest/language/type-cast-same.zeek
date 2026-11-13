@@ -1,5 +1,5 @@
 # @TEST-EXEC: zeek -b %INPUT >output 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff output
+# @TEST-EXEC: btest-diff-remove-abspath output
 
 type X: record  {
     a: addr;
@@ -17,5 +17,3 @@ event zeek_init()
 	print s, s is string;
 	print y, y is X;
 	}
-
-

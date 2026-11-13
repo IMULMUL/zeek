@@ -2,387 +2,404 @@
 
 #include "zeek/Reassem.h"
 
-#include "zeek/zeek-config.h"
-
 #include <algorithm>
+#include <cinttypes>
+#include <limits>
 
 #include "zeek/Desc.h"
+#include "zeek/Reporter.h"
 
 using std::min;
 
-namespace zeek
-	{
+namespace zeek {
 
 uint64_t Reassembler::total_size = 0;
 uint64_t Reassembler::sizes[REASSEM_NUM];
 
-DataBlock::DataBlock(const u_char* data, uint64_t size, uint64_t arg_seq)
-	{
-	seq = arg_seq;
-	upper = seq + size;
-	block = new u_char[size];
-	memcpy(block, data, size);
-	}
+DataBlock::DataBlock(const u_char* data, uint64_t size, uint64_t arg_seq) {
+    seq = arg_seq;
+    upper = seq + size;
+    capacity = size;
+    block = new u_char[size];
+    memcpy(block, data, size);
+}
 
-void DataBlockList::DataSize(uint64_t seq_cutoff, uint64_t* below, uint64_t* above) const
-	{
-	for ( const auto& e : block_map )
-		{
-		const auto& b = e.second;
+void DataBlock::AppendContiguous(const u_char* data, uint64_t size) {
+    uint64_t old_size = Size();
+    uint64_t needed = old_size + size;
 
-		if ( b.seq <= seq_cutoff )
-			{
-			if ( b.upper <= seq_cutoff )
-				*below += b.Size();
-			else
-				{
-				*below += seq_cutoff - b.seq;
-				*above += b.upper - seq_cutoff;
-				}
-			}
-		else
-			*above += b.Size();
-		}
-	}
+    if ( needed > capacity ) {
+        // Grow geometrically so a run of small appends amortizes to O(1)
+        // per byte rather than recopying the whole block every time.
+        uint64_t new_capacity = capacity ? capacity : 1;
+        while ( new_capacity < needed )
+            new_capacity *= 2;
 
-void DataBlockList::Delete(DataBlockMap::const_iterator it)
-	{
-	const auto& b = it->second;
-	auto size = b.Size();
+        u_char* grown = new u_char[new_capacity];
+        memcpy(grown, block, old_size);
+        delete[] block;
+        block = grown;
+        capacity = new_capacity;
+    }
 
-	block_map.erase(it);
-	total_data_size -= size;
+    memcpy(block + old_size, data, size);
+    upper += size;
+}
 
-	Reassembler::total_size -= size + sizeof(DataBlock);
-	Reassembler::sizes[reassembler->rtype] -= size + sizeof(DataBlock);
-	}
+void DataBlockList::DataSize(uint64_t seq_cutoff, uint64_t* below, uint64_t* above) const {
+    for ( const auto& e : block_map ) {
+        const auto& b = e.second;
 
-DataBlock DataBlockList::Remove(DataBlockMap::const_iterator it)
-	{
-	auto b = std::move(it->second);
-	auto size = b.Size();
+        if ( b.seq <= seq_cutoff ) {
+            if ( b.upper <= seq_cutoff )
+                *below += b.Size();
+            else {
+                *below += seq_cutoff - b.seq;
+                *above += b.upper - seq_cutoff;
+            }
+        }
+        else
+            *above += b.Size();
+    }
+}
 
-	block_map.erase(it);
-	total_data_size -= size;
+void DataBlockList::Delete(DataBlockMap::const_iterator it) {
+    const auto& b = it->second;
+    auto size = b.Size();
 
-	return b;
-	}
+    block_map.erase(it);
+    total_data_size -= size;
 
-void DataBlockList::Clear()
-	{
-	auto total_db_size = sizeof(DataBlock) * block_map.size();
-	auto total = total_data_size + total_db_size;
-	Reassembler::total_size -= total;
-	Reassembler::sizes[reassembler->rtype] -= total;
-	total_data_size = 0;
-	block_map.clear();
-	}
+    Reassembler::total_size -= size + sizeof(DataBlock);
+    Reassembler::sizes[reassembler->rtype] -= size + sizeof(DataBlock);
+}
 
-void DataBlockList::Append(DataBlock block, uint64_t limit)
-	{
-	total_data_size += block.Size();
+DataBlock DataBlockList::Remove(DataBlockMap::const_iterator it) {
+    auto b = it->second;
+    auto size = b.Size();
 
-	block_map.emplace_hint(block_map.end(), block.seq, std::move(block));
+    block_map.erase(it);
+    total_data_size -= size;
 
-	while ( block_map.size() > limit )
-		Delete(block_map.begin());
-	}
+    return b;
+}
 
-DataBlockMap::const_iterator DataBlockList::FirstBlockAtOrBefore(uint64_t seq) const
-	{
-	// Upper sequence number doesn't matter for the search
-	auto it = block_map.upper_bound(seq);
+void DataBlockList::Clear() {
+    auto total_db_size = sizeof(DataBlock) * block_map.size();
+    auto total = total_data_size + total_db_size;
+    Reassembler::total_size -= total;
+    Reassembler::sizes[reassembler->rtype] -= total;
+    total_data_size = 0;
+    block_map.clear();
+}
 
-	if ( it == block_map.end() )
-		return block_map.empty() ? it : std::prev(it);
+void DataBlockList::Append(DataBlock block, uint64_t limit) {
+    total_data_size += block.Size();
 
-	if ( it == block_map.begin() )
-		return block_map.end();
+    block_map.emplace_hint(block_map.end(), block.seq, std::move(block));
 
-	return std::prev(it);
-	}
+    while ( block_map.size() > limit )
+        Delete(block_map.begin());
+}
+
+DataBlockMap::const_iterator DataBlockList::FirstBlockAtOrBefore(uint64_t seq) const {
+    // Upper sequence number doesn't matter for the search
+    auto it = block_map.upper_bound(seq);
+
+    if ( it == block_map.end() )
+        return block_map.empty() ? it : std::prev(it);
+
+    if ( it == block_map.begin() )
+        return block_map.end();
+
+    return std::prev(it);
+}
 
 DataBlockMap::const_iterator DataBlockList::Insert(uint64_t seq, uint64_t upper, const u_char* data,
-                                                   DataBlockMap::const_iterator hint)
-	{
-	auto size = upper - seq;
-	auto rval = block_map.emplace_hint(hint, seq, DataBlock(data, size, seq));
+                                                   DataBlockMap::const_iterator hint) {
+    // Before emplacing a new node, try to coalesce into the block immediately
+    // preceding the insertion point (the caller passes it as, or just after,
+    // "hint").  When the new data is contiguous with that predecessor and the
+    // predecessor is buffered entirely above the reassembly point (part of a
+    // backlog above a sequence hole), extend it in place instead of adding a
+    // node.  Restricting this to blocks above last_reassem_seq keeps it
+    // transparent to delivery (BlockInserted bails on blocks above the hole)
+    // and to gap accounting, while bounding the real heap of a hole backlog to
+    // roughly the payload bytes already capped by callers rather than ~110
+    // bytes per segment.  All block insertions reach this function, so handling
+    // coalescing here covers the plain append, overlap resolution, and the
+    // leftover tail of a partially-overlapping block alike.
+    if ( ! block_map.empty() && hint != block_map.begin() ) {
+        auto pred = std::prev(hint);
 
-	total_data_size += size;
-	Reassembler::sizes[reassembler->rtype] += size + sizeof(DataBlock);
-	Reassembler::total_size += size + sizeof(DataBlock);
+        if ( pred->second.upper == seq && pred->second.seq > reassembler->LastReassemSeq() )
+            // Look up a mutable iterator since the block has to be modified.
+            return CoalesceInto(block_map.find(pred->first), upper, data);
+    }
 
-	return rval;
-	}
+    auto size = upper - seq;
+    auto rval = block_map.emplace_hint(hint, seq, DataBlock(data, size, seq));
+
+    total_data_size += size;
+    Reassembler::sizes[reassembler->rtype] += size + sizeof(DataBlock);
+    Reassembler::total_size += size + sizeof(DataBlock);
+
+    return rval;
+}
+
+DataBlockMap::iterator DataBlockList::CoalesceInto(DataBlockMap::iterator it, uint64_t upper, const u_char* data) {
+    auto& b = it->second;
+    // The appended data is contiguous with the block (seq == b.upper), so its
+    // full length is the span from the old upper to the new upper.
+    uint64_t added = upper - b.upper;
+
+    b.AppendContiguous(data, added);
+
+    // Only payload bytes are added; no new DataBlock/map node is allocated,
+    // which is the whole point of coalescing.
+    total_data_size += added;
+    Reassembler::sizes[reassembler->rtype] += added;
+    Reassembler::total_size += added;
+
+    return it;
+}
 
 DataBlockMap::const_iterator DataBlockList::Insert(uint64_t seq, uint64_t upper, const u_char* data,
-                                                   DataBlockMap::const_iterator* hint)
-	{
-	// Empty list.
-	if ( block_map.empty() )
-		return Insert(seq, upper, data, block_map.end());
+                                                   DataBlockMap::const_iterator* hint) {
+    // Empty list.
+    if ( block_map.empty() )
+        return Insert(seq, upper, data, block_map.end());
 
-	const auto& last = block_map.rbegin()->second;
+    const auto& last = block_map.rbegin()->second;
 
-	// Special check for the common case of appending to the end.
-	if ( seq == last.upper )
-		return Insert(seq, upper, data, block_map.end());
+    // Special check for the common case of appending to the end.
+    if ( seq == last.upper )
+        return Insert(seq, upper, data, block_map.end());
 
-	// Find the first block that doesn't come completely before the new data.
-	DataBlockMap::const_iterator it;
+    // Find the first block that doesn't come completely before the new data.
+    DataBlockMap::const_iterator it;
 
-	if ( hint )
-		it = *hint;
-	else
-		{
-		it = FirstBlockAtOrBefore(seq);
+    if ( hint )
+        it = *hint;
+    else {
+        it = FirstBlockAtOrBefore(seq);
 
-		if ( it == block_map.end() )
-			it = block_map.begin();
-		}
+        if ( it == block_map.end() )
+            it = block_map.begin();
+    }
 
-	while ( std::next(it) != block_map.end() && it->second.upper <= seq )
-		++it;
+    // Keeps an inserted prefix as the return value, or end() if no prefix was inserted.
+    DataBlockMap::const_iterator rval = block_map.end();
 
-	const auto& b = it->second;
+    while ( true ) {
+        while ( std::next(it) != block_map.end() && it->second.upper <= seq )
+            ++it;
 
-	if ( b.upper <= seq )
-		// b is the last block, and it comes completely before the new block.
-		return Insert(seq, upper, data, block_map.end());
+        const auto& b = it->second;
 
-	if ( upper <= b.seq )
-		// The new block comes completely before b.
-		return Insert(seq, upper, data, it);
+        if ( b.upper <= seq ) {
+            // b is the last block, and it comes completely before the new block.
+            auto inserted = Insert(seq, upper, data, block_map.end());
+            return rval == block_map.end() ? inserted : rval;
+        }
 
-	DataBlockMap::const_iterator rval;
+        if ( upper <= b.seq ) {
+            // The new block comes completely before b.
+            auto inserted = Insert(seq, upper, data, it);
+            return rval == block_map.end() ? inserted : rval;
+        }
 
-	// The blocks overlap.
-	if ( seq < b.seq )
-		{
-		// The new block has a prefix that comes before b.
-		uint64_t prefix_len = b.seq - seq;
+        // The blocks overlap.
+        if ( seq < b.seq ) {
+            // The new block has a prefix that comes before b.
+            uint64_t prefix_len = b.seq - seq;
+            auto inserted = Insert(seq, seq + prefix_len, data, it);
 
-		rval = Insert(seq, seq + prefix_len, data, it);
+            if ( rval == block_map.end() )
+                rval = inserted;
 
-		data += prefix_len;
-		seq += prefix_len;
-		}
-	else
-		rval = it;
+            data += prefix_len;
+            seq += prefix_len;
+        }
 
-	uint64_t overlap_start = seq;
-	uint64_t overlap_offset = overlap_start - b.seq;
-	uint64_t new_b_len = upper - seq;
-	uint64_t b_len = b.upper - overlap_start;
-	uint64_t overlap_len = min(new_b_len, b_len);
+        uint64_t new_b_len = upper - seq;
+        uint64_t b_len = b.upper - seq;
+        uint64_t overlap_len = min(new_b_len, b_len);
 
-	if ( overlap_len < new_b_len )
-		{
-		// Recurse to resolve remainder of the new data.
-		data += overlap_len;
-		seq += overlap_len;
+        if ( overlap_len == new_b_len )
+            return rval == block_map.end() ? it : rval;
 
-		auto r = Insert(seq, upper, data, &it);
+        data += overlap_len;
+        seq += overlap_len;
+    }
+}
 
-		if ( rval == it )
-			rval = r;
-		}
+uint64_t DataBlockList::Trim(uint64_t seq, uint64_t max_old, DataBlockList* old_list) {
+    uint64_t num_missing = 0;
 
-	return rval;
-	}
+    // Do this accounting before looking for Undelivered data,
+    // since that will alter last_reassem_seq.
 
-uint64_t DataBlockList::Trim(uint64_t seq, uint64_t max_old, DataBlockList* old_list)
-	{
-	uint64_t num_missing = 0;
+    if ( ! block_map.empty() ) {
+        const auto& first = block_map.begin()->second;
 
-	// Do this accounting before looking for Undelivered data,
-	// since that will alter last_reassem_seq.
+        if ( first.seq > reassembler->LastReassemSeq() )
+            // An initial hole.
+            num_missing += first.seq - reassembler->LastReassemSeq();
+    }
+    else if ( seq > reassembler->LastReassemSeq() ) {
+        // Trimming data we never delivered.
+        // We won't have any accounting based on blocks for this hole.
+        num_missing += seq - reassembler->LastReassemSeq();
+    }
 
-	if ( ! block_map.empty() )
-		{
-		const auto& first = block_map.begin()->second;
+    if ( seq > reassembler->LastReassemSeq() ) {
+        // We're trimming data we never delivered.
+        reassembler->Undelivered(seq);
+    }
 
-		if ( first.seq > reassembler->LastReassemSeq() )
-			// An initial hole.
-			num_missing += first.seq - reassembler->LastReassemSeq();
-		}
-	else if ( seq > reassembler->LastReassemSeq() )
-		{
-		// Trimming data we never delivered.
-		// We won't have any accounting based on blocks for this hole.
-		num_missing += seq - reassembler->LastReassemSeq();
-		}
+    while ( ! block_map.empty() ) {
+        auto first_it = block_map.begin();
+        const auto& first = first_it->second;
 
-	if ( seq > reassembler->LastReassemSeq() )
-		{
-		// We're trimming data we never delivered.
-		reassembler->Undelivered(seq);
-		}
+        if ( first.upper > seq )
+            break;
 
-	while ( ! block_map.empty() )
-		{
-		auto first_it = block_map.begin();
-		const auto& first = first_it->second;
+        auto next = std::next(first_it);
 
-		if ( first.upper > seq )
-			break;
+        if ( next != block_map.end() && next->second.seq <= seq ) {
+            if ( first.upper != next->second.seq )
+                num_missing += next->second.seq - first.upper;
+        }
+        else {
+            // No more blocks - did this one make it to seq?
+            // Second half of test is for acks of FINs, which
+            // don't get entered into the sequence space.
+            if ( first.upper != seq && first.upper != seq - 1 )
+                num_missing += seq - first.upper;
+        }
 
-		auto next = std::next(first_it);
+        if ( max_old )
+            old_list->Append(Remove(first_it), max_old);
+        else
+            Delete(first_it);
+    }
 
-		if ( next != block_map.end() && next->second.seq <= seq )
-			{
-			if ( first.upper != next->second.seq )
-				num_missing += next->second.seq - first.upper;
-			}
-		else
-			{
-			// No more blocks - did this one make it to seq?
-			// Second half of test is for acks of FINs, which
-			// don't get entered into the sequence space.
-			if ( first.upper != seq && first.upper != seq - 1 )
-				num_missing += seq - first.upper;
-			}
+    if ( ! block_map.empty() ) {
+        auto first_it = block_map.begin();
+        const auto& first = first_it->second;
 
-		if ( max_old )
-			old_list->Append(Remove(first_it), max_old);
-		else
-			Delete(first_it);
-		}
+        // If we skipped over some undeliverable data, then
+        // it's possible that this block is now deliverable.
+        // Give it a try.
+        if ( first.seq == reassembler->LastReassemSeq() )
+            reassembler->BlockInserted(first_it);
+    }
 
-	if ( ! block_map.empty() )
-		{
-		auto first_it = block_map.begin();
-		const auto& first = first_it->second;
-
-		// If we skipped over some undeliverable data, then
-		// it's possible that this block is now deliverable.
-		// Give it a try.
-		if ( first.seq == reassembler->LastReassemSeq() )
-			reassembler->BlockInserted(first_it);
-		}
-
-	reassembler->SetTrimSeq(seq);
-	return num_missing;
-	}
+    reassembler->SetTrimSeq(seq);
+    return num_missing;
+}
 
 Reassembler::Reassembler(uint64_t init_seq, ReassemblerType reassem_type)
-	: block_list(this), old_block_list(this), last_reassem_seq(init_seq), trim_seq(init_seq),
-	  max_old_blocks(0), rtype(reassem_type)
-	{
-	}
+    : block_list(this), old_block_list(this), last_reassem_seq(init_seq), trim_seq(init_seq), rtype(reassem_type) {}
 
-void Reassembler::CheckOverlap(const DataBlockList& list, uint64_t seq, uint64_t len,
-                               const u_char* data)
-	{
-	if ( list.Empty() )
-		return;
+void Reassembler::CheckOverlap(const DataBlockList& list, uint64_t seq, uint64_t len, const u_char* data) {
+    if ( list.Empty() )
+        return;
 
-	const auto& last = list.LastBlock();
+    const auto& last = list.LastBlock();
 
-	if ( seq == last.upper )
-		// Special case check for common case of appending to the end.
-		return;
+    if ( seq == last.upper )
+        // Special case check for common case of appending to the end.
+        return;
 
-	uint64_t upper = (seq + len);
+    uint64_t upper = (seq + len);
 
-	auto it = list.FirstBlockAtOrBefore(seq);
+    auto it = list.FirstBlockAtOrBefore(seq);
 
-	if ( it == list.End() )
-		it = list.Begin();
+    if ( it == list.End() )
+        it = list.Begin();
 
-	for ( ; it != list.End(); ++it )
-		{
-		const auto& b = it->second;
-		uint64_t nseq = seq;
-		uint64_t nupper = upper;
-		const u_char* ndata = data;
+    for ( ; it != list.End(); ++it ) {
+        const auto& b = it->second;
+        uint64_t nseq = seq;
+        uint64_t nupper = upper;
+        const u_char* ndata = data;
 
-		if ( nupper <= b.seq )
-			break;
+        if ( nupper <= b.seq )
+            break;
 
-		if ( nseq >= b.upper )
-			continue;
+        if ( nseq >= b.upper )
+            continue;
 
-		if ( nseq < b.seq )
-			{
-			ndata += (b.seq - seq);
-			nseq = b.seq;
-			}
+        if ( nseq < b.seq ) {
+            ndata += (b.seq - seq);
+            nseq = b.seq;
+        }
 
-		if ( nupper > b.upper )
-			nupper = b.upper;
+        if ( nupper > b.upper )
+            nupper = b.upper;
 
-		uint64_t overlap_offset = (nseq - b.seq);
-		uint64_t overlap_len = (nupper - nseq);
+        uint64_t overlap_offset = (nseq - b.seq);
+        uint64_t overlap_len = (nupper - nseq);
 
-		if ( overlap_len )
-			Overlap(&b.block[overlap_offset], ndata, overlap_len);
-		}
-	}
+        if ( overlap_len )
+            Overlap(&b.block[overlap_offset], ndata, overlap_len);
+    }
+}
 
-void Reassembler::NewBlock(double t, uint64_t seq, uint64_t len, const u_char* data)
-	{
-	if ( len == 0 )
-		return;
+void Reassembler::NewBlock(double t, uint64_t seq, uint64_t len, const u_char* data) {
+    // Check for overflows - this should be handled by the caller
+    // and possibly reported as a weird or violation if applicable.
+    if ( std::numeric_limits<uint64_t>::max() - seq < len ) {
+        zeek::reporter->InternalWarning("Reassembler::NewBlock() truncating block at seq %" PRIx64
+                                        " from length %" PRIu64 " to %" PRIu64,
+                                        seq, len, std::numeric_limits<uint64_t>::max() - seq);
+        len = std::numeric_limits<uint64_t>::max() - seq;
+    }
 
-	uint64_t upper_seq = seq + len;
+    if ( len == 0 )
+        return;
 
-	CheckOverlap(old_block_list, seq, len, data);
+    uint64_t upper_seq = seq + len;
 
-	if ( upper_seq <= trim_seq )
-		// Old data, don't do any work for it.
-		return;
+    CheckOverlap(old_block_list, seq, len, data);
 
-	CheckOverlap(block_list, seq, len, data);
+    if ( upper_seq <= trim_seq )
+        // Old data, don't do any work for it.
+        return;
 
-	if ( seq < trim_seq )
-		{ // Partially old data, just keep the good stuff.
-		uint64_t amount_old = trim_seq - seq;
+    CheckOverlap(block_list, seq, len, data);
 
-		data += amount_old;
-		seq += amount_old;
-		len -= amount_old;
-		}
+    if ( seq < trim_seq ) { // Partially old data, just keep the good stuff.
+        uint64_t amount_old = trim_seq - seq;
 
-	auto it = block_list.Insert(seq, upper_seq, data);
-	;
-	BlockInserted(it);
-	}
+        data += amount_old;
+        seq += amount_old;
+        len -= amount_old;
+    }
 
-uint64_t Reassembler::TrimToSeq(uint64_t seq)
-	{
-	return block_list.Trim(seq, max_old_blocks, &old_block_list);
-	}
+    auto it = block_list.Insert(seq, upper_seq, data);
+    BlockInserted(it);
+}
 
-void Reassembler::ClearBlocks()
-	{
-	block_list.Clear();
-	}
+uint64_t Reassembler::TrimToSeq(uint64_t seq) { return block_list.Trim(seq, max_old_blocks, &old_block_list); }
 
-void Reassembler::ClearOldBlocks()
-	{
-	old_block_list.Clear();
-	}
+void Reassembler::ClearBlocks() { block_list.Clear(); }
 
-uint64_t Reassembler::TotalSize() const
-	{
-	return block_list.DataSize() + old_block_list.DataSize();
-	}
+void Reassembler::ClearOldBlocks() { old_block_list.Clear(); }
 
-void Reassembler::Describe(ODesc* d) const
-	{
-	d->Add("reassembler");
-	}
+uint64_t Reassembler::TotalSize() const { return block_list.DataSize() + old_block_list.DataSize(); }
 
-void Reassembler::Undelivered(uint64_t up_to_seq)
-	{
-	// TrimToSeq() expects this.
-	last_reassem_seq = up_to_seq;
-	}
+size_t Reassembler::NumBlocks() const { return block_list.NumBlocks(); }
 
-uint64_t Reassembler::MemoryAllocation(ReassemblerType rtype)
-	{
-	return Reassembler::sizes[rtype];
-	}
+void Reassembler::Describe(ODesc* d) const { d->Add("reassembler"); }
 
-	} // namespace zeek
+void Reassembler::Undelivered(uint64_t up_to_seq) {
+    // TrimToSeq() expects this.
+    last_reassem_seq = up_to_seq;
+}
+
+uint64_t Reassembler::MemoryAllocation(ReassemblerType rtype) { return Reassembler::sizes[rtype]; }
+
+} // namespace zeek

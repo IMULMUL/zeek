@@ -8,19 +8,19 @@ export {
 	const max_bpf_shunts = 100 &redef;
 
 	## Call this function to use BPF to shunt a connection (to prevent the
-	## data packets from reaching Zeek).  For TCP connections, control
+	## data packets from reaching Zeek). For TCP connections, control
 	## packets are still allowed through so that Zeek can continue logging
 	## the connection and it can stop shunting once the connection ends.
 	global shunt_conn: function(id: conn_id): bool;
 
 	## This function will use a BPF expression to shunt traffic between
-	## the two hosts given in the `conn_id` so that the traffic is never
+	## the two hosts given in the ``conn_id`` so that the traffic is never
 	## exposed to Zeek's traffic processing.
 	global shunt_host_pair: function(id: conn_id): bool;
 
-	## Remove shunting for a host pair given as a `conn_id`.  The filter
+	## Remove shunting for a host pair given as a ``conn_id``.  The filter
 	## is not immediately removed.  It waits for the occasional filter
-	## update done by the `PacketFilter` framework.
+	## update done by the ``PacketFilter`` framework.
 	global unshunt_host_pair: function(id: conn_id): bool;
 
 	## Performs the same function as the :zeek:id:`PacketFilter::unshunt_host_pair`
@@ -40,7 +40,7 @@ export {
 		No_More_Conn_Shunts_Available,
 
 		## Limitations in BPF make shunting some connections with BPF
-		## impossible.  This notice encompasses those various cases.
+		## impossible. This notice encompasses those various cases.
 		Cannot_BPF_Shunt_Conn,
 	};
 }
@@ -78,9 +78,9 @@ function shunt_filters()
 
 event zeek_init() &priority=5
 	{
-	register_filter_plugin([
+	register_filter_plugin(FilterPlugin(
 		$func()={ return shunt_filters(); }
-		]);
+		));
 	}
 
 function current_shunted_conns(): set[conn_id]
@@ -97,8 +97,8 @@ function reached_max_shunts(): bool
 	{
 	if ( |shunted_conns| + |shunted_host_pairs| > max_bpf_shunts )
 		{
-		NOTICE([$note=No_More_Conn_Shunts_Available,
-		        $msg=fmt("%d BPF shunts are in place and no more will be added until space clears.", max_bpf_shunts)]);
+		NOTICE(Notice::Info($note=No_More_Conn_Shunts_Available,
+		                    $msg=fmt("%d BPF shunts are in place and no more will be added until space clears.", max_bpf_shunts)));
 		return T;
 		}
 	else
@@ -145,10 +145,10 @@ function shunt_conn(id: conn_id): bool
 	{
 	if ( is_v6_addr(id$orig_h) )
 		{
-		NOTICE([$note=Cannot_BPF_Shunt_Conn,
-		        $msg="IPv6 connections can't be shunted with BPF due to limitations in BPF",
-		        $sub="ipv6_conn",
-		        $id=id, $identifier=cat(id)]);
+		NOTICE(Notice::Info($note=Cannot_BPF_Shunt_Conn,
+		                    $msg="IPv6 connections can't be shunted with BPF due to limitations in BPF",
+		                    $sub="ipv6_conn",
+		                    $id=id, $identifier=cat(id)));
 		return F;
 		}
 

@@ -1,6 +1,6 @@
 # A test of signature loading using @load-sigs.
 
-# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.trace %INPUT >output
+# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.pcap %INPUT >output
 # @TEST-EXEC: btest-diff output
 
 @load-sigs ./subdir/mysigs.sig
@@ -12,10 +12,10 @@ event signature_match(state: signature_state, msg: string, data: string)
 	print data;
 	}
 
-@TEST-START-FILE subdir/mysigs.sig
+# @TEST-START-FILE subdir/mysigs.sig
 signature my-sig {
 ip-proto == tcp
 payload /GET \/images/
 event "works"
 }
-@TEST-END-FILE
+# @TEST-END-FILE

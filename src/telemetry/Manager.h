@@ -2,422 +2,312 @@
 
 #pragma once
 
+#include "zeek/zeek-config.h"
+
+#include <concepts>
+#include <condition_variable>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
-#include "zeek/Span.h"
+#include "zeek/Flare.h"
+#include "zeek/IntrusivePtr.h"
+#include "zeek/iosource/IOSource.h"
 #include "zeek/telemetry/Counter.h"
 #include "zeek/telemetry/Gauge.h"
 #include "zeek/telemetry/Histogram.h"
+#include "zeek/telemetry/ProcessStats.h"
+#include "zeek/telemetry/Utils.h"
 
-namespace zeek::telemetry
-	{
+namespace zeek {
+class RecordVal;
+using RecordValPtr = IntrusivePtr<RecordVal>;
+} // namespace zeek
+
+namespace prometheus {
+class Exposer;
+class Registry;
+} // namespace prometheus
+
+namespace zeek::telemetry {
+
+namespace detail {
+using CollectCallbackPtr = std::function<double()>;
+}
+
+class ZeekCollectable;
 
 /**
  * Manages a collection of metric families.
  */
-class Manager
-	{
+class Manager final : public iosource::IOSource {
 public:
-	class Impl;
+    Manager();
 
-	explicit Manager(Impl* ptr) : pimpl(ptr) { }
+    Manager(const Manager&) = delete;
+    Manager& operator=(const Manager&) = delete;
 
-	Manager(const Manager&) = delete;
+    ~Manager() override; // = default;
 
-	Manager& operator=(const Manager&) = delete;
+    /**
+     * Initialization of the manager. This is called late during Zeek's initialization
+     * after any scripts are processed. Sets up the process stats metrics.
+     */
+    void InitPostScript();
 
-	virtual ~Manager();
+    /**
+     * Initializes the Prometheus server. This is called during Zeek startup via
+     * zeek_init().
+     *
+     * @param metrics_addr Address the server will listen on
+     * @param metrics_port Port number the server will listen on
+     * @param expose_services_json Whether services.json will be exposed on this server
+     */
+    void ListenPrometheus(std::string_view metrics_addr, int port, bool expose_services_json);
 
-	/**
-	 * Initialization of the manager. This is called late during Bro's
-	 * initialization after any scripts are processed.
-	 */
-	virtual void InitPostScript();
+    void Terminate();
 
-	/**
-	 * @return A counter metric family. Creates the family lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Names for all label dimensions of the metric.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	auto CounterFamily(std::string_view prefix, std::string_view name,
-	                   Span<const std::string_view> labels, std::string_view helptext,
-	                   std::string_view unit = "1", bool is_sum = false)
-		{
-		if constexpr ( std::is_same<ValueType, int64_t>::value )
-			{
-			return IntCounterFam(prefix, name, labels, helptext, unit, is_sum);
-			}
-		else
-			{
-			static_assert(std::is_same<ValueType, double>::value,
-			              "metrics only support int64_t and double values");
-			return DblCounterFam(prefix, name, labels, helptext, unit, is_sum);
-			}
-		}
+    /**
+     * @return A VectorVal containing all counter and gauge metrics and their values matching prefix and name.
+     * @param prefix The prefix pattern to use for filtering. Supports globbing.
+     * @param name The name pattern to use for filtering. Supports globbing.
+     */
+    ValPtr CollectMetrics(std::string_view prefix, std::string_view name);
 
-	/// @copydoc CounterFamily
-	template <class ValueType = int64_t>
-	auto CounterFamily(std::string_view prefix, std::string_view name,
-	                   std::initializer_list<std::string_view> labels, std::string_view helptext,
-	                   std::string_view unit = "1", bool is_sum = false)
-		{
-		auto lbl_span = Span{labels.begin(), labels.size()};
-		return CounterFamily<ValueType>(prefix, name, lbl_span, helptext, unit, is_sum);
-		}
+    /**
+     * @return A VectorVal containing all histogram metrics and their values matching prefix and name.
+     * @param prefix The prefix pattern to use for filtering. Supports globbing.
+     * @param name The name pattern to use for filtering. Supports globbing.
+     */
+    ValPtr CollectHistogramMetrics(std::string_view prefix, std::string_view name);
 
-	/**
-	 * Accesses a counter instance. Creates the hosting metric family as well
-	 * as the counter lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Values for all label dimensions of the metric.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	Counter<ValueType> CounterInstance(std::string_view prefix, std::string_view name,
-	                                   Span<const LabelView> labels, std::string_view helptext,
-	                                   std::string_view unit = "1", bool is_sum = false)
-		{
-		return WithLabelNames(labels,
-		                      [&, this](auto labelNames)
-		                      {
-								  auto family = CounterFamily<ValueType>(prefix, name, labelNames,
-			                                                             helptext, unit, is_sum);
-								  return family.getOrAdd(labels);
-							  });
-		}
+    /**
+     * @return A counter metric family. Creates the family lazily if necessary.
+     * @param prefix The prefix (namespace) this family belongs to.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Names for all label dimensions of the metric.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement.
+     */
+    CounterFamilyPtr CounterFamily(std::string_view prefix, std::string_view name,
+                                   std::span<const std::string_view> labels, std::string_view helptext,
+                                   std::string_view unit = "");
 
-	/// @copydoc counterInstance
-	template <class ValueType = int64_t>
-	Counter<ValueType> CounterInstance(std::string_view prefix, std::string_view name,
-	                                   std::initializer_list<LabelView> labels,
-	                                   std::string_view helptext, std::string_view unit = "1",
-	                                   bool is_sum = false)
-		{
-		auto lbl_span = Span{labels.begin(), labels.size()};
-		return CounterInstance(prefix, name, lbl_span, helptext, unit, is_sum);
-		}
+    /// @copydoc CounterFamily
+    CounterFamilyPtr CounterFamily(std::string_view prefix, std::string_view name,
+                                   std::initializer_list<std::string_view> labels, std::string_view helptext,
+                                   std::string_view unit = "");
 
-	/**
-	 * Accesses a counter singleton, i.e., a counter that belongs to a family
-	 * without label dimensions (which thus only has a single member). Creates
-	 * the hosting metric family as well as the counter lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	Counter<ValueType> CounterSingleton(std::string_view prefix, std::string_view name,
-	                                    std::string_view helptext, std::string_view unit = "1",
-	                                    bool is_sum = false)
-		{
-		auto labels = Span<const std::string_view>{};
-		auto fam = CounterFamily<ValueType>(prefix, name, labels, helptext, unit, is_sum);
-		return fam.GetOrAdd({});
-		}
+    /**
+     * Accesses a counter instance. Creates the hosting metric family as well
+     * as the counter lazily if necessary.
+     * @param prefix The prefix (namespace) this family belongs to.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Values for all label dimensions of the metric.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement.
+     * @param callback Passing a callback method will enable asynchronous mode. The callback method will be called
+     * by the metrics subsystem whenever data is requested.
+     */
+    CounterPtr CounterInstance(std::string_view prefix, std::string_view name, std::span<const LabelView> labels,
+                               std::string_view helptext, std::string_view unit = "",
+                               detail::CollectCallbackPtr callback = nullptr);
 
-	/**
-	 * @return A gauge metric family. Creates the family lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Names for all label dimensions of the metric.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	auto GaugeFamily(std::string_view prefix, std::string_view name,
-	                 Span<const std::string_view> labels, std::string_view helptext,
-	                 std::string_view unit = "1", bool is_sum = false)
-		{
-		if constexpr ( std::is_same<ValueType, int64_t>::value )
-			{
-			return IntGaugeFam(prefix, name, labels, helptext, unit, is_sum);
-			}
-		else
-			{
-			static_assert(std::is_same<ValueType, double>::value,
-			              "metrics only support int64_t and double values");
-			return DblGaugeFam(prefix, name, labels, helptext, unit, is_sum);
-			}
-		}
+    /// @copydoc counterInstance
+    CounterPtr CounterInstance(std::string_view prefix, std::string_view name, std::initializer_list<LabelView> labels,
+                               std::string_view helptext, std::string_view unit = "",
+                               detail::CollectCallbackPtr callback = nullptr);
 
-	/// @copydoc GaugeFamily
-	template <class ValueType = int64_t>
-	auto GaugeFamily(std::string_view prefix, std::string_view name,
-	                 std::initializer_list<std::string_view> labels, std::string_view helptext,
-	                 std::string_view unit = "1", bool is_sum = false)
-		{
-		auto lbl_span = Span{labels.begin(), labels.size()};
-		return GaugeFamily<ValueType>(prefix, name, lbl_span, helptext, unit, is_sum);
-		}
+    /**
+     * @return A gauge metric family. Creates the family lazily if necessary.
+     * @param prefix The prefix (namespace) this family belongs to.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Names for all label dimensions of the metric.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement.
+     */
+    GaugeFamilyPtr GaugeFamily(std::string_view prefix, std::string_view name, std::span<const std::string_view> labels,
+                               std::string_view helptext, std::string_view unit = "");
 
-	/**
-	 * Accesses a gauge instance. Creates the hosting metric family as well
-	 * as the gauge lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Values for all label dimensions of the metric.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	Gauge<ValueType> GaugeInstance(std::string_view prefix, std::string_view name,
-	                               Span<const LabelView> labels, std::string_view helptext,
-	                               std::string_view unit = "1", bool is_sum = false)
-		{
-		return WithLabelNames(labels,
-		                      [&, this](auto labelNames)
-		                      {
-								  auto family = GaugeFamily<ValueType>(prefix, name, labelNames,
-			                                                           helptext, unit, is_sum);
-								  return family.getOrAdd(labels);
-							  });
-		}
+    /// @copydoc GaugeFamily
+    GaugeFamilyPtr GaugeFamily(std::string_view prefix, std::string_view name,
+                               std::initializer_list<std::string_view> labels, std::string_view helptext,
+                               std::string_view unit = "");
 
-	/// @copydoc GaugeInstance
-	template <class ValueType = int64_t>
-	Gauge<ValueType> GaugeInstance(std::string_view prefix, std::string_view name,
-	                               std::initializer_list<LabelView> labels,
-	                               std::string_view helptext, std::string_view unit = "1",
-	                               bool is_sum = false)
-		{
-		auto lbl_span = Span{labels.begin(), labels.size()};
-		return GaugeInstance(prefix, name, lbl_span, helptext, unit, is_sum);
-		}
+    /**
+     * Accesses a gauge instance. Creates the hosting metric family as well
+     * as the gauge lazily if necessary.
+     * @param prefix The prefix (namespace) this family belongs to.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Values for all label dimensions of the metric.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement.
+     * @param callback Passing a callback method will enable asynchronous mode. The callback method will be called
+     * by the metrics subsystem whenever data is requested.
+     */
+    GaugePtr GaugeInstance(std::string_view prefix, std::string_view name, std::span<const LabelView> labels,
+                           std::string_view helptext, std::string_view unit = "",
+                           detail::CollectCallbackPtr callback = nullptr);
 
-	/**
-	 * Accesses a gauge singleton, i.e., a gauge that belongs to a family
-	 * without label dimensions (which thus only has a single member). Creates
-	 * the hosting metric family as well as the gauge lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement.
-	 * @param is_sum Indicates whether this metric accumulates something, where
-	 *               only the total value is of interest.
-	 */
-	template <class ValueType = int64_t>
-	Gauge<ValueType> GaugeSingleton(std::string_view prefix, std::string_view name,
-	                                std::string_view helptext, std::string_view unit = "1",
-	                                bool is_sum = false)
-		{
-		auto labels = Span<const std::string_view>{};
-		auto fam = GaugeFamily<ValueType>(prefix, name, labels, helptext, unit, is_sum);
-		return fam.GetOrAdd({});
-		}
+    /// @copydoc GaugeInstance
+    GaugePtr GaugeInstance(std::string_view prefix, std::string_view name, std::initializer_list<LabelView> labels,
+                           std::string_view helptext, std::string_view unit = "",
+                           detail::CollectCallbackPtr callback = nullptr);
 
-	// Forces the compiler to use the type `Span<const T>` instead of trying to
-	// match paremeters to a `span`.
-	template <class T> struct ConstSpanOracle
-		{
-		using Type = Span<const T>;
-		};
+    /**
+     * Returns a histogram metric family. Creates the family lazily if
+     * necessary.
+     * @param prefix The prefix (namespace) this family belongs to. Usually the
+     *               application or protocol name, e.g., `http`. The prefix `caf`
+     *               as well as prefixes starting with an underscore are
+     *               reserved.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Names for all label dimensions of the metric.
+     * @param bounds Upper bounds for the metric buckets.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement. Please use base units such as `bytes` or
+     *             `seconds` (prefer lowercase). The pseudo-unit `1` identifies
+     *             dimensionless counts.
+     * @note The first call wins when calling this function multiple times with
+     *       different bucket settings. Users may also override
+     *       @p bounds via run-time configuration.
+     */
+    HistogramFamilyPtr HistogramFamily(std::string_view prefix, std::string_view name,
+                                       std::span<const std::string_view> labels, std::span<const double> bounds,
+                                       std::string_view helptext, std::string_view unit = "");
 
-	// Convenience alias to safe some typing.
-	template <class T> using ConstSpan = typename ConstSpanOracle<T>::Type;
+    /// @copydoc HistogramFamily
+    HistogramFamilyPtr HistogramFamily(std::string_view prefix, std::string_view name,
+                                       std::initializer_list<std::string_view> labels, std::span<const double> bounds,
+                                       std::string_view helptext, std::string_view unit = "");
 
-	/**
-	 * Returns a histogram metric family. Creates the family lazily if
-	 * necessary.
-	 * @param prefix The prefix (namespace) this family belongs to. Usually the
-	 *               application or protocol name, e.g., `http`. The prefix `caf`
-	 *               as well as prefixes starting with an underscore are
-	 *               reserved.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Names for all label dimensions of the metric.
-	 * @param default_upper_bounds Upper bounds for the metric buckets.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement. Please use base units such as `bytes` or
-	 *             `seconds` (prefer lowercase). The pseudo-unit `1` identifies
-	 *             dimensionless counts.
-	 * @param is_sum Setting this to `true` indicates that this metric adds
-	 *               something up to a total, where only the total value is of
-	 *               interest. For example, the total number of HTTP requests.
-	 * @note The first call wins when calling this function multiple times with
-	 *       different bucket settings. Users may also override
-	 *       @p default_upper_bounds via run-time configuration.
-	 */
-	template <class ValueType = int64_t>
-	auto HistogramFamily(std::string_view prefix, std::string_view name,
-	                     Span<const std::string_view> labels,
-	                     ConstSpan<ValueType> default_upper_bounds, std::string_view helptext,
-	                     std::string_view unit = "1", bool is_sum = false)
-		{
-		if constexpr ( std::is_same<ValueType, int64_t>::value )
-			{
-			return IntHistoFam(prefix, name, labels, default_upper_bounds, helptext, unit, is_sum);
-			}
-		else
-			{
-			static_assert(std::is_same<ValueType, double>::value,
-			              "metrics only support int64_t and double values");
-			return DblHistoFam(prefix, name, labels, default_upper_bounds, helptext, unit, is_sum);
-			}
-		}
+    /**
+     * Returns a histogram. Creates the family lazily if necessary.
+     * @param prefix The prefix (namespace) this family belongs to. Usually the
+     *               application or protocol name, e.g., `http`. The prefix `caf`
+     *               as well as prefixes starting with an underscore are
+     *               reserved.
+     * @param name The human-readable name of the metric, e.g., `requests`.
+     * @param labels Names for all label dimensions of the metric.
+     * @param bounds Upper bounds for the metric buckets.
+     * @param helptext Short explanation of the metric.
+     * @param unit Unit of measurement. Please use base units such as `bytes` or
+     *             `seconds` (prefer lowercase). The pseudo-unit `1` identifies
+     *             dimensionless counts.
+     * @note The first call wins when calling this function multiple times with
+     *       different bucket settings. Users may also override
+     *       @p bounds via run-time configuration.
+     */
+    HistogramPtr HistogramInstance(std::string_view prefix, std::string_view name, std::span<const LabelView> labels,
+                                   std::span<const double> bounds, std::string_view helptext,
+                                   std::string_view unit = "");
 
-	/// @copydoc HistogramFamily
-	template <class ValueType = int64_t>
-	auto HistogramFamily(std::string_view prefix, std::string_view name,
-	                     std::initializer_list<std::string_view> labels,
-	                     ConstSpan<ValueType> default_upper_bounds, std::string_view helptext,
-	                     std::string_view unit = "1", bool is_sum = false)
-		{
-		auto lbl_span = Span{labels.begin(), labels.size()};
-		return HistogramFamily<ValueType>(prefix, name, lbl_span, default_upper_bounds, helptext,
-		                                  unit, is_sum);
-		}
+    /// @copdoc HistogramInstance
+    HistogramPtr HistogramInstance(std::string_view prefix, std::string_view name,
+                                   std::initializer_list<LabelView> labels, std::initializer_list<double> bounds,
+                                   std::string_view helptext, std::string_view unit = "");
 
-	/**
-	 * Returns a histogram. Creates the family lazily if necessary.
-	 * @param prefix The prefix (namespace) this family belongs to. Usually the
-	 *               application or protocol name, e.g., `http`. The prefix `caf`
-	 *               as well as prefixes starting with an underscore are
-	 *               reserved.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param labels Names for all label dimensions of the metric.
-	 * @param default_upper_bounds Upper bounds for the metric buckets.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement. Please use base units such as `bytes` or
-	 *             `seconds` (prefer lowercase). The pseudo-unit `1` identifies
-	 *             dimensionless counts.
-	 * @param is_sum Setting this to `true` indicates that this metric adds
-	 *               something up to a total, where only the total value is of
-	 *               interest. For example, the total number of HTTP requests.
-	 * @note The first call wins when calling this function multiple times with
-	 *       different bucket settings. Users may also override
-	 *       @p default_upper_bounds via run-time configuration.
-	 */
-	template <class ValueType = int64_t>
-	Histogram<ValueType>
-	HistogramInstance(std::string_view prefix, std::string_view name, Span<const LabelView> labels,
-	                  ConstSpan<ValueType> default_upper_bounds, std::string_view helptext,
-	                  std::string_view unit = "1", bool is_sum = false)
-		{
-		return WithLabelNames(labels,
-		                      [&, this](auto labelNames)
-		                      {
-								  auto family = HistogramFamily<ValueType>(prefix, name, labelNames,
-			                                                               default_upper_bounds,
-			                                                               helptext, unit, is_sum);
-								  return family.getOrAdd(labels);
-							  });
-		}
+    /**
+     * @return A JSON description of the cluster configuration for reporting
+     * to Prometheus for service discovery requests.
+     */
+    std::string GetClusterJson() const { return cluster_json; }
 
-	/// @copdoc HistogramInstance
-	template <class ValueType = int64_t>
-	Histogram<ValueType> HistogramInstance(std::string_view prefix, std::string_view name,
-	                                       std::initializer_list<LabelView> labels,
-	                                       ConstSpan<ValueType> default_upper_bounds,
-	                                       std::string_view helptext, std::string_view unit = "1",
-	                                       bool is_sum = false)
-		{
-		auto lbls = Span{labels.begin(), labels.size()};
-		return HistogramInstance(prefix, name, lbls, default_upper_bounds, helptext, unit, is_sum);
-		}
+    /**
+     * @return The pointer to the prometheus-cpp registry used by the telemetry
+     * manager. This is public so that third parties (such as broker) can add
+     * elements to it directly.
+     */
+    std::shared_ptr<prometheus::Registry> GetRegistry() const { return prometheus_registry; }
 
-	/**
-	 * Returns a histogram metric singleton, i.e., the single instance of a
-	 * family without label dimensions. Creates all objects lazily if necessary,
-	 * but fails if the full name already belongs to a different family.
-	 * @param prefix The prefix (namespace) this family belongs to. Usually the
-	 *               application or protocol name, e.g., `http`. The prefix `caf`
-	 *               as well as prefixes starting with an underscore are
-	 *               reserved.
-	 * @param name The human-readable name of the metric, e.g., `requests`.
-	 * @param default_upper_bounds Upper bounds for the metric buckets.
-	 * @param helptext Short explanation of the metric.
-	 * @param unit Unit of measurement. Please use base units such as `bytes` or
-	 *             `seconds` (prefer lowercase). The pseudo-unit `1` identifies
-	 *             dimensionless counts.
-	 * @param is_sum Setting this to `true` indicates that this metric adds
-	 *               something up to a total, where only the total value is of
-	 *               interest. For example, the total number of HTTP requests.
-	 * @note The first call wins when calling this function multiple times with
-	 *       different bucket settings. Users may also override
-	 *       @p default_upper_bounds via run-time configuration.
-	 */
-	template <class ValueType = int64_t>
-	Histogram<ValueType> HistogramSingleton(std::string_view prefix, std::string_view name,
-	                                        ConstSpan<ValueType> default_upper_bounds,
-	                                        std::string_view helptext, std::string_view unit = "1",
-	                                        bool is_sum = false)
-		{
-		auto lbls = Span<const std::string_view>{};
-		auto fam = HistogramFamily<ValueType>(prefix, name, lbls, default_upper_bounds, helptext,
-		                                      unit, is_sum);
-		return fam.GetOrAdd({});
-		}
+    /**
+     * @return A vector of MetricFamilies registered with the manager.
+     */
+    std::vector<std::shared_ptr<MetricFamily>> GetFamilies() const;
+
+    // IOSource interface
+    double GetNextTimeout() override { return -1.0; }
+    void Process() override {}
+    const char* Tag() override { return "Telemetry::Manager"; }
+    void ProcessFd(int fd, int flags) override;
 
 protected:
-	IntCounterFamily IntCounterFam(std::string_view prefix, std::string_view name,
-	                               Span<const std::string_view> labels, std::string_view helptext,
-	                               std::string_view unit, bool is_sum);
+    template<std::invocable<std::span<std::string_view>> F>
+    static auto WithLabelNames(std::span<const LabelView> xs, F&& continuation) {
+        if ( xs.size() <= 10 ) {
+            std::string_view buf[10];
+            for ( size_t index = 0; index < xs.size(); ++index )
+                buf[index] = xs[index].first;
 
-	DblCounterFamily DblCounterFam(std::string_view prefix, std::string_view name,
-	                               Span<const std::string_view> labels, std::string_view helptext,
-	                               std::string_view unit, bool is_sum);
+            return continuation(std::span{buf, xs.size()});
+        }
+        else {
+            std::vector<std::string_view> buf;
+            for ( auto x : xs )
+                buf.emplace_back(x.first);
 
-	IntGaugeFamily IntGaugeFam(std::string_view prefix, std::string_view name,
-	                           Span<const std::string_view> labels, std::string_view helptext,
-	                           std::string_view unit, bool is_sum);
+            return continuation(std::span{buf});
+        }
+    }
 
-	DblGaugeFamily DblGaugeFam(std::string_view prefix, std::string_view name,
-	                           Span<const std::string_view> labels, std::string_view helptext,
-	                           std::string_view unit, bool is_sum);
+    friend class ZeekCollectable;
 
-	IntHistogramFamily IntHistoFam(std::string_view prefix, std::string_view name,
-	                               Span<const std::string_view> labels, Span<const int64_t> ubounds,
-	                               std::string_view helptext, std::string_view unit, bool is_sum);
+    /**
+     * Fires the flare for prometheus-cpp callback handling and waits for it to complete.
+     * This can be called from other threads to ensure the callback handling happens on
+     * the main thread.
+     */
+    void WaitForPrometheusCallbacks();
 
-	DblHistogramFamily DblHistoFam(std::string_view prefix, std::string_view name,
-	                               Span<const std::string_view> labels, Span<const double> ubounds,
-	                               std::string_view helptext, std::string_view unit, bool is_sum);
+private:
+    RecordValPtr GetMetricOptsRecord(const prometheus::MetricFamily& metric_family);
+    void BuildClusterJson();
 
-	template <class F> static void WithLabelNames(Span<const LabelView> xs, F continuation)
-		{
-		if ( xs.size() <= 10 )
-			{
-			std::string_view buf[10];
-			for ( size_t index = 0; index < xs.size(); ++index )
-				buf[index] = xs[index].first;
-			return continuation(Span{buf, xs.size()});
-			}
-		else
-			{
-			std::vector<std::string_view> buf;
-			for ( auto x : xs )
-				buf.emplace_back(x.first, x.second);
-			return continuation(Span{buf});
-			}
-		}
+    /**
+     * Runs the Telemetry::sync() hook in Zeek script land.
+     */
+    void InvokeTelemetrySyncHook();
 
-	Impl* pimpl;
-	};
+    /**
+     * Runs the telemetry sync hooks and metric callbacks.
+     */
+    void UpdateMetrics();
 
-	} // namespace zeek::telemetry
+    bool in_sync_hook = false;
 
-namespace zeek
-	{
+    std::map<std::string, std::shared_ptr<MetricFamily>> families;
+    std::map<std::string, RecordValPtr> opts_records;
 
-extern telemetry::Manager* telemetry_mgr;
+    detail::process_stats current_process_stats;
+    double process_stats_last_updated = 0.0;
 
-	} // namespace zeek
+    GaugePtr rss_gauge;
+    GaugePtr vms_gauge;
+    CounterPtr cpu_user_counter;
+    CounterPtr cpu_system_counter;
+    GaugePtr fds_gauge;
+    GaugePtr process_start_time;
+
+    std::shared_ptr<prometheus::Registry> prometheus_registry;
+    std::unique_ptr<prometheus::Exposer> prometheus_exposer;
+
+    std::string cluster_json;
+
+    std::shared_ptr<ZeekCollectable> zeek_collectable;
+    zeek::detail::Flare collector_flare;
+    std::condition_variable collector_cv;
+    std::mutex collector_cv_mtx;
+    // Only modified under collector_cv_mtx!
+    uint64_t collector_request_idx = 0;
+    uint64_t collector_response_idx = 0;
+};
+
+} // namespace zeek::telemetry
+
+namespace zeek {
+ZEEK_EXTERN_DATA telemetry::Manager* telemetry_mgr;
+
+} // namespace zeek

@@ -1,976 +1,1300 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-// We use deprecated APIs for MD5, SHA1 and SHA256. The reason is that, as of OpenSSL 3.0, there is
-// no API anymore that lets you store the internal state of hashing functions. For more information,
-// see https://github.com/zeek/zeek/issues/1379 and https://github.com/openssl/openssl/issues/14222
-// Since I don't feel like getting warnings every time we compile this file - let's silence them.
-
-#define OPENSSL_SUPPRESS_DEPRECATED
+// We use deprecated OpenSSL APIs for MD5, SHA1 and SHA256 because there is no API that lets you
+// store the internal state of hashing functions. For more information, see
+// https://github.com/zeek/zeek/issues/1379 and https://github.com/openssl/openssl/issues/14222
 
 #include "zeek/OpaqueVal.h"
 
 #include <broker/data.hh>
 #include <broker/error.hh>
+#include <openssl/md5.h>
+#include <openssl/sha.h>
+#include <paraglob/exceptions.h>
 #include <memory>
 
 #include "zeek/CompHash.h"
 #include "zeek/Desc.h"
-#include "zeek/NetVar.h"
 #include "zeek/Reporter.h"
 #include "zeek/Scope.h"
 #include "zeek/Var.h"
+#include "zeek/broker/Data.h"
+#include "zeek/digest.h"
 #include "zeek/probabilistic/BloomFilter.h"
 #include "zeek/probabilistic/CardinalityCounter.h"
 
-namespace zeek
-	{
 
-// Helper to retrieve a broker value out of a broker::vector at a specified
-// index, and casted to the expected destination type.
-template <typename S, typename V, typename D>
-inline bool get_vector_idx(const V& v, unsigned int i, D* dst)
-	{
-	if ( i >= v.size() )
-		return false;
+namespace zeek {
 
-	auto x = caf::get_if<S>(&v[i]);
-	if ( ! x )
-		return false;
+// Helper to retrieve a broker count out of a list at a specified index, and
+// casted to the expected destination type.
+template<typename V, typename D>
+bool get_vector_idx_if_count(V& v, size_t i, D* dst) {
+    if ( i >= v.Size() || ! v[i].IsCount() )
+        return false;
 
-	*dst = static_cast<D>(*x);
-	return true;
-	}
+    *dst = static_cast<D>(v[i].ToCount());
+    return true;
+}
 
-OpaqueMgr* OpaqueMgr::mgr()
-	{
-	static OpaqueMgr mgr;
-	return &mgr;
-	}
+OpaqueMgr* OpaqueMgr::mgr() {
+    static OpaqueMgr mgr;
+    return &mgr;
+}
 
-OpaqueVal::OpaqueVal(OpaqueTypePtr t) : Val(std::move(t)) { }
+OpaqueVal::OpaqueVal(OpaqueTypePtr t) : Val(std::move(t)) {}
 
-OpaqueVal::~OpaqueVal() { }
+const std::string& OpaqueMgr::TypeID(const OpaqueVal* v) const {
+    auto x = _types.find(v->OpaqueName());
 
-const std::string& OpaqueMgr::TypeID(const OpaqueVal* v) const
-	{
-	auto x = _types.find(v->OpaqueName());
+    if ( x == _types.end() )
+        reporter->InternalError("OpaqueMgr::TypeID: opaque type %s not registered", v->OpaqueName());
 
-	if ( x == _types.end() )
-		reporter->InternalError("OpaqueMgr::TypeID: opaque type %s not registered",
-		                        v->OpaqueName());
+    return x->first;
+}
 
-	return x->first;
-	}
+OpaqueValPtr OpaqueMgr::Instantiate(const std::string& id) const {
+    auto x = _types.find(id);
+    return x != _types.end() ? (*x->second)() : nullptr;
+}
 
-OpaqueValPtr OpaqueMgr::Instantiate(const std::string& id) const
-	{
-	auto x = _types.find(id);
-	return x != _types.end() ? (*x->second)() : nullptr;
-	}
+std::optional<BrokerData> OpaqueVal::SerializeData() const {
+    auto type = OpaqueMgr::mgr()->TypeID(this);
 
-broker::expected<broker::data> OpaqueVal::Serialize() const
-	{
-	auto type = OpaqueMgr::mgr()->TypeID(this);
+    auto d = DoSerializeData();
+    if ( ! d )
+        return std::nullopt;
 
-	auto d = DoSerialize();
-	if ( ! d )
-		return d.error();
+    BrokerListBuilder builder;
+    builder.Add(std::move(type));
+    builder.Add(std::move(*d));
+    return std::move(builder).Build();
+}
 
-	return {broker::vector{std::move(type), std::move(*d)}};
-	}
+OpaqueValPtr OpaqueVal::UnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return nullptr;
 
-OpaqueValPtr OpaqueVal::Unserialize(const broker::data& data)
-	{
-	auto v = caf::get_if<broker::vector>(&data);
+    return UnserializeData(data.ToList());
+}
 
-	if ( ! (v && v->size() == 2) )
-		return nullptr;
+OpaqueValPtr OpaqueVal::UnserializeData(BrokerListView v) {
+    if ( v.Size() != 2 || ! v[0].IsString() )
+        return nullptr;
 
-	auto type = caf::get_if<std::string>(&(*v)[0]);
-	if ( ! type )
-		return nullptr;
+    auto type = v[0].ToString();
 
-	auto val = OpaqueMgr::mgr()->Instantiate(*type);
-	if ( ! val )
-		return nullptr;
+    auto val = OpaqueMgr::mgr()->Instantiate(std::string{type});
+    if ( ! val )
+        return nullptr;
 
-	if ( ! val->DoUnserialize((*v)[1]) )
-		return nullptr;
+    if ( ! val->DoUnserializeData(v[1]) )
+        return nullptr;
 
-	return val;
-	}
+    return val;
+}
 
-broker::expected<broker::data> OpaqueVal::SerializeType(const TypePtr& t)
-	{
-	if ( t->InternalType() == TYPE_INTERNAL_ERROR )
-		return broker::ec::invalid_data;
+std::optional<BrokerData> OpaqueVal::DoSerializeData() const { return std::nullopt; }
 
-	if ( t->InternalType() == TYPE_INTERNAL_OTHER )
-		{
-		// Serialize by name.
-		assert(t->GetName().size());
-		return {broker::vector{true, t->GetName()}};
-		}
+bool OpaqueVal::DoUnserializeData(BrokerDataView data) { return false; }
 
-	// A base type.
-	return {broker::vector{false, static_cast<uint64_t>(t->Tag())}};
-	}
+std::optional<BrokerData> OpaqueVal::SerializeType(const TypePtr& t) {
+    if ( t->InternalType() == TYPE_INTERNAL_ERROR )
+        return std::nullopt;
 
-TypePtr OpaqueVal::UnserializeType(const broker::data& data)
-	{
-	auto v = caf::get_if<broker::vector>(&data);
-	if ( ! (v && v->size() == 2) )
-		return nullptr;
+    BrokerListBuilder builder;
 
-	auto by_name = caf::get_if<bool>(&(*v)[0]);
-	if ( ! by_name )
-		return nullptr;
+    if ( t->InternalType() == TYPE_INTERNAL_OTHER ) {
+        // Serialize by name.
+        assert(! t->GetName().empty());
+        builder.Add(true);
+        builder.Add(t->GetName());
+    }
+    else {
+        // A base type.
+        builder.Add(false);
+        builder.Add(static_cast<uint64_t>(t->Tag()));
+    }
 
-	if ( *by_name )
-		{
-		auto name = caf::get_if<std::string>(&(*v)[1]);
-		if ( ! name )
-			return nullptr;
+    return {std::move(builder).Build()};
+}
 
-		const auto& id = detail::global_scope()->Find(*name);
-		if ( ! id )
-			return nullptr;
+TypePtr OpaqueVal::UnserializeType(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return nullptr;
 
-		if ( ! id->IsType() )
-			return nullptr;
+    auto v = data.ToList();
 
-		return id->GetType();
-		}
+    if ( v.Size() != 2 || ! v[0].IsBool() )
+        return nullptr;
 
-	auto tag = caf::get_if<uint64_t>(&(*v)[1]);
-	if ( ! tag )
-		return nullptr;
+    if ( v[0].ToBool() ) // Get by name?
+    {
+        if ( ! v[1].IsString() )
+            return nullptr;
 
-	return base_type(static_cast<TypeTag>(*tag));
-	}
+        const auto& id = detail::global_scope()->Find(v[1].ToString());
+        if ( ! id )
+            return nullptr;
 
-ValPtr OpaqueVal::DoClone(CloneState* state)
-	{
-	auto d = OpaqueVal::Serialize();
-	if ( ! d )
-		return nullptr;
+        if ( ! id->IsType() )
+            return nullptr;
 
-	auto rval = OpaqueVal::Unserialize(std::move(*d));
-	return state->NewClone(this, std::move(rval));
-	}
+        return id->GetType();
+    }
 
-bool HashVal::IsValid() const
-	{
-	return valid;
-	}
+    if ( ! v[1].IsCount() )
+        return nullptr;
 
-bool HashVal::Init()
-	{
-	if ( valid )
-		return false;
+    // Avoid making an out-of-range TypeTag
+    auto tag_raw = v[1].ToCount();
+    if ( tag_raw >= NUM_TYPES )
+        return nullptr;
 
-	valid = DoInit();
-	return valid;
-	}
+    return base_type(static_cast<TypeTag>(tag_raw));
+}
 
-StringValPtr HashVal::Get()
-	{
-	if ( ! valid )
-		return val_mgr->EmptyString();
+ValPtr OpaqueVal::DoClone(CloneState* state) {
+    auto d = OpaqueVal::SerializeData();
+    if ( ! d )
+        return nullptr;
 
-	auto result = DoGet();
-	valid = false;
-	return result;
-	}
+    auto rval = OpaqueVal::UnserializeData(d->AsView());
+    return state->NewClone(this, std::move(rval));
+}
 
-bool HashVal::Feed(const void* data, size_t size)
-	{
-	if ( valid )
-		return DoFeed(data, size);
+void OpaqueVal::ValDescribe(ODesc* d) const { d->Add(util::fmt("<opaque of %s>", OpaqueName())); }
 
-	Error("attempt to update an invalid opaque hash value");
-	return false;
-	}
+void OpaqueVal::ValDescribeReST(ODesc* d) const { d->Add(util::fmt("<opaque of %s>", OpaqueName())); }
 
-bool HashVal::DoInit()
-	{
-	assert(! "missing implementation of DoInit()");
-	return false;
-	}
+bool HashVal::IsValid() const { return valid; }
 
-bool HashVal::DoFeed(const void*, size_t)
-	{
-	assert(! "missing implementation of DoFeed()");
-	return false;
-	}
+bool HashVal::Init() {
+    if ( valid )
+        return false;
 
-StringValPtr HashVal::DoGet()
-	{
-	assert(! "missing implementation of DoGet()");
-	return val_mgr->EmptyString();
-	}
+    valid = DoInit();
+    return valid;
+}
 
-HashVal::HashVal(OpaqueTypePtr t) : OpaqueVal(std::move(t))
-	{
-	valid = false;
-	}
+StringValPtr HashVal::Get() {
+    if ( ! valid )
+        return val_mgr->EmptyString();
 
-MD5Val::MD5Val() : HashVal(md5_type) { }
+    auto result = DoGet();
+    valid = false;
+    return result;
+}
 
-MD5Val::~MD5Val() { }
+bool HashVal::Feed(const void* data, size_t size) {
+    if ( valid )
+        return DoFeed(data, size);
 
-void HashVal::digest_one(EVP_MD_CTX* h, const Val* v)
-	{
-	if ( v->GetType()->Tag() == TYPE_STRING )
-		{
-		const String* str = v->AsString();
-		detail::hash_update(h, str->Bytes(), str->Len());
-		}
-	else
-		{
-		ODesc d(DESC_BINARY);
-		v->Describe(&d);
-		detail::hash_update(h, (const u_char*)d.Bytes(), d.Len());
-		}
-	}
+    Error("attempt to update an invalid opaque hash value");
+    return false;
+}
 
-void HashVal::digest_one(EVP_MD_CTX* h, const ValPtr& v)
-	{
-	digest_one(h, v.get());
-	}
+bool HashVal::DoInit() {
+    assert(! "missing implementation of DoInit()");
+    return false;
+}
 
-ValPtr MD5Val::DoClone(CloneState* state)
-	{
-	auto out = make_intrusive<MD5Val>();
+bool HashVal::DoFeed(const void*, size_t) {
+    assert(! "missing implementation of DoFeed()");
+    return false;
+}
 
-	if ( IsValid() )
-		{
-		if ( ! out->Init() )
-			return nullptr;
+StringValPtr HashVal::DoGet() {
+    assert(! "missing implementation of DoGet()");
+    return val_mgr->EmptyString();
+}
 
-		out->ctx = ctx;
-		}
+HashVal::HashVal(OpaqueTypePtr t) : OpaqueVal(std::move(t)) { valid = false; }
 
-	return state->NewClone(this, std::move(out));
-	}
+namespace {
 
-bool MD5Val::DoInit()
-	{
-	assert(! IsValid());
-	MD5_Init(&ctx);
-	return true;
-	}
+constexpr size_t MD5VAL_STATE_SIZE = sizeof(MD5_CTX);
 
-bool MD5Val::DoFeed(const void* data, size_t size)
-	{
-	if ( ! IsValid() )
-		return false;
+constexpr size_t SHA1VAL_STATE_SIZE = sizeof(SHA_CTX);
 
-	MD5_Update(&ctx, data, size);
-	return true;
-	}
+constexpr size_t SHA224VAL_STATE_SIZE = sizeof(SHA256_CTX);
 
-StringValPtr MD5Val::DoGet()
-	{
-	if ( ! IsValid() )
-		return val_mgr->EmptyString();
+constexpr size_t SHA256VAL_STATE_SIZE = sizeof(SHA256_CTX);
 
-	u_char digest[MD5_DIGEST_LENGTH];
-	MD5_Final(digest, &ctx);
-	return make_intrusive<StringVal>(detail::md5_digest_print(digest));
-	}
+constexpr size_t SHA384VAL_STATE_SIZE = sizeof(SHA512_CTX);
+
+constexpr size_t SHA512VAL_STATE_SIZE = sizeof(SHA512_CTX);
+
+// -- MD5
+
+auto* to_native_ptr(MD5Val::StatePtr ptr) { return reinterpret_cast<MD5_CTX*>(ptr); }
+
+void do_init(MD5Val::StatePtr& ptr) {
+    auto ctx = new MD5_CTX;
+    MD5_Init(ctx);
+    ptr = reinterpret_cast<MD5Val::StatePtr>(ctx);
+}
+
+void do_clone(MD5Val::StatePtr out, MD5Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(MD5Val::StatePtr ptr, const void* data, size_t size) { MD5_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(MD5Val::StatePtr ptr, u_char* digest) { MD5_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(MD5Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(MD5_CTX)}; }
+
+void do_unserialize(MD5Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(MD5Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+// -- SHA1
+
+auto* to_native_ptr(SHA1Val::StatePtr ptr) { return reinterpret_cast<SHA_CTX*>(ptr); }
+
+void do_init(SHA1Val::StatePtr& ptr) {
+    auto ctx = new SHA_CTX;
+    SHA1_Init(ctx);
+    ptr = reinterpret_cast<SHA1Val::StatePtr>(ctx);
+}
+
+void do_clone(SHA1Val::StatePtr out, SHA1Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(SHA1Val::StatePtr ptr, const void* data, size_t size) { SHA1_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(SHA1Val::StatePtr ptr, u_char* digest) { SHA1_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(SHA1Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(SHA_CTX)}; }
+
+void do_unserialize(SHA1Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(SHA1Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+// -- SHA224
+
+auto* to_native_ptr(SHA224Val::StatePtr ptr) { return reinterpret_cast<SHA256_CTX*>(ptr); }
+
+void do_init(SHA224Val::StatePtr& ptr) {
+    auto ctx = new SHA256_CTX;
+    SHA224_Init(ctx);
+    ptr = reinterpret_cast<SHA224Val::StatePtr>(ctx);
+}
+
+void do_clone(SHA224Val::StatePtr out, SHA224Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(SHA224Val::StatePtr ptr, const void* data, size_t size) { SHA224_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(SHA224Val::StatePtr ptr, u_char* digest) { SHA224_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(SHA224Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(SHA256_CTX)}; }
+
+void do_unserialize(SHA224Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(SHA224Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+// -- SHA256
+
+auto* to_native_ptr(SHA256Val::StatePtr ptr) { return reinterpret_cast<SHA256_CTX*>(ptr); }
+
+void do_init(SHA256Val::StatePtr& ptr) {
+    auto ctx = new SHA256_CTX;
+    SHA256_Init(ctx);
+    ptr = reinterpret_cast<SHA256Val::StatePtr>(ctx);
+}
+
+void do_clone(SHA256Val::StatePtr out, SHA256Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(SHA256Val::StatePtr ptr, const void* data, size_t size) { SHA256_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(SHA256Val::StatePtr ptr, u_char* digest) { SHA256_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(SHA256Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(SHA256_CTX)}; }
+
+void do_unserialize(SHA256Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(SHA256Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+// -- SHA384
+
+auto* to_native_ptr(SHA384Val::StatePtr ptr) { return reinterpret_cast<SHA512_CTX*>(ptr); }
+
+void do_init(SHA384Val::StatePtr& ptr) {
+    auto ctx = new SHA512_CTX;
+    SHA384_Init(ctx);
+    ptr = reinterpret_cast<SHA384Val::StatePtr>(ctx);
+}
+
+void do_clone(SHA384Val::StatePtr out, SHA384Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(SHA384Val::StatePtr ptr, const void* data, size_t size) { SHA384_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(SHA384Val::StatePtr ptr, u_char* digest) { SHA384_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(SHA384Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(SHA512_CTX)}; }
+
+void do_unserialize(SHA384Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(SHA384Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+// -- SHA512
+
+auto* to_native_ptr(SHA512Val::StatePtr ptr) { return reinterpret_cast<SHA512_CTX*>(ptr); }
+
+void do_init(SHA512Val::StatePtr& ptr) {
+    auto ctx = new SHA512_CTX;
+    SHA512_Init(ctx);
+    ptr = reinterpret_cast<SHA512Val::StatePtr>(ctx);
+}
+
+void do_clone(SHA512Val::StatePtr out, SHA512Val::StatePtr in) { *to_native_ptr(out) = *to_native_ptr(in); }
+
+void do_feed(SHA512Val::StatePtr ptr, const void* data, size_t size) { SHA512_Update(to_native_ptr(ptr), data, size); }
+
+void do_get(SHA512Val::StatePtr ptr, u_char* digest) { SHA512_Final(digest, to_native_ptr(ptr)); }
+
+std::string do_serialize(SHA512Val::StatePtr ptr) { return {reinterpret_cast<const char*>(ptr), sizeof(SHA512_CTX)}; }
+
+void do_unserialize(SHA512Val::StatePtr ptr, const char* bytes, size_t len) { memcpy(ptr, bytes, len); }
+
+void do_destroy(SHA512Val::StatePtr ptr) { delete to_native_ptr(ptr); }
+
+} // namespace
+
+MD5Val::MD5Val() : HashVal(md5_type) {}
+
+MD5Val::~MD5Val() { do_destroy(ctx); }
+
+void HashVal::digest_one(detail::HashDigestState* h, const Val* v) {
+    if ( v->GetType()->Tag() == TYPE_STRING ) {
+        const String* str = v->AsString();
+        detail::hash_update(h, str->Bytes(), str->Len());
+    }
+    else {
+        ODesc d(DESC_BINARY);
+        v->Describe(&d);
+        detail::hash_update(h, d.Bytes(), d.Size());
+    }
+}
+
+void HashVal::digest_one(detail::HashDigestState* h, const ValPtr& v) { digest_one(h, v.get()); }
+
+ValPtr MD5Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<MD5Val>();
+
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
+        do_clone(out->ctx, ctx);
+    }
+
+    return state->NewClone(this, std::move(out));
+}
+
+bool MD5Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
+
+bool MD5Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
+    do_feed(ctx, data, size);
+    return true;
+}
+
+StringValPtr MD5Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
+
+    u_char digest[ZEEK_MD5_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::md5_digest_print(digest));
+}
 
 IMPLEMENT_OPAQUE_VALUE(MD5Val)
 
-broker::expected<broker::data> MD5Val::DoSerialize() const
-	{
-	if ( ! IsValid() )
-		return {broker::vector{false}};
+std::optional<BrokerData> MD5Val::DoSerializeData() const {
+    BrokerListBuilder builder;
 
-	auto data = std::string(reinterpret_cast<const char*>(&ctx), sizeof(ctx));
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
 
-	broker::vector d = {true, data};
-	return {std::move(d)};
-	}
+    builder.Reserve(2);
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
 
-bool MD5Val::DoUnserialize(const broker::data& data)
-	{
-	auto d = caf::get_if<broker::vector>(&data);
-	if ( ! d )
-		return false;
+bool MD5Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
+    auto d = data.ToList();
 
-	auto valid = caf::get_if<bool>(&(*d)[0]);
-	if ( ! valid )
-		return false;
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
 
-	if ( ! *valid )
-		{
-		assert(! IsValid()); // default set by ctor
-		return true;
-		}
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
 
-	if ( (*d).size() != 2 )
-		return false;
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
 
-	auto s = caf::get_if<std::string>(&(*d)[1]);
-	if ( ! s )
-		return false;
+    auto s = d[1].ToString();
 
-	if ( sizeof(ctx) != s->size() )
-		return false;
+    if ( s.size() != MD5VAL_STATE_SIZE )
+        return false;
 
-	Init();
-	memcpy(&ctx, s->data(), s->size());
-	return true;
-	}
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
 
-SHA1Val::SHA1Val() : HashVal(sha1_type) { }
+SHA1Val::SHA1Val() : HashVal(sha1_type) {}
 
-SHA1Val::~SHA1Val() { }
+SHA1Val::~SHA1Val() { do_destroy(ctx); }
 
-ValPtr SHA1Val::DoClone(CloneState* state)
-	{
-	auto out = make_intrusive<SHA1Val>();
+ValPtr SHA1Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<SHA1Val>();
 
-	if ( IsValid() )
-		{
-		if ( ! out->Init() )
-			return nullptr;
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
 
-		out->ctx = ctx;
-		}
+        do_clone(out->ctx, ctx);
+    }
 
-	return state->NewClone(this, std::move(out));
-	}
+    return state->NewClone(this, std::move(out));
+}
 
-bool SHA1Val::DoInit()
-	{
-	assert(! IsValid());
-	SHA1_Init(&ctx);
-	return true;
-	}
+bool SHA1Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
 
-bool SHA1Val::DoFeed(const void* data, size_t size)
-	{
-	if ( ! IsValid() )
-		return false;
+bool SHA1Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
 
-	SHA1_Update(&ctx, data, size);
-	return true;
-	}
+    do_feed(ctx, data, size);
+    return true;
+}
 
-StringValPtr SHA1Val::DoGet()
-	{
-	if ( ! IsValid() )
-		return val_mgr->EmptyString();
+StringValPtr SHA1Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
 
-	u_char digest[SHA_DIGEST_LENGTH];
-	SHA1_Final(digest, &ctx);
-	return make_intrusive<StringVal>(detail::sha1_digest_print(digest));
-	}
+    u_char digest[SHA_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::sha1_digest_print(digest));
+}
 
 IMPLEMENT_OPAQUE_VALUE(SHA1Val)
 
-broker::expected<broker::data> SHA1Val::DoSerialize() const
-	{
-	if ( ! IsValid() )
-		return {broker::vector{false}};
+std::optional<BrokerData> SHA1Val::DoSerializeData() const {
+    BrokerListBuilder builder;
 
-	auto data = std::string(reinterpret_cast<const char*>(&ctx), sizeof(ctx));
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
 
-	broker::vector d = {true, data};
+    builder.Reserve(2);
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
 
-	return {std::move(d)};
-	}
+bool SHA1Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-bool SHA1Val::DoUnserialize(const broker::data& data)
-	{
-	auto d = caf::get_if<broker::vector>(&data);
-	if ( ! d )
-		return false;
+    auto d = data.ToList();
 
-	auto valid = caf::get_if<bool>(&(*d)[0]);
-	if ( ! valid )
-		return false;
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
 
-	if ( ! *valid )
-		{
-		assert(! IsValid()); // default set by ctor
-		return true;
-		}
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
 
-	if ( (*d).size() != 2 )
-		return false;
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
 
-	auto s = caf::get_if<std::string>(&(*d)[1]);
-	if ( ! s )
-		return false;
+    auto s = d[1].ToString();
 
-	if ( sizeof(ctx) != s->size() )
-		return false;
+    if ( s.size() != SHA1VAL_STATE_SIZE )
+        return false;
 
-	Init();
-	memcpy(&ctx, s->data(), s->size());
-	return true;
-	}
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
 
-SHA256Val::SHA256Val() : HashVal(sha256_type) { }
+SHA224Val::SHA224Val() : HashVal(sha224_type) {}
 
-SHA256Val::~SHA256Val() { }
+SHA224Val::~SHA224Val() {
+    if ( ctx != nullptr )
+        do_destroy(ctx);
+}
 
-ValPtr SHA256Val::DoClone(CloneState* state)
-	{
-	auto out = make_intrusive<SHA256Val>();
+ValPtr SHA224Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<SHA224Val>();
 
-	if ( IsValid() )
-		{
-		if ( ! out->Init() )
-			return nullptr;
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
 
-		out->ctx = ctx;
-		}
+        do_clone(out->ctx, ctx);
+    }
 
-	return state->NewClone(this, std::move(out));
-	}
+    return state->NewClone(this, std::move(out));
+}
 
-bool SHA256Val::DoInit()
-	{
-	assert(! IsValid());
-	SHA256_Init(&ctx);
-	return true;
-	}
+bool SHA224Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
 
-bool SHA256Val::DoFeed(const void* data, size_t size)
-	{
-	if ( ! IsValid() )
-		return false;
+bool SHA224Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
 
-	SHA256_Update(&ctx, data, size);
-	return true;
-	}
+    do_feed(ctx, data, size);
+    return true;
+}
 
-StringValPtr SHA256Val::DoGet()
-	{
-	if ( ! IsValid() )
-		return val_mgr->EmptyString();
+StringValPtr SHA224Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
 
-	u_char digest[SHA256_DIGEST_LENGTH];
-	SHA256_Final(digest, &ctx);
-	return make_intrusive<StringVal>(detail::sha256_digest_print(digest));
-	}
+    u_char digest[SHA224_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::sha224_digest_print(digest));
+}
+
+IMPLEMENT_OPAQUE_VALUE(SHA224Val)
+
+std::optional<BrokerData> SHA224Val::DoSerializeData() const {
+    BrokerListBuilder builder;
+
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
+
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
+
+bool SHA224Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
+
+    auto d = data.ToList();
+
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
+
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
+
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
+
+    auto s = d[1].ToString();
+
+    if ( s.size() != SHA224VAL_STATE_SIZE )
+        return false;
+
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
+
+SHA256Val::SHA256Val() : HashVal(sha256_type) {}
+
+SHA256Val::~SHA256Val() {
+    if ( ctx != nullptr )
+        do_destroy(ctx);
+}
+
+ValPtr SHA256Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<SHA256Val>();
+
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
+
+        do_clone(out->ctx, ctx);
+    }
+
+    return state->NewClone(this, std::move(out));
+}
+
+bool SHA256Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
+
+bool SHA256Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
+
+    do_feed(ctx, data, size);
+    return true;
+}
+
+StringValPtr SHA256Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
+
+    u_char digest[SHA256_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::sha256_digest_print(digest));
+}
 
 IMPLEMENT_OPAQUE_VALUE(SHA256Val)
 
-broker::expected<broker::data> SHA256Val::DoSerialize() const
-	{
-	if ( ! IsValid() )
-		return {broker::vector{false}};
+std::optional<BrokerData> SHA256Val::DoSerializeData() const {
+    BrokerListBuilder builder;
 
-	auto data = std::string(reinterpret_cast<const char*>(&ctx), sizeof(ctx));
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
 
-	broker::vector d = {true, data};
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
 
-	return {std::move(d)};
-	}
+bool SHA256Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-bool SHA256Val::DoUnserialize(const broker::data& data)
-	{
-	auto d = caf::get_if<broker::vector>(&data);
-	if ( ! d )
-		return false;
+    auto d = data.ToList();
 
-	auto valid = caf::get_if<bool>(&(*d)[0]);
-	if ( ! valid )
-		return false;
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
 
-	if ( ! *valid )
-		{
-		assert(! IsValid()); // default set by ctor
-		return true;
-		}
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
 
-	if ( (*d).size() != 2 )
-		return false;
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
 
-	auto s = caf::get_if<std::string>(&(*d)[1]);
-	if ( ! s )
-		return false;
+    auto s = d[1].ToString();
 
-	if ( sizeof(ctx) != s->size() )
-		return false;
+    if ( s.size() != SHA256VAL_STATE_SIZE )
+        return false;
 
-	Init();
-	memcpy(&ctx, s->data(), s->size());
-	return true;
-	}
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
 
-EntropyVal::EntropyVal() : OpaqueVal(entropy_type) { }
+SHA384Val::SHA384Val() : HashVal(sha384_type) {}
 
-bool EntropyVal::Feed(const void* data, size_t size)
-	{
-	state.add(data, size);
-	return true;
-	}
+SHA384Val::~SHA384Val() {
+    if ( ctx != nullptr )
+        do_destroy(ctx);
+}
 
-bool EntropyVal::Get(double* r_ent, double* r_chisq, double* r_mean, double* r_montepicalc,
-                     double* r_scc)
-	{
-	state.end(r_ent, r_chisq, r_mean, r_montepicalc, r_scc);
-	return true;
-	}
+ValPtr SHA384Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<SHA384Val>();
+
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
+
+        do_clone(out->ctx, ctx);
+    }
+
+    return state->NewClone(this, std::move(out));
+}
+
+bool SHA384Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
+
+bool SHA384Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
+
+    do_feed(ctx, data, size);
+    return true;
+}
+
+StringValPtr SHA384Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
+
+    u_char digest[SHA384_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::sha384_digest_print(digest));
+}
+
+IMPLEMENT_OPAQUE_VALUE(SHA384Val)
+
+std::optional<BrokerData> SHA384Val::DoSerializeData() const {
+    BrokerListBuilder builder;
+
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
+
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
+
+bool SHA384Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
+
+    auto d = data.ToList();
+
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
+
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
+
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
+
+    auto s = d[1].ToString();
+
+    if ( s.size() != SHA384VAL_STATE_SIZE )
+        return false;
+
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
+
+SHA512Val::SHA512Val() : HashVal(sha512_type) {}
+
+SHA512Val::~SHA512Val() {
+    if ( ctx != nullptr )
+        do_destroy(ctx);
+}
+
+ValPtr SHA512Val::DoClone(CloneState* state) {
+    auto out = make_intrusive<SHA512Val>();
+
+    if ( IsValid() ) {
+        if ( ! out->Init() )
+            return nullptr;
+
+        do_clone(out->ctx, ctx);
+    }
+
+    return state->NewClone(this, std::move(out));
+}
+
+bool SHA512Val::DoInit() {
+    assert(! IsValid());
+    do_init(ctx);
+    return true;
+}
+
+bool SHA512Val::DoFeed(const void* data, size_t size) {
+    if ( ! IsValid() )
+        return false;
+
+    do_feed(ctx, data, size);
+    return true;
+}
+
+StringValPtr SHA512Val::DoGet() {
+    if ( ! IsValid() )
+        return val_mgr->EmptyString();
+
+    u_char digest[SHA512_DIGEST_LENGTH];
+    do_get(ctx, digest);
+    return make_intrusive<StringVal>(detail::sha512_digest_print(digest));
+}
+
+IMPLEMENT_OPAQUE_VALUE(SHA512Val)
+
+std::optional<BrokerData> SHA512Val::DoSerializeData() const {
+    BrokerListBuilder builder;
+
+    if ( ! IsValid() ) {
+        builder.Add(false);
+        return std::move(builder).Build();
+    }
+
+    builder.Add(true);
+    builder.Add(do_serialize(ctx));
+    return std::move(builder).Build();
+}
+
+bool SHA512Val::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
+
+    auto d = data.ToList();
+
+    if ( d.IsEmpty() || ! d[0].IsBool() )
+        return false;
+
+    if ( ! d[0].ToBool() ) {
+        assert(! IsValid()); // default set by ctor
+        return true;
+    }
+
+    if ( d.Size() != 2 || ! d[1].IsString() )
+        return false;
+
+    auto s = d[1].ToString();
+
+    if ( s.size() != SHA512VAL_STATE_SIZE )
+        return false;
+
+    Init();
+    do_unserialize(ctx, s.data(), s.size());
+    return true;
+}
+
+EntropyVal::EntropyVal() : OpaqueVal(entropy_type) {}
+
+bool EntropyVal::Feed(const void* data, size_t size) {
+    state.add(data, size);
+    return true;
+}
+
+bool EntropyVal::Get(double* r_ent, double* r_chisq, double* r_mean, double* r_montepicalc, double* r_scc) {
+    state.end(r_ent, r_chisq, r_mean, r_montepicalc, r_scc);
+    return true;
+}
 
 IMPLEMENT_OPAQUE_VALUE(EntropyVal)
 
-broker::expected<broker::data> EntropyVal::DoSerialize() const
-	{
-	broker::vector d = {
-		static_cast<uint64_t>(state.totalc),   static_cast<uint64_t>(state.mp),
-		static_cast<uint64_t>(state.sccfirst), static_cast<uint64_t>(state.inmont),
-		static_cast<uint64_t>(state.mcount),   static_cast<uint64_t>(state.cexp),
-		static_cast<uint64_t>(state.montex),   static_cast<uint64_t>(state.montey),
-		static_cast<uint64_t>(state.montepi),  static_cast<uint64_t>(state.sccu0),
-		static_cast<uint64_t>(state.scclast),  static_cast<uint64_t>(state.scct1),
-		static_cast<uint64_t>(state.scct2),    static_cast<uint64_t>(state.scct3),
-	};
+std::optional<BrokerData> EntropyVal::DoSerializeData() const {
+    constexpr size_t numMembers = 14; // RandTest has 14 non-array members.
 
-	d.reserve(256 + 3 + RT_MONTEN + 11);
+    BrokerListBuilder builder;
+    builder.Reserve(numMembers + std::size(state.ccount) + std::size(state.monte));
 
-	for ( int i = 0; i < 256; ++i )
-		d.emplace_back(static_cast<uint64_t>(state.ccount[i]));
+    builder.Add(static_cast<uint64_t>(state.totalc));
+    builder.Add(static_cast<uint64_t>(state.mp));
+    builder.Add(static_cast<uint64_t>(state.sccfirst));
+    builder.Add(static_cast<uint64_t>(state.inmont));
+    builder.Add(static_cast<uint64_t>(state.mcount));
+    builder.Add(static_cast<uint64_t>(state.cexp));
+    builder.Add(static_cast<uint64_t>(state.montex));
+    builder.Add(static_cast<uint64_t>(state.montey));
+    builder.Add(static_cast<uint64_t>(state.montepi));
+    builder.Add(static_cast<uint64_t>(state.sccu0));
+    builder.Add(static_cast<uint64_t>(state.scclast));
+    builder.Add(static_cast<uint64_t>(state.scct1));
+    builder.Add(static_cast<uint64_t>(state.scct2));
+    builder.Add(static_cast<uint64_t>(state.scct3));
 
-	for ( int i = 0; i < RT_MONTEN; ++i )
-		d.emplace_back(static_cast<uint64_t>(state.monte[i]));
+    for ( auto bin : state.ccount )
+        builder.Add(static_cast<uint64_t>(bin));
 
-	return {std::move(d)};
-	}
+    for ( auto val : state.monte )
+        builder.Add(static_cast<uint64_t>(val));
 
-bool EntropyVal::DoUnserialize(const broker::data& data)
-	{
-	auto d = caf::get_if<broker::vector>(&data);
-	if ( ! d )
-		return false;
+    return std::move(builder).Build();
+}
 
-	if ( ! get_vector_idx<uint64_t>(*d, 0, &state.totalc) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 1, &state.mp) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 2, &state.sccfirst) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 3, &state.inmont) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 4, &state.mcount) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 5, &state.cexp) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 6, &state.montex) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 7, &state.montey) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 8, &state.montepi) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 9, &state.sccu0) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 10, &state.scclast) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 11, &state.scct1) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 12, &state.scct2) )
-		return false;
-	if ( ! get_vector_idx<uint64_t>(*d, 13, &state.scct3) )
-		return false;
+bool EntropyVal::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-	for ( int i = 0; i < 256; ++i )
-		{
-		if ( ! get_vector_idx<uint64_t>(*d, 14 + i, &state.ccount[i]) )
-			return false;
-		}
+    auto index = size_t{0};
 
-	for ( int i = 0; i < RT_MONTEN; ++i )
-		{
-		if ( ! get_vector_idx<uint64_t>(*d, 14 + 256 + i, &state.monte[i]) )
-			return false;
-		}
+    auto d = data.ToList();
 
-	return true;
-	}
+    if ( ! get_vector_idx_if_count(d, index++, &state.totalc) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.mp) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.sccfirst) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.inmont) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.mcount) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.cexp) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.montex) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.montey) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.montepi) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.sccu0) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.scclast) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.scct1) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.scct2) )
+        return false;
+    if ( ! get_vector_idx_if_count(d, index++, &state.scct3) )
+        return false;
 
-BloomFilterVal::BloomFilterVal() : OpaqueVal(bloomfilter_type)
-	{
-	hash = nullptr;
-	bloom_filter = nullptr;
-	}
+    for ( auto& bin : state.ccount ) {
+        if ( ! get_vector_idx_if_count(d, index++, &bin) )
+            return false;
+    }
 
-BloomFilterVal::BloomFilterVal(probabilistic::BloomFilter* bf) : OpaqueVal(bloomfilter_type)
-	{
-	hash = nullptr;
-	bloom_filter = bf;
-	}
+    for ( auto& val : state.monte ) {
+        if ( ! get_vector_idx_if_count(d, index++, &val) )
+            return false;
+    }
 
-ValPtr BloomFilterVal::DoClone(CloneState* state)
-	{
-	if ( bloom_filter )
-		{
-		auto bf = make_intrusive<BloomFilterVal>(bloom_filter->Clone());
-		bf->Typify(type);
-		return state->NewClone(this, std::move(bf));
-		}
+    return true;
+}
 
-	return state->NewClone(this, make_intrusive<BloomFilterVal>());
-	}
+BloomFilterVal::BloomFilterVal() : OpaqueVal(bloomfilter_type) {
+    hash = nullptr;
+    bloom_filter = nullptr;
+}
 
-bool BloomFilterVal::Typify(TypePtr arg_type)
-	{
-	if ( type )
-		return false;
+BloomFilterVal::BloomFilterVal(probabilistic::BloomFilter* bf) : OpaqueVal(bloomfilter_type) {
+    hash = nullptr;
+    bloom_filter = bf;
+}
 
-	type = std::move(arg_type);
+ValPtr BloomFilterVal::DoClone(CloneState* state) {
+    if ( bloom_filter ) {
+        auto bf = make_intrusive<BloomFilterVal>(bloom_filter->Clone());
+        assert(type);
+        if ( ! bf->Typify(type) )
+            reporter->InternalError("Failed to typify new bloom_filter clone, clone already had valid type");
 
-	auto tl = make_intrusive<TypeList>(type);
-	tl->Append(type);
-	hash = new detail::CompositeHash(std::move(tl));
+        return state->NewClone(this, std::move(bf));
+    }
 
-	return true;
-	}
+    return state->NewClone(this, make_intrusive<BloomFilterVal>());
+}
 
-void BloomFilterVal::Add(const Val* val)
-	{
-	auto key = hash->MakeHashKey(*val, true);
-	bloom_filter->Add(key.get());
-	}
+bool BloomFilterVal::Typify(TypePtr arg_type) {
+    if ( type )
+        return false;
 
-size_t BloomFilterVal::Count(const Val* val) const
-	{
-	auto key = hash->MakeHashKey(*val, true);
-	size_t cnt = bloom_filter->Count(key.get());
-	return cnt;
-	}
+    type = std::move(arg_type);
 
-void BloomFilterVal::Clear()
-	{
-	bloom_filter->Clear();
-	}
+    auto tl = make_intrusive<TypeList>(type);
+    tl->Append(type);
+    hash = new detail::CompositeHash(std::move(tl));
 
-bool BloomFilterVal::Empty() const
-	{
-	return bloom_filter->Empty();
-	}
+    return true;
+}
 
-std::string BloomFilterVal::InternalState() const
-	{
-	return bloom_filter->InternalState();
-	}
+void BloomFilterVal::Add(const Val* val) {
+    auto key = hash->MakeHashKey(*val, true);
+    bloom_filter->Add(key.get());
+}
 
-BloomFilterValPtr BloomFilterVal::Merge(const BloomFilterVal* x, const BloomFilterVal* y)
-	{
-	if ( x->Type() && // any one 0 is ok here
-	     y->Type() && ! same_type(x->Type(), y->Type()) )
-		{
-		reporter->Error("cannot merge Bloom filters with different types");
-		return nullptr;
-		}
+bool BloomFilterVal::Decrement(const Val* val) {
+    auto key = hash->MakeHashKey(*val, true);
+    return bloom_filter->Decrement(key.get());
+}
 
-	if ( typeid(*x->bloom_filter) != typeid(*y->bloom_filter) )
-		{
-		reporter->Error("cannot merge different Bloom filter types");
-		return nullptr;
-		}
+size_t BloomFilterVal::Count(const Val* val) const {
+    auto key = hash->MakeHashKey(*val, true);
+    size_t cnt = bloom_filter->Count(key.get());
+    return cnt;
+}
 
-	probabilistic::BloomFilter* copy = x->bloom_filter->Clone();
+void BloomFilterVal::Clear() { bloom_filter->Clear(); }
 
-	if ( ! copy->Merge(y->bloom_filter) )
-		{
-		delete copy;
-		reporter->Error("failed to merge Bloom filter");
-		return nullptr;
-		}
+bool BloomFilterVal::Empty() const { return bloom_filter->Empty(); }
 
-	auto merged = make_intrusive<BloomFilterVal>(copy);
+std::string BloomFilterVal::InternalState() const { return bloom_filter->InternalState(); }
 
-	if ( x->Type() && ! merged->Typify(x->Type()) )
-		{
-		reporter->Error("failed to set type on merged Bloom filter");
-		return nullptr;
-		}
+BloomFilterValPtr BloomFilterVal::Merge(const BloomFilterVal* x, const BloomFilterVal* y) {
+    if ( x->Type() && // any one 0 is ok here
+         y->Type() && ! same_type(x->Type(), y->Type()) ) {
+        reporter->Error("cannot merge Bloom filters with different types");
+        return nullptr;
+    }
 
-	return merged;
-	}
+    auto final_type = x->Type() ? x->Type() : y->Type();
 
-BloomFilterVal::~BloomFilterVal()
-	{
-	delete hash;
-	delete bloom_filter;
-	}
+    if ( typeid(*x->bloom_filter) != typeid(*y->bloom_filter) ) {
+        reporter->Error("cannot merge different Bloom filter types");
+        return nullptr;
+    }
+
+    probabilistic::BloomFilter* copy = x->bloom_filter->Clone();
+
+    if ( ! copy->Merge(y->bloom_filter) ) {
+        delete copy;
+        reporter->Error("failed to merge Bloom filter");
+        return nullptr;
+    }
+
+    auto merged = make_intrusive<BloomFilterVal>(copy);
+
+    if ( final_type && ! merged->Typify(final_type) ) {
+        reporter->Error("failed to set type on merged Bloom filter");
+        return nullptr;
+    }
+
+    return merged;
+}
+
+BloomFilterValPtr BloomFilterVal::Intersect(const BloomFilterVal* x, const BloomFilterVal* y) {
+    if ( x->Type() && // any one 0 is ok here
+         y->Type() && ! same_type(x->Type(), y->Type()) ) {
+        reporter->Error("cannot merge Bloom filters with different types");
+        return nullptr;
+    }
+
+    if ( typeid(*x->bloom_filter) != typeid(*y->bloom_filter) ) {
+        reporter->Error("cannot intersect different Bloom filter types");
+        return nullptr;
+    }
+
+    auto intersected_bf = x->bloom_filter->Intersect(y->bloom_filter);
+
+    if ( ! intersected_bf ) {
+        reporter->Error("failed to intersect Bloom filter");
+        return nullptr;
+    }
+
+    auto final_type = x->Type() ? x->Type() : y->Type();
+
+    auto intersected = make_intrusive<BloomFilterVal>(intersected_bf);
+
+    if ( final_type && ! intersected->Typify(final_type) ) {
+        reporter->Error("Failed to set type on intersected bloom filter");
+        return nullptr;
+    }
+
+    return intersected;
+}
+
+BloomFilterVal::~BloomFilterVal() {
+    delete hash;
+    delete bloom_filter;
+}
 
 IMPLEMENT_OPAQUE_VALUE(BloomFilterVal)
 
-broker::expected<broker::data> BloomFilterVal::DoSerialize() const
-	{
-	broker::vector d;
+std::optional<BrokerData> BloomFilterVal::DoSerializeData() const {
+    BrokerListBuilder builder;
 
-	if ( type )
-		{
-		auto t = SerializeType(type);
-		if ( ! t )
-			return broker::ec::invalid_data;
+    if ( type ) {
+        auto t = SerializeType(type);
+        if ( ! t )
+            return std::nullopt;
 
-		d.emplace_back(std::move(*t));
-		}
-	else
-		d.emplace_back(broker::none());
+        builder.Add(std::move(*t));
+    }
+    else
+        builder.AddNil();
 
-	auto bf = bloom_filter->Serialize();
-	if ( ! bf )
-		return broker::ec::invalid_data; // Cannot serialize;
+    auto bf = bloom_filter->SerializeData();
+    if ( ! bf )
+        return std::nullopt;
 
-	d.emplace_back(*bf);
-	return {std::move(d)};
-	}
+    builder.Add(std::move(*bf));
+    return std::move(builder).Build();
+}
 
-bool BloomFilterVal::DoUnserialize(const broker::data& data)
-	{
-	auto v = caf::get_if<broker::vector>(&data);
+bool BloomFilterVal::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-	if ( ! (v && v->size() == 2) )
-		return false;
+    auto v = data.ToList();
 
-	auto no_type = caf::get_if<broker::none>(&(*v)[0]);
-	if ( ! no_type )
-		{
-		auto t = UnserializeType((*v)[0]);
+    if ( v.Size() != 2 )
+        return false;
 
-		if ( ! (t && Typify(std::move(t))) )
-			return false;
-		}
+    if ( ! v[0].IsNil() ) {
+        auto t = UnserializeType(v[0]);
 
-	auto bf = probabilistic::BloomFilter::Unserialize((*v)[1]);
-	if ( ! bf )
-		return false;
+        if ( ! (t && Typify(std::move(t))) )
+            return false;
+    }
 
-	bloom_filter = bf.release();
-	return true;
-	}
+    auto bf = probabilistic::BloomFilter::UnserializeData(v[1]);
+    if ( ! bf )
+        return false;
 
-CardinalityVal::CardinalityVal() : OpaqueVal(cardinality_type)
-	{
-	c = nullptr;
-	hash = nullptr;
-	}
+    bloom_filter = bf.release();
+    return true;
+}
 
-CardinalityVal::CardinalityVal(probabilistic::detail::CardinalityCounter* arg_c)
-	: OpaqueVal(cardinality_type)
-	{
-	c = arg_c;
-	hash = nullptr;
-	}
+CardinalityVal::CardinalityVal() : OpaqueVal(cardinality_type) {
+    c = nullptr;
+    hash = nullptr;
+}
 
-CardinalityVal::~CardinalityVal()
-	{
-	delete c;
-	delete hash;
-	}
+CardinalityVal::CardinalityVal(probabilistic::detail::CardinalityCounter* arg_c) : OpaqueVal(cardinality_type) {
+    c = arg_c;
+    hash = nullptr;
+}
 
-ValPtr CardinalityVal::DoClone(CloneState* state)
-	{
-	return state->NewClone(
-		this, make_intrusive<CardinalityVal>(new probabilistic::detail::CardinalityCounter(*c)));
-	}
+CardinalityVal::~CardinalityVal() {
+    delete c;
+    delete hash;
+}
 
-bool CardinalityVal::Typify(TypePtr arg_type)
-	{
-	if ( type )
-		return false;
+ValPtr CardinalityVal::DoClone(CloneState* state) {
+    return state->NewClone(this, make_intrusive<CardinalityVal>(new probabilistic::detail::CardinalityCounter(*c)));
+}
 
-	type = std::move(arg_type);
+bool CardinalityVal::Typify(TypePtr arg_type) {
+    if ( type )
+        return false;
 
-	auto tl = make_intrusive<TypeList>(type);
-	tl->Append(type);
-	hash = new detail::CompositeHash(std::move(tl));
+    type = std::move(arg_type);
 
-	return true;
-	}
+    auto tl = make_intrusive<TypeList>(type);
+    tl->Append(type);
+    hash = new detail::CompositeHash(std::move(tl));
 
-void CardinalityVal::Add(const Val* val)
-	{
-	auto key = hash->MakeHashKey(*val, true);
-	c->AddElement(key->Hash());
-	}
+    return true;
+}
+
+void CardinalityVal::Add(const Val* val) {
+    auto key = hash->MakeHashKey(*val, true);
+    c->AddElement(key->Hash());
+}
 
 IMPLEMENT_OPAQUE_VALUE(CardinalityVal)
 
-broker::expected<broker::data> CardinalityVal::DoSerialize() const
-	{
-	broker::vector d;
+std::optional<BrokerData> CardinalityVal::DoSerializeData() const {
+    BrokerListBuilder builder;
+    builder.Reserve(2);
 
-	if ( type )
-		{
-		auto t = SerializeType(type);
-		if ( ! t )
-			return broker::ec::invalid_data;
+    if ( type ) {
+        auto t = SerializeType(type);
+        if ( ! t )
+            return std::nullopt;
 
-		d.emplace_back(std::move(*t));
-		}
-	else
-		d.emplace_back(broker::none());
+        builder.Add(std::move(*t));
+    }
+    else
+        builder.AddNil();
 
-	auto cs = c->Serialize();
-	if ( ! cs )
-		return broker::ec::invalid_data;
+    auto cs = c->Serialize();
+    if ( ! cs )
+        return std::nullopt;
 
-	d.emplace_back(*cs);
-	return {std::move(d)};
-	}
+    builder.Add(std::move(*cs));
+    return std::move(builder).Build();
+}
 
-bool CardinalityVal::DoUnserialize(const broker::data& data)
-	{
-	auto v = caf::get_if<broker::vector>(&data);
+bool CardinalityVal::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-	if ( ! (v && v->size() == 2) )
-		return false;
+    auto v = data.ToList();
 
-	auto no_type = caf::get_if<broker::none>(&(*v)[0]);
-	if ( ! no_type )
-		{
-		auto t = UnserializeType((*v)[0]);
+    if ( v.Size() != 2 )
+        return false;
 
-		if ( ! (t && Typify(std::move(t))) )
-			return false;
-		}
+    if ( ! v[0].IsNil() ) {
+        auto t = UnserializeType(v[0]);
 
-	auto cu = probabilistic::detail::CardinalityCounter::Unserialize((*v)[1]);
-	if ( ! cu )
-		return false;
+        if ( ! (t && Typify(std::move(t))) )
+            return false;
+    }
 
-	c = cu.release();
-	return true;
-	}
+    auto cu = probabilistic::detail::CardinalityCounter::Unserialize(v[1]);
+    if ( ! cu )
+        return false;
 
-ParaglobVal::ParaglobVal(std::unique_ptr<paraglob::Paraglob> p) : OpaqueVal(paraglob_type)
-	{
-	this->internal_paraglob = std::move(p);
-	}
+    c = cu.release();
+    return true;
+}
 
-VectorValPtr ParaglobVal::Get(StringVal*& pattern)
-	{
-	auto rval = make_intrusive<VectorVal>(id::string_vec);
-	std::string string_pattern(reinterpret_cast<const char*>(pattern->Bytes()), pattern->Len());
+ParaglobVal::ParaglobVal(std::unique_ptr<paraglob::Paraglob> p) : OpaqueVal(paraglob_type) {
+    this->internal_paraglob = std::move(p);
+}
 
-	std::vector<std::string> matches = this->internal_paraglob->get(string_pattern);
-	for ( size_t i = 0; i < matches.size(); i++ )
-		rval->Assign(i, make_intrusive<StringVal>(matches.at(i)));
+VectorValPtr ParaglobVal::Get(StringVal*& pattern) {
+    auto rval = make_intrusive<VectorVal>(id::string_vec);
+    std::string string_pattern(reinterpret_cast<const char*>(pattern->Bytes()), pattern->Len());
 
-	return rval;
-	}
+    std::vector<std::string> matches = this->internal_paraglob->get(string_pattern);
+    for ( size_t i = 0; i < matches.size(); i++ )
+        rval->Assign(i, make_intrusive<StringVal>(matches.at(i)));
 
-bool ParaglobVal::operator==(const ParaglobVal& other) const
-	{
-	return *(this->internal_paraglob) == *(other.internal_paraglob);
-	}
+    return rval;
+}
+
+bool ParaglobVal::operator==(const ParaglobVal& other) const {
+    return *(this->internal_paraglob) == *(other.internal_paraglob);
+}
 
 IMPLEMENT_OPAQUE_VALUE(ParaglobVal)
 
-broker::expected<broker::data> ParaglobVal::DoSerialize() const
-	{
-	broker::vector d;
-	std::unique_ptr<std::vector<uint8_t>> iv = this->internal_paraglob->serialize();
-	for ( uint8_t a : *(iv.get()) )
-		d.emplace_back(static_cast<uint64_t>(a));
-	return {std::move(d)};
-	}
+std::optional<BrokerData> ParaglobVal::DoSerializeData() const {
+    std::unique_ptr<std::vector<uint8_t>> iv = this->internal_paraglob->serialize();
+    BrokerListBuilder builder;
+    builder.Reserve(iv->size());
+    for ( uint8_t a : *iv )
+        builder.AddCount(a);
+    return std::move(builder).Build();
+}
 
-bool ParaglobVal::DoUnserialize(const broker::data& data)
-	{
-	auto d = caf::get_if<broker::vector>(&data);
-	if ( ! d )
-		return false;
+bool ParaglobVal::DoUnserializeData(BrokerDataView data) {
+    if ( ! data.IsList() )
+        return false;
 
-	std::unique_ptr<std::vector<uint8_t>> iv(new std::vector<uint8_t>);
-	iv->resize(d->size());
+    auto d = data.ToList();
 
-	for ( std::vector<broker::data>::size_type i = 0; i < d->size(); ++i )
-		{
-		if ( ! get_vector_idx<uint64_t>(*d, i, iv.get()->data() + i) )
-			return false;
-		}
+    auto iv = std::make_unique<std::vector<uint8_t>>();
+    iv->resize(d.Size());
 
-	try
-		{
-		this->internal_paraglob = std::make_unique<paraglob::Paraglob>(std::move(iv));
-		}
-	catch ( const paraglob::underflow_error& e )
-		{
-		reporter->Error("Paraglob underflow error -> %s", e.what());
-		return false;
-		}
-	catch ( const paraglob::overflow_error& e )
-		{
-		reporter->Error("Paraglob overflow error -> %s", e.what());
-		return false;
-		}
+    for ( size_t index = 0; index < d.Size(); ++index ) {
+        if ( ! get_vector_idx_if_count(d, index, iv->data() + index) )
+            return false;
+    }
 
-	return true;
-	}
+    try {
+        this->internal_paraglob = std::make_unique<paraglob::Paraglob>(std::move(iv));
+    } catch ( const paraglob::underflow_error& e ) {
+        reporter->Error("Paraglob underflow error -> %s", e.what());
+        return false;
+    } catch ( const paraglob::overflow_error& e ) {
+        reporter->Error("Paraglob overflow error -> %s", e.what());
+        return false;
+    }
 
-ValPtr ParaglobVal::DoClone(CloneState* state)
-	{
-	try
-		{
-		return make_intrusive<ParaglobVal>(
-			std::make_unique<paraglob::Paraglob>(this->internal_paraglob->serialize()));
-		}
-	catch ( const paraglob::underflow_error& e )
-		{
-		reporter->Error("Paraglob underflow error while cloning -> %s", e.what());
-		return nullptr;
-		}
-	catch ( const paraglob::overflow_error& e )
-		{
-		reporter->Error("Paraglob overflow error while cloning -> %s", e.what());
-		return nullptr;
-		}
-	}
+    return true;
+}
 
-broker::expected<broker::data> TelemetryVal::DoSerialize() const
-	{
-	return broker::make_error(broker::ec::invalid_data, "cannot serialize metric handles");
-	}
+ValPtr ParaglobVal::DoClone(CloneState* state) {
+    try {
+        return make_intrusive<ParaglobVal>(std::make_unique<paraglob::Paraglob>(this->internal_paraglob->serialize()));
+    } catch ( const paraglob::underflow_error& e ) {
+        reporter->Error("Paraglob underflow error while cloning -> %s", e.what());
+        return nullptr;
+    } catch ( const paraglob::overflow_error& e ) {
+        reporter->Error("Paraglob overflow error while cloning -> %s", e.what());
+        return nullptr;
+    }
+}
 
-bool TelemetryVal::DoUnserialize(const broker::data&)
-	{
-	return false;
-	}
-
-TelemetryVal::TelemetryVal(telemetry::IntCounter) : OpaqueVal(int_counter_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::IntCounterFamily) : OpaqueVal(int_counter_metric_family_type)
-	{
-	}
-
-TelemetryVal::TelemetryVal(telemetry::DblCounter) : OpaqueVal(dbl_counter_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::DblCounterFamily) : OpaqueVal(dbl_counter_metric_family_type)
-	{
-	}
-
-TelemetryVal::TelemetryVal(telemetry::IntGauge) : OpaqueVal(int_gauge_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::IntGaugeFamily) : OpaqueVal(int_gauge_metric_family_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::DblGauge) : OpaqueVal(dbl_gauge_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::DblGaugeFamily) : OpaqueVal(dbl_gauge_metric_family_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::IntHistogram) : OpaqueVal(int_histogram_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::IntHistogramFamily)
-	: OpaqueVal(int_histogram_metric_family_type)
-	{
-	}
-
-TelemetryVal::TelemetryVal(telemetry::DblHistogram) : OpaqueVal(dbl_histogram_metric_type) { }
-
-TelemetryVal::TelemetryVal(telemetry::DblHistogramFamily)
-	: OpaqueVal(dbl_histogram_metric_family_type)
-	{
-	}
-
-	}
+} // namespace zeek

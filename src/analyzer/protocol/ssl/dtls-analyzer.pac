@@ -1,27 +1,24 @@
+%extern{
+#include <cinttypes>
+
+using DTLS_Reassembler = zeek::analyzer::dtls::DTLS_Reassembler;
+%}
 
 refine connection SSL_Conn += {
 
 	%member{
 
 		struct message_info {
-			uint64 message_first_sequence; // the minumum dtls sequence number for this handshake fragment
-			bool first_sequence_seen; // did we actually see the fragment with the smallest number
-			uint64 message_last_sequence; // the mazimum dtls sequence number for this handshake fragment
-			uint16 message_handshake_sequence; // the handshake sequence number of this handshake (to identify)
-			uint32 message_length; // data length of this handshake (data in buffer)
-			uint32 message_sequence_seen; // a bitfield that shows which sequence numbers we already saw, offset from first_seq.
-			u_char* buffer;
+			uint16 message_handshake_sequence = 0; // the handshake sequence number of this handshake (to identify)
+			uint32 message_length = 0; // data length of this handshake (expected size)
+			std::unique_ptr<DTLS_Reassembler> reassembler;
 		} server, client;
 	%}
 
-	%init{
-		memset(&server, 0, sizeof(server));
-		memset(&client, 0, sizeof(client));
-	%}
-
 	%cleanup{
-		delete [] server.buffer;
-		delete [] client.buffer;
+		// Reassembler lifetime bound to analyzer.
+		server.reassembler.reset();
+		client.reassembler.reset();
 	%}
 
 	function proc_dtls(pdu: SSLRecord, sequence: uint64): bool
@@ -59,85 +56,90 @@ refine connection SSL_Conn += {
 			return true;
 			}
 
-		if ( i->message_handshake_sequence != ${rec.message_seq} || i->message_length != length || i->buffer == 0 )
-			{
-			// cannot resume reassembling. Let's abandon the current data and try anew...
-			delete [] i->buffer;
-			memset(i, 0, sizeof(message_info));
-			i->message_handshake_sequence = ${rec.message_seq};
-			i->message_length = length;
-			i->buffer = new u_char[length];
-			// does not have to be the first sequence number - we cannot figure that out at this point. If it is not,
-			// we will fix that later...
-			i->message_first_sequence = sequence_number;
-			}
-
-		// if we arrive here, we are actually ready to resume.
-		if ( i->message_first_sequence > sequence_number )
-			{
-			if ( i->first_sequence_seen )
-				{
-				zeek_analyzer()->AnalyzerViolation("Saw second and different first message fragment for handshake.");
-				return true;
-				}
-			// first sequence number was incorrect, let's fix that.
-			uint64 diff = i->message_first_sequence - sequence_number;
-			i->message_sequence_seen = i->message_sequence_seen << diff;
-			i->message_first_sequence = sequence_number;
-			}
-
-		// if we have offset 0, we know the smallest number...
-		if ( foffset == 0 )
-			i->first_sequence_seen = true;
-
-		// check if we already saw the message
-		if ( ( i->message_sequence_seen & ( 1 << (sequence_number - i->message_first_sequence) ) ) != 0 )
-			return true; // do not handle same message fragment twice
-
-		// copy data from fragment to buffer
+		// is the data buffer as long as announced?
 		if ( ${rec.data}.length() != flength )
 			{
-			zeek_analyzer()->AnalyzerViolation(zeek::util::fmt("DTLS handshake record length does not match packet length"));
+			zeek_analyzer()->AnalyzerViolation("DTLS handshake record length does not match packet length");
 			return true;
 			}
 
+		// do not allow fragments beyond the announce message length
 		if ( foffset + flength > length )
 			{
-			zeek_analyzer()->AnalyzerViolation(zeek::util::fmt("DTLS handshake fragment trying to write past end of buffer"));
+			zeek_analyzer()->AnalyzerViolation("DTLS handshake fragment trying to write past end of buffer");
 			return true;
 			}
 
-		// store that we handled fragment
-		i->message_sequence_seen |= 1 << (sequence_number - i->message_first_sequence);
-		memcpy(i->buffer + foffset, ${rec.data}.data(), ${rec.data}.length());
-
-		//fprintf(stderr, "Copied to buffer offset %u length %u\n", foffset, ${rec.data}.length());
-
-		// store last fragment information if this is the last fragment...
-
-		// check if we saw all fragments so far. If yes, forward...
-		if ( foffset + flength == length )
-			i->message_last_sequence = sequence_number;
-
-		if ( i->message_last_sequence != 0 && i->first_sequence_seen )
+		// (Re-)Initialize fragment reassembly if needed.
+		if ( i->message_handshake_sequence != ${rec.message_seq} || i->message_length != length || ! i->reassembler )
 			{
-			uint64 total_length = i->message_last_sequence - i->message_first_sequence;
-			if ( total_length > 30 )
-				{
-				zeek_analyzer()->AnalyzerViolation(zeek::util::fmt("DTLS Message fragmented over more than 30 pieces. Cannot reassemble."));
-				return true;
-				}
-
-			if ( ( ~(i->message_sequence_seen) & ( ( 1<<(total_length+1) ) -1 ) ) == 0 )
-				{
-				//fprintf(stderr, "ALl fragments here. Total length %u\n", length);
-				zeek_analyzer()->SendHandshake(${pdu.raw_tls_version}, ${rec.msg_type}, length, i->buffer, i->buffer + length, ${pdu.is_orig});
-				}
+			i->reassembler = std::make_unique<DTLS_Reassembler>(zeek_analyzer());
+			i->message_handshake_sequence = ${rec.message_seq};
+			i->message_length = length;
 			}
 
+		// Handle the fragment through the reassembler.
+		i->reassembler->NewBlock(zeek::run_state::network_time, foffset, flength, ${rec.data}.data());
+
+		// Completed?
+		if ( i->reassembler->TotalSize() >= i->message_length )
+			{
+			auto buffer = std::move(*(i->reassembler)).TakeBuffer();
+			if ( buffer.size() != static_cast<size_t>(length) )  // just some sanity check
+				zeek_analyzer()->Weird("DTLS_weird_reassembled_buffer_length");
+
+			zeek_analyzer()->SendHandshake(${pdu.raw_tls_version}, ${rec.msg_type}, length, buffer.data(), buffer.data() + buffer.size(), ${pdu.is_orig});
+
+			i->reassembler.reset();
+			return true;
+			}
+
+		if ( i->reassembler->NumBlocks() > 30 )
+			{
+			zeek_analyzer()->LimitReachedWeird("DTLS_excessive_fragments", i->reassembler->NumBlocks());
+			zeek_analyzer()->AnalyzerViolation("DTLS Message fragmented over more than 30 pieces. Cannot reassemble.");
+
+			i->reassembler.reset();
+			return true;
+			}
+		else if ( i->reassembler->Overlaps() > 30 )
+			{
+			zeek_analyzer()->LimitReachedWeird("DTLS_excessive_fragment_overlaps", i->reassembler->Overlaps());
+			zeek_analyzer()->AnalyzerViolation("DTLS Message fragmented with more than 30 overlapping pieces. Cannot reassemble.");
+
+			i->reassembler.reset();
+			return true;
+			}
 
 		return true;
 		%}
+
+		function proc_unified_record(is_orig: bool, ur: UnifiedRecord) : bool
+			%{
+			// we don't have a CCS packet anymore - so let's just assume the connection is established once we have seen a packet from each direction.
+			if ( is_orig )
+				client_state_ = STATE_ENCRYPTED;
+			else
+				server_state_ = STATE_ENCRYPTED;
+
+			if ( client_state_ == STATE_ENCRYPTED && server_state_ == STATE_ENCRYPTED && established_ == false )
+				{
+				established_ = true;
+				if ( ssl_established )
+					zeek::BifEvent::enqueue_ssl_established(zeek_analyzer(), zeek_analyzer()->Conn());
+				}
+
+			if ( ssl_encrypted_data )
+				{
+				// In case a CID is given, swallow is not quite the correct length, because we are not parsing the entire header. This is not entirely
+				// trivial to work around, and the workaround won't work in all cases - and it might also not matter.
+				// We also have more potentially interesting information (the sequence number) - which we don't currently give to scriptland.
+				zeek::BifEvent::enqueue_ssl_encrypted_data(zeek_analyzer(),
+					zeek_analyzer()->Conn(), is_orig ^ zeek_analyzer()->GetFlipped(), DTLSv13, APPLICATION_DATA, ur->swallow().length());
+				}
+
+			return true;
+			%}
 };
 
 refine typeattr SSLRecord += &let {
@@ -146,4 +148,8 @@ refine typeattr SSLRecord += &let {
 
 refine typeattr Handshake += &let {
 	proc: bool = $context.connection.proc_handshake(rec, this);
+};
+
+refine typeattr UnifiedRecord += &let {
+	proc: bool = $context.connection.proc_unified_record(is_orig, this);
 };

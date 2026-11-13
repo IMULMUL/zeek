@@ -15,30 +15,22 @@
 #define arp_pkthdr arphdr
 #endif
 
-namespace zeek::packet_analysis::ARP
-	{
+namespace zeek::packet_analysis::ARP {
 
-class ARPAnalyzer : public Analyzer
-	{
+class ARPAnalyzer : public Analyzer {
 public:
-	ARPAnalyzer();
-	~ARPAnalyzer() override = default;
+    ARPAnalyzer();
 
-	bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
+    bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
 
-	static zeek::packet_analysis::AnalyzerPtr Instantiate()
-		{
-		return std::make_shared<ARPAnalyzer>();
-		}
+    static zeek::packet_analysis::AnalyzerPtr Instantiate() { return std::make_shared<ARPAnalyzer>(); }
 
 private:
-	zeek::AddrValPtr ToAddrVal(const void* addr);
-	zeek::StringValPtr ToEthAddrStr(const u_char* addr);
+    zeek::AddrValPtr ToAddrVal(const void* addr, size_t len);
+    zeek::StringValPtr ToEthAddrStr(const u_char* addr, size_t len);
 
-	void BadARPEvent(const struct arp_pkthdr* hdr, const char* fmt, ...)
-		__attribute__((format(printf, 3, 4)));
-	void RequestReplyEvent(EventHandlerPtr e, const u_char* src, const u_char* dst, const char* spa,
-	                       const char* sha, const char* tpa, const char* tha);
-	};
+    void BadARPEvent(const struct arp_pkthdr* hdr, const char* fmt, ...) __attribute__((format(printf, 3, 4)));
+    void RequestReplyEvent(EventHandlerPtr e, const u_char* src, const u_char* dst, const struct arp_pkthdr* hdr);
+};
 
-	}
+} // namespace zeek::packet_analysis::ARP

@@ -1,5 +1,5 @@
-# @TEST-EXEC: zeek -C -b -r $TRACES/pe/pe.trace %INPUT >out
-# @TEST-EXEC: zeek -C -b -r $TRACES/pe/pe.trace %INPUT disable_it=T >>out
+# @TEST-EXEC: zeek -b -r $TRACES/pe/pe.pcap %INPUT >out
+# @TEST-EXEC: zeek -b -r $TRACES/pe/pe.pcap %INPUT disable_it=T >>out
 # @TEST-EXEC: btest-diff out
 
 @load base/protocols/ftp
@@ -26,5 +26,5 @@ event zeek_init()
 event pe_dos_header(f: fa_file, h: PE::DOSHeader)
 	{
 	print "got pe_dos_header event";
-	exit(0);
+	terminate();
 	}

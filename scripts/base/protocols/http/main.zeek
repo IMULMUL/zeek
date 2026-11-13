@@ -12,6 +12,12 @@ module HTTP;
 export {
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for HTTP.
+	const ports = {
+		80/tcp, 81/tcp, 631/tcp, 1080/tcp, 3128/tcp,
+		8000/tcp, 8080/tcp, 8888/tcp,
+	} &redef;
+
 	global log_policy: Log::PolicyHook;
 
 	## Indicate a type of attack or compromise in the record to be logged.
@@ -43,9 +49,12 @@ export {
 		uri:                     string    &log &optional;
 		## Value of the "referer" header.  The comment is deliberately
 		## misspelled like the standard declares, but the name used here
-		## is "referrer" spelled correctly.
+		## is "referrer", spelled correctly.
 		referrer:                string    &log &optional;
-		## Value of the version portion of the request.
+		## Value of the version portion of the reply. If you require
+		## message-level detail, consider the :zeek:see:`http_request` and
+		## :zeek:see:`http_reply` events, which report each message's
+		## version string.
 		version:		string	   &log &optional;
 		## Value of the User-Agent header from the client.
 		user_agent:              string    &log &optional;
@@ -121,7 +130,9 @@ export {
 		"PROPFIND", "PROPPATCH", "MKCOL",
 		"COPY", "MOVE", "LOCK", "UNLOCK",
 		"POLL", "REPORT", "SUBSCRIBE", "BMOVE",
-		"SEARCH"
+		"SEARCH",
+		# Proposed standard: https://www.rfc-editor.org/info/rfc10008
+		"QUERY",
 	};
 
 	## Event that can be handled to access the HTTP record as it is sent on
@@ -130,6 +141,14 @@ export {
 
 	## HTTP finalization hook.  Remaining HTTP info may get logged when it's called.
 	global finalize_http: Conn::RemovalHook;
+
+	## The maximum number of bytes that a single string field can contain when
+	## logging. If a string reaches this limit, the log output for the field will be
+	## truncated. Setting this to zero disables the limiting. HTTP has no maximum
+	## length for various fields such as the URI, so this is set to zero by default.
+	##
+	## .. zeek:see:: Log::default_max_field_string_bytes
+	const default_max_field_string_bytes = 0 &redef;
 }
 
 # Add the http state tracking fields to the connection record.
@@ -138,16 +157,12 @@ redef record connection += {
 	http_state:  State &optional;
 };
 
-const ports = {
-	80/tcp, 81/tcp, 631/tcp, 1080/tcp, 3128/tcp,
-	8000/tcp, 8080/tcp, 8888/tcp,
-};
-redef likely_server_ports += { ports };
 
 # Initialize the HTTP logging stream and ports.
 event zeek_init() &priority=5
 	{
-	Log::create_stream(HTTP::LOG, [$columns=Info, $ev=log_http, $path="http", $policy=log_policy]);
+	Log::create_stream(HTTP::LOG, Log::Stream($columns=Info, $ev=log_http, $path="http", $policy=log_policy,
+	                                          $max_field_string_bytes=HTTP::default_max_field_string_bytes));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_HTTP, ports);
 	}
 
@@ -202,6 +217,48 @@ event http_request(c: connection, method: string, original_URI: string,
 		Conn::register_removal_hook(c, finalize_http);
 		}
 
+	# Request/response tracking exists to account for HTTP pipelining.
+	# It fails if more responses have been seen than requests. If that
+	# happens, just fast-forward current_request such that the next
+	# response matches the in-flight request.
+	if ( c$http_state$current_request < c$http_state$current_response )
+		{
+		Reporter::conn_weird("HTTP_response_before_request", c);
+		c$http_state$current_request = c$http_state$current_response;
+		}
+
+	# Too many requests are pending for which we have not yet observed a
+	# reply. This might be due to excessive HTTP pipelining, one-sided
+	# traffic capture, or the responder side of the HTTP analyzer having
+	# been disabled. In any case, we simply log out all pending requests
+	# to make room for a new one. Any matching of pipelined requests and
+	# responses is most likely totally off anyhow.
+	if ( max_pending_requests > 0 && |c$http_state$pending| > max_pending_requests )
+		{
+		Reporter::limit_reached_weird("HTTP_excessive_pipelining", c, |c$http_state$pending|,
+		                              max_pending_requests, "HTTP");
+
+		if ( c$http_state$current_response == 0 )
+			++c$http_state$current_response;
+
+		while ( c$http_state$current_response < c$http_state$current_request )
+			{
+			local cr = c$http_state$current_response;
+			if ( cr in c$http_state$pending )
+				{
+				Log::write(HTTP::LOG, c$http_state$pending[cr]);
+				delete c$http_state$pending[cr];
+				}
+			else
+				{
+				# The above should have been true...
+				# Reporter::error(fmt("Expected pending request at %d", cr));
+				}
+
+			++c$http_state$current_response;
+			}
+		}
+
 	++c$http_state$current_request;
 	set_state(c, T);
 
@@ -249,7 +306,7 @@ event http_reply(c: connection, version: string, code: count, reason: string) &p
 		# "tunnel".
 		local tid = copy(c$id);
 		tid$orig_p = 0/tcp;
-		Tunnel::register([$cid=tid, $tunnel_type=Tunnel::HTTP]);
+		Tunnel::register(Tunnel::EncapsulatingConn($cid=tid, $tunnel_type=Tunnel::HTTP));
 		}
 	}
 
@@ -263,8 +320,9 @@ event http_header(c: connection, is_orig: bool, name: string, value: string) &pr
 			c$http$referrer = value;
 
 		else if ( name == "HOST" )
-			# The split is done to remove the occasional port value that shows up here.
-			c$http$host = split_string1(value, /:/)[0];
+			# Per #1844, we record the original host header, including any port
+			# specification if present.
+			c$http$host = value;
 
 		else if ( name == "RANGE" )
 			c$http$range_request = T;
@@ -286,9 +344,9 @@ event http_header(c: connection, is_orig: bool, name: string, value: string) &pr
 			{
 			if ( /^[bB][aA][sS][iI][cC] / in value )
 				{
-				local userpass = decode_base64_conn(c$id, sub(value, /[bB][aA][sS][iI][cC][[:blank:]]/, ""));
-				local up = split_string(userpass, /:/);
-				if ( |up| >= 2 )
+				local userpass = decode_base64_conn(c$id, sub(value, /[bB][aA][sS][iI][cC][[:blank:]]+/, ""));
+				local up = split_string1(userpass, /:/);
+				if ( |up| == 2 )
 					{
 					c$http$username = up[0];
 					if ( c$http$capture_password )
@@ -343,4 +401,3 @@ hook finalize_http(c: connection)
 			}
 		}
 	}
-

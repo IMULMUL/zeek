@@ -6,7 +6,7 @@
 module SSL;
 
 export {
-	## Set this to true to includd the server certificate subject and
+	## Set this to true to include the server certificate subject and
 	## issuer from the SSL log file. This information is still available
 	## in x509.log.
 	const log_include_server_certificate_subject_issuer = F &redef;
@@ -80,8 +80,8 @@ function describe_file(f: fa_file): string
 	# we do not know when this function is called (hence, if the data structures
 	# are already populated).
 	#
-	# Just return a bit of our connection information and hope that that is good enough.
-	for ( cid, c in f$conns )
+	# Just return a bit of our connection information and hope that is good enough.
+	for ( _, c in f$conns )
 		{
 		if ( c?$ssl )
 			{
@@ -97,13 +97,12 @@ function describe_file(f: fa_file): string
 event zeek_init() &priority=5
 	{
 	Files::register_protocol(Analyzer::ANALYZER_SSL,
-	                         [$get_file_handle = SSL::get_file_handle,
-	                          $describe        = SSL::describe_file]);
+	                         Files::ProtoRegistration($get_file_handle = SSL::get_file_handle,
+	                                                  $describe        = SSL::describe_file));
 
 	Files::register_protocol(Analyzer::ANALYZER_DTLS,
-	                         [$get_file_handle = SSL::get_file_handle,
-	                          $describe        = SSL::describe_file]);
-
+	                         Files::ProtoRegistration($get_file_handle = SSL::get_file_handle,
+	                                                  $describe        = SSL::describe_file));
 
 	local ssl_filter = Log::get_filter(SSL::LOG, "default");
 	if ( ssl_filter$name != "<not found>" )
@@ -138,7 +137,7 @@ event file_sniff(f: fa_file, meta: fa_metadata) &priority=5
 
 	local c: connection &is_assigned;	# to help static analysis
 
-	for ( cid, c in f$conns )
+	for ( _, c in f$conns )
 		{
 		if ( ! c?$ssl )
 			return;
@@ -152,6 +151,7 @@ event file_sniff(f: fa_file, meta: fa_metadata) &priority=5
 		c$ssl$client_cert_chain_fps = string_vec();
 		}
 
+	# Note - for SSL connections, is_orig indicates client/server, not necessary originator/responder.
 	if ( f$is_orig )
 		c$ssl$client_cert_chain += f$info;
 	else

@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
 	{
@@ -46,4 +47,3 @@ event zeek_init()
 	print same_object(v, vc), same_object(vc[0], vc[1]);
 	print tc[0], tc[1], vc[0], vc[1];
 	}
-

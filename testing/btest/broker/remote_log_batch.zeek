@@ -1,3 +1,5 @@
+# @TEST-GROUP: broker
+#
 # @TEST-PORT: BROKER_PORT
 
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
@@ -9,7 +11,10 @@
 # @TEST-EXEC: btest-diff send/send.out
 # @TEST-EXEC: btest-diff send/test.log
 
-@TEST-START-FILE common.zeek
+# @TEST-START-FILE common.zeek
+
+# Relies on Cluster::backend being properly set for logging.
+@load frameworks/cluster/backend/broker
 
 redef exit_only_after_terminate = T;
 
@@ -40,9 +45,9 @@ event quit()
 	terminate();
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 
 @load ./common
@@ -58,9 +63,9 @@ event Broker::peer_removed(endpoint: Broker::EndpointInfo, msg: string)
 	terminate();
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 @load ./common
 
@@ -102,4 +107,4 @@ event Broker::log_flush()
 		Broker::publish("zeek/quit", quit);
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE

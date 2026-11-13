@@ -13,15 +13,6 @@ export {
 	global cluster_flow_clear: event(name: string);
 }
 
-@if ( Cluster::local_node_type() != Cluster::MANAGER )
-# Workers need ability to forward commands to manager.
-event zeek_init()
-	{
-	Broker::auto_publish(Cluster::manager_topic, OpenFlow::cluster_flow_mod);
-	Broker::auto_publish(Cluster::manager_topic, OpenFlow::cluster_flow_clear);
-	}
-@endif
-
 # the flow_mod function wrapper
 function flow_mod(controller: Controller, match: ofp_match, flow_mod: ofp_flow_mod): bool
 	{
@@ -31,7 +22,7 @@ function flow_mod(controller: Controller, match: ofp_match, flow_mod: ofp_flow_m
 	if ( Cluster::local_node_type() == Cluster::MANAGER )
 		return controller$flow_mod(controller$state, match, flow_mod);
 	else
-		event OpenFlow::cluster_flow_mod(controller$state$_name, match, flow_mod);
+		Cluster::publish(Cluster::manager_topic, OpenFlow::cluster_flow_mod, controller$state$_name, match, flow_mod);
 
 	return T;
 	}
@@ -44,7 +35,7 @@ function flow_clear(controller: Controller): bool
 	if ( Cluster::local_node_type() == Cluster::MANAGER )
 		return controller$flow_clear(controller$state);
 	else
-		event OpenFlow::cluster_flow_clear(controller$state$_name);
+		Cluster::publish(Cluster::manager_topic, OpenFlow::cluster_flow_clear, controller$state$_name);
 
 	return T;
 	}
@@ -108,7 +99,7 @@ function unregister_controller(controller: Controller)
 
 function lookup_controller(name: string): vector of Controller
 	{
-	# we only run the on the manager. Otherwhise we don't have a mapping or state -> return empty
+	# we only run the on the manager. Otherwise we don't have a mapping or state -> return empty
 	if ( Cluster::local_node_type() != Cluster::MANAGER )
 		return vector();
 

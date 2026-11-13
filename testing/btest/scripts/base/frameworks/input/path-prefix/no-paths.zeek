@@ -1,15 +1,15 @@
 # These tests verify that when setting neither InputAscii::path_prefix
 # nor InputBinary::path_prefix, Zeek correctly locates local input files.
 #
-# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$TEST_BASE/scripts/base/frameworks/input/path-prefix zeek -b %INPUT >output
+# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$(cd "$TEST_BASE/scripts/base/frameworks/input/path-prefix" && pwd) zeek -b %INPUT >output
 # @TEST-EXEC: btest-diff output
 
-@TEST-START-FILE input.data
+# @TEST-START-FILE input.data
 #fields	ip	tag
 127.0.0.1	just
 127.0.0.2	some
 127.0.0.3	value
-@TEST-END-FILE
+# @TEST-END-FILE
 
 @load path-prefix-common-table.zeek
 

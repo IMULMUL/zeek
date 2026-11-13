@@ -1,12 +1,17 @@
+# Can't use this test for -O gen-C++ because of multiple simultaneous
+# Zeek runs.
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+# @TEST-REQUIRES: ! is-windows-ci
+#
 # @TEST-PORT: BROKER_PORT
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
-# @TEST-EXEC: btest-bg-run send "zeek -b -r $TRACES/smtp.trace --pseudo-realtime ../send.zeek >send.out"
+# @TEST-EXEC: btest-bg-run send "zeek -b -r $TRACES/smtp.pcap --pseudo-realtime ../send.zeek >send.out"
 
 # @TEST-EXEC: btest-bg-wait 30
 # @TEST-EXEC: btest-diff recv/recv.out
 # @TEST-EXEC: btest-diff send/send.out
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 @load base/protocols/conn
 @load base/frameworks/openflow
@@ -78,9 +83,9 @@ event OpenFlow::flow_mod_failure(name: string, match: OpenFlow::ofp_match, flow_
 	got_message();
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 @load base/protocols/conn
 @load base/frameworks/openflow
@@ -115,5 +120,4 @@ event OpenFlow::broker_flow_clear(name: string, dpid: count)
 	print "flow_clear", dpid;
 	}
 
-@TEST-END-FILE
-
+# @TEST-END-FILE

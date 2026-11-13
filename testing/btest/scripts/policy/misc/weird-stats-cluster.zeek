@@ -1,28 +1,18 @@
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
-# @TEST-PORT: BROKER_PORT3
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
+# @TEST-PORT: BROKER_WORKER2_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager-1 zeek -b %INPUT
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# @TEST-EXEC: btest-bg-run manager   ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager zeek -b %INPUT
 # @TEST-EXEC: btest-bg-run worker-1  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-1 zeek -b %INPUT
 # @TEST-EXEC: btest-bg-run worker-2  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-2 zeek -b %INPUT
 # @TEST-EXEC: btest-bg-wait 45
 
-# @TEST-EXEC: btest-diff manager-1/weird_stats.log
-
-@TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1", $interface="eth0"],
-	["worker-2"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT3")), $manager="manager-1", $interface="eth1"],
-};
-@TEST-END-FILE
+# @TEST-EXEC: btest-diff manager/weird_stats.log
 
 @load misc/weird-stats
-@load base/frameworks/cluster
-
-redef Cluster::retry_interval = 1sec;
-redef Broker::default_listen_retry = 1sec;
-redef Broker::default_connect_retry = 1sec;
+@load policy/frameworks/cluster/experimental
 
 redef Log::enable_local_logging = T;
 redef Log::default_rotation_interval = 0secs;
@@ -44,8 +34,11 @@ event ready_again()
 	schedule 5secs { terminate_me() };
 	}
 
-event ready_for_data()
+event Cluster::Experimental::cluster_started()
 	{
+	if ( Cluster::node == "manager" )
+		return;
+
 	local n = 0;
 
 	if ( Cluster::node == "worker-1" )
@@ -70,18 +63,3 @@ event ready_for_data()
 
 	schedule 5secs { ready_again() };
 	}
-
-
-@if ( Cluster::local_node_type() == Cluster::MANAGER )
-
-global peer_count = 0;
-
-event Cluster::node_up(name: string, id: string)
-	{
-	++peer_count;
-
-	if ( peer_count == 2 )
-		Broker::publish(Cluster::worker_topic, ready_for_data);
-	}
-
-@endif

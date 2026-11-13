@@ -131,14 +131,21 @@ type files_tag_set: set[Files::Tag];
 ##    directly and then remove this alias.
 type interval_set: set[interval];
 
+## Function mapping a string to a string.
+##
+## .. todo:: We need this type definition only for declaring builtin functions
+##    via ``bifcl``. We should extend ``bifcl`` to understand composite types
+##    directly and then remove this alias.
+type string_mapper: function(s: string): string;
+
 ## A structure indicating a MIME type and strength of a match against
 ## file magic signatures.
 ##
 ## :zeek:see:`file_magic`
 type mime_match: record {
 	strength: int;    ##< How strongly the signature matched.  Used for
-	                  ##< prioritization when multiple file magic signatures
-	                  ##< match.
+			  ##< prioritization when multiple file magic signatures
+			  ##< match.
 	mime:     string; ##< The MIME type of the file magic signature match.
 };
 
@@ -157,18 +164,53 @@ type PacketSource: record {
 	path: string;
 	## The data link-layer type of the packet source.
 	link_type: int;
-	## The netmask assoicated with the source or ``NETMASK_UNKNOWN``.
+	## The netmask associated with the source or ``NETMASK_UNKNOWN``.
 	netmask: count;
 };
+
+
+## If a packet source does not yield packets for this amount of time,
+## it is considered idle. When a packet source is found to be idle,
+## Zeek will update network_time to current time in order for timer expiration
+## to function. A packet source queueing up packets and not yielding them for
+## longer than this interval without yielding any packets will provoke
+## not-very-well-defined timer behavior.
+##
+## On Zeek workers with low packet rates, timer expiration may be delayed
+## by this many milliseconds after the last packet has been received.
+const packet_source_inactivity_timeout = 100msec &redef;
+
+## Whether Zeek will forward network_time to the current time upon
+## observing an idle packet source (or no configured packet source).
+##
+## Only set this to *F* if you really know what you're doing. Setting this to
+## *F* on non-worker systems causes :zeek:see:`network_time` to be stuck
+## at 0.0 and timer expiration will be non-functional.
+##
+## The main purpose of this option is to yield control over network time
+## to plugins or scripts via broker or other non-timer events.
+##
+## .. zeek:see:: network_time set_network_time packet_source_inactivity_timeout
+##
+const allow_network_time_forward = T &redef;
 
 ## A connection's transport-layer protocol. Note that Zeek uses the term
 ## "connection" broadly, using flow semantics for ICMP and UDP.
 type transport_proto: enum {
-    unknown_transport,	##< An unknown transport-layer protocol.
-    tcp,	##< TCP.
-    udp,	##< UDP.
-    icmp	##< ICMP.
+	unknown_transport,	##< An unknown transport-layer protocol.
+	tcp,	##< TCP.
+	udp,	##< UDP.
+	icmp	##< ICMP.
 };
+
+## A record type containing the context of a conn_id instance.
+##
+## This context is used to discriminate between :zeek:see:`conn_id` instances
+## with identical five tuples, but not otherwise related due to, e.g. being observed
+## on different VLANs, or within independent tunnel connections like VXLAN or Geneve.
+##
+## This record type is meant to be extended by custom ConnKey implementations.
+type conn_id_ctx: record { };
 
 ## A connection's identifying 4-tuple of endpoints and ports.
 ##
@@ -180,11 +222,13 @@ type transport_proto: enum {
 ##    see :ref:`the manual's description of the connection record
 ##    <writing-scripts-connection-record>`.
 type conn_id: record {
-	orig_h: addr;	##< The originator's IP address.
-	orig_p: port;	##< The originator's port number.
-	resp_h: addr;	##< The responder's IP address.
-	resp_p: port;	##< The responder's port number.
-} &log;
+	orig_h: addr &log;	##< The originator's IP address.
+	orig_p: port &log;	##< The originator's port number.
+	resp_h: addr &log;	##< The responder's IP address.
+	resp_p: port &log;	##< The responder's port number.
+	proto: count &default=65535;  ##< The transport protocol ID. Defaults to 65535 as an "unknown" value.
+	ctx: conn_id_ctx &log &default=conn_id_ctx();  ##< The context in which this connection exists.
+};
 
 ## The identifying 4-tuple of a uni-directional flow.
 ##
@@ -195,23 +239,8 @@ type flow_id : record {
 	src_h: addr;	##< The source IP address.
 	src_p: port;	##< The source port number.
 	dst_h: addr;	##< The destination IP address.
-	dst_p: port;	##< The desintation port number.
+	dst_p: port;	##< The destination port number.
 } &log;
-
-## Specifics about an ICMP conversation. ICMP events typically pass this in
-## addition to :zeek:type:`conn_id`.
-##
-## .. zeek:see:: icmp_echo_reply icmp_echo_request icmp_redirect icmp_sent
-##    icmp_time_exceeded icmp_unreachable
-type icmp_conn: record {
-	orig_h: addr;	##< The originator's IP address.
-	resp_h: addr;	##< The responder's IP address.
-	itype: count;	##< The ICMP type of the packet that triggered the instantiation of the record.
-	icode: count;	##< The ICMP code of the packet that triggered the instantiation of the record.
-	len: count;	##< The length of the ICMP payload of the packet that triggered the instantiation of the record.
-	hlim: count;	##< The encapsulating IP header's Hop Limit value.
-	v6: bool;	##< True if it's an ICMPv6 packet.
-};
 
 ## Specifics about an ICMP conversation/packet.
 ## ICMP events typically pass this in addition to :zeek:type:`conn_id`.
@@ -300,6 +329,36 @@ type icmp6_nd_option: record {
 ## A type alias for a vector of ICMPv6 neighbor discovery message options.
 type icmp6_nd_options: vector of icmp6_nd_option;
 
+## ICMPv6 MLD Version 2 Multicast Address Record types, as defined in
+## :rfc:`3810#section-5.2.12`
+type icmp6_mldv2_group_type: enum {
+	MLDV2_MODE_IS_INCLUDE        = 1,
+	MLDV2_MODE_IS_EXCLUDE        = 2,
+	MLDV2_CHANGE_TO_INCLUDE_MODE = 3,
+	MLDV2_CHANGE_TO_EXCLUDE_MODE = 4,
+	MLDV2_ALLOW_NEW_SOURCES      = 5,
+	MLDV2_BLOCK_OLD_SOURCES      = 6
+};
+
+## ICMPv6 MLD Version 2 Multicast Address Record, as defined in
+## :rfc:`3810#section-5.2`
+type icmp6_mldv2_mar: record {
+	## The type of the multicast record being reported.
+	group_type:     icmp6_mldv2_group_type;
+	## The length of the auxiliary data field in this group record, in bytes.
+	aux_data_len:   count;
+	## The number of source addresses.
+	num_sources:    count;
+	## The multicast address to which this record pertains.
+	multicast_addr: addr;
+	## A vector of source addresses.
+	sources:        addr_vec;
+	## Additional information pertaining to this record.
+	aux_data:       string &optional;
+};
+
+type icmp6_mldv2_mar_vec: vector of icmp6_mldv2_mar;
+
 # A DNS mapping between IP address and hostname resolved by Zeek's internal
 # resolver.
 #
@@ -354,7 +413,340 @@ type endpoint_stats: record {
 	endian_type: count;
 };
 
+## Record containing information about a tag.
+##
+## .. zeek:see:: get_plugin_components
+type PluginComponent: record {
+	name: string;
+	canonical_name: string;
+	tag: string;
+	enabled: bool;
+};
+
+type plugin_component_vec : vector of PluginComponent;
+
+## Arguments given to Zeek from the command line. In order to use this, Zeek
+## must use a ``--`` command line argument immediately followed by a script
+## file and additional arguments after that. For example::
+##
+##   zeek --bare-mode -- myscript.zeek -a -b -c
+##
+## To use Zeek as an executable interpreter, include a line at the top of a script
+## like the following and make the script executable::
+##
+##   #!/usr/local/zeek/bin/zeek --
+const zeek_script_args: vector of string = vector();
+
+## BPF filter the user has set via the -f command line options. Empty if none.
+const cmd_line_bpf_filter = "" &redef;
+
+## Base time of log rotations in 24-hour time format (``%H:%M``), e.g. "12:00".
+const log_rotate_base_time = "0:00" &redef;
+
+## Whether to attempt to automatically detect SYN/FIN/RST-filtered trace
+## and not report missing segments for such connections.
+## If this is enabled, then missing data at the end of connections may not
+## be reported via :zeek:see:`content_gap`.
+const detect_filtered_trace = F &redef;
+
+## Whether we want :zeek:see:`content_gap` for partial
+## connections. A connection is partial if it is missing a full handshake. Note
+## that gap reports for partial connections might not be reliable.
+##
+## .. zeek:see:: content_gap partial_connection
+const report_gaps_for_partial = F &redef;
+
+## Flag to prevent Zeek from exiting automatically when input is exhausted.
+## Normally Zeek terminates when all packet sources have gone dry
+## and communication isn't enabled. If this flag is set, Zeek's main loop will
+## instead keep idling until :zeek:see:`terminate` is explicitly called.
+##
+## This is mainly for testing purposes when termination behaviour needs to be
+## controlled for reproducing results.
+const exit_only_after_terminate = F &redef;
+
+## Default mode for Zeek's user-space dynamic packet filter. If true, packets
+## that aren't explicitly allowed through, are dropped from any further
+## processing.
+##
+## .. note:: This is not the BPF packet filter but an additional dynamic filter
+##    that Zeek optionally applies just before normal processing starts.
+##
+## .. zeek:see:: install_dst_addr_filter install_dst_net_filter
+##    install_src_addr_filter install_src_net_filter  uninstall_dst_addr_filter
+##    uninstall_dst_net_filter uninstall_src_addr_filter uninstall_src_net_filter
+const packet_filter_default = F &redef;
+
+## Maximum size of regular expression groups for signature matching.
+const sig_max_group_size = 50 &redef;
+
+## Description transmitted to remote communication peers for identification.
+const peer_description = "zeek" &redef;
+
+## Reassemble the beginning of all TCP connections before doing
+## signature matching. Enabling this provides more accurate matching at the
+## expense of CPU cycles.
+##
+## .. zeek:see:: dpd_buffer_size
+##    dpd_match_only_beginning dpd_ignore_ports
+##
+## .. note:: Despite the name, this option affects *all* signature matching, not
+##    only signatures used for dynamic protocol detection.
+const dpd_reassemble_first_packets = T &redef;
+
+## Size of per-connection buffer used for dynamic protocol detection. For each
+## connection, Zeek buffers this initial amount of payload in memory so that
+## complete protocol analysis can start even after the initial packets have
+## already passed through (i.e., when a DPD signature matches only later).
+## However, once the buffer is full, data is deleted and lost to analyzers that
+## are activated afterwards. Then only analyzers that can deal with partial
+## connections will be able to analyze the session.
+##
+## .. zeek:see:: dpd_reassemble_first_packets dpd_match_only_beginning
+##    dpd_ignore_ports dpd_max_packets
+const dpd_buffer_size = 1024 &redef;
+
+## Maximum number of per-connection packets that will be buffered for dynamic
+## protocol detection. For each connection, Zeek buffers up to this amount
+## of packets in memory so that complete protocol analysis can start even after
+## the initial packets have already passed through (i.e., when a DPD signature
+## matches only later). However, once the buffer is full, data is deleted and lost
+## to analyzers that are activated afterwards. Then only analyzers that can deal
+## with partial connections will be able to analyze the session.
+##
+## .. zeek:see:: dpd_reassemble_first_packets dpd_match_only_beginning
+##    dpd_ignore_ports dpd_buffer_size
+const dpd_max_packets = 100 &redef;
+
+## If true, stops signature matching if :zeek:see:`dpd_buffer_size` has been
+## reached.
+##
+## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
+##    dpd_ignore_ports
+##
+## .. note:: Despite the name, this option affects *all* signature matching, not
+##    only signatures used for dynamic protocol detection.
+const dpd_match_only_beginning = T &redef;
+
+## If true, stops signature matching after a late match. A late match may occur
+## in case the DPD buffer is exhausted but a protocol signature matched. To
+## allow late matching, :zeek:see:`dpd_match_only_beginning` must be disabled.
+##
+## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
+##    dpd_match_only_beginning
+##
+## .. note:: Despite the name, this option stops *all* signature matching, not
+##    only signatures used for dynamic protocol detection but is triggered by
+##    DPD signatures only.
+const dpd_late_match_stop = F &redef;
+
+## If true, don't consider any ports for deciding which protocol analyzer to
+## use.
+##
+## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
+##    dpd_match_only_beginning
+const dpd_ignore_ports = F &redef;
+
+## Ports which the core considers being likely used by servers. For ports in
+## this set, it may heuristically decide to flip the direction of the
+## connection if it misses the initial handshake.
+const likely_server_ports: set[port] &redef;
+
+## Holds the filename of the trace file given with ``-w`` (empty if none).
+##
+## .. zeek:see:: record_all_packets
+const trace_output_file = "";
+
+## If a trace file is given with ``-w``, dump *all* packets seen by Zeek into it.
+## By default, Zeek applies (very few) heuristics to reduce the volume. A side
+## effect of setting this to true is that we can write the packets out before we
+## actually process them, which can be helpful for debugging in case the
+## analysis triggers a crash.
+##
+## .. zeek:see:: trace_output_file
+const record_all_packets = F &redef;
+
+## Ignore certain TCP retransmissions for :zeek:see:`conn_stats`.  Some
+## connections (e.g., SSH) retransmit the acknowledged last byte to keep the
+## connection alive. If *ignore_keep_alive_rexmit* is set to true, such
+## retransmissions will be excluded in the rexmit counter in
+## :zeek:see:`conn_stats`.
+##
+## .. zeek:see:: conn_stats
+const ignore_keep_alive_rexmit = F &redef;
+
+
+
+## Seed for hashes computed internally for probabilistic data structures. Using
+## the same value here will make the hashes compatible between independent Zeek
+## instances. If left unset, Zeek will use a temporary local seed.
+const global_hash_seed: string = "" &redef;
+
+## Number of bits in UIDs that are generated to identify connections and
+## files.  The larger the value, the more confidence in UID uniqueness.
+## The maximum is currently 128 bits.
+const bits_per_uid: count = 96 &redef;
+
+## This salt value is used for several message digests in Zeek. We
+## use a salt to help mitigate the possibility of an attacker
+## manipulating source data to, e.g., mount complexity attacks or
+## cause ID collisions.
+## This salt is, for example, used by :zeek:see:`get_file_handle`
+## to generate installation-unique file IDs (the *id* field of :zeek:see:`fa_file`).
+const digest_salt = "Please change this value." &redef;
+
+## Maximum string length allowed for calls to the :zeek:see:`find_all` and
+## :zeek:see:`find_all_ordered` BIFs.
+const max_find_all_string_length: int = 10000 &redef;
+
+## How many rounds to go without checking IO sources with file descriptors
+## for readiness by default. This is used when reading from traces.
+##
+## Very roughly, when reading from a pcap, setting this to 100 results in
+## 100 packets being processed without checking FD based IO sources.
+##
+## .. note:: This should not be changed outside of development or when
+##    debugging problems with the main-loop, or developing features with
+##    tight main-loop interaction.
+##
+## .. zeek:see:: io_poll_interval_live
+const io_poll_interval_default = 100 &redef;
+
+## How often to check IO sources with file descriptors for readiness when
+## monitoring with a live packet source.
+##
+## The poll interval gets defaulted to 100 which is good for cases like reading
+## from pcap files and when there isn't a packet source, but is a little too
+## infrequent for live sources (especially fast live sources). Set it down a
+## little bit for those sources.
+##
+## .. note:: This should not be changed outside of development or when
+##    debugging problems with the main-loop, or developing features with
+##    tight main-loop interaction.
+##
+## .. zeek:see:: io_poll_interval_default
+const io_poll_interval_live = 10 &redef;
+
+## The maximum number of events queued before Zeek will drain the
+## event queue outside of the usual drain points.
+##
+## Set this value to 0 for unlimited queue size.
+const max_event_queue_size = 2000 &redef;
+
+## Whether Zeek is being run under test. This can be used to alter functionality
+## while testing, but should be used sparingly.
+const running_under_test: bool = F &redef;
+
+## The amount of time before a connection created by the netbios analyzer times
+## out and is removed.
+const netbios_ssn_session_timeout: interval = 15 sec &redef;
+
+module EventMetadata;
+
+export {
+	## Enum type for metadata identifiers.
+	type ID: enum {
+		NETWORK_TIMESTAMP = 1,
+	};
+
+	## A event metadata entry.
+	type Entry: record {
+		id: EventMetadata::ID; ##< The registered :zeek:see:`EventMetadata::ID` value.
+		val: any;              ##< The value. Its type matches what was passed to :zeek:see:`EventMetadata::register`.
+	};
+
+	## Add network timestamp metadata to all events.
+	##
+	## Adding network timestamp metadata affects local and
+	## remote events. Events scheduled have a network timestamp
+	## of when the scheduled timer was supposed to expire, which
+	## might be a value before the network_time() when the event
+	## was actually dispatched.
+	const add_network_timestamp: bool = F &redef;
+
+	## By default, remote events without network timestamp metadata
+	## will yield a negative zeek:see:`current_event_time` during
+	## processing. To have the receiving Zeek node set the event's
+	## network timestamp metadata with its current local network time,
+	## set this option to true.
+	##
+	## This setting is only in effect if :zeek:see:`EventMetadata::add_network_timestamp`
+	## is also set to true.
+	const add_missing_remote_network_timestamp: bool = F &redef;
+}
+
+module ConnKey;
+
+export {
+	## The connection key factory to use for Zeek's internal connection
+	## tracking. This is a ``ConnKey::Tag`` plugin component enum value,
+	## and the default is Zeek's traditional 5-tuple-tracking based on
+	## IP/port endpoint pairs, plus transport protocol. Plugins can provide
+	## their own implementation. You'll usually not adjust this value in
+	## isolation, but with a corresponding redef of the :zeek:type:`conn_id`
+	## record to represent additional connection tuple members.
+	const factory = ConnKey::CONNKEY_FIVETUPLE &redef;
+}
+
+module DNP3;
+
+export {
+	## The maximum DNP3 application layer fragment size.
+	##
+	## DNP3 reassembles multiple link layer fragments to a single
+	## application layer fragment before passing it on to the analyzer.
+	## When a single DNP3 application layer fragment exceeds this value,
+	## Zeek will mark the connection's history with an X, raise a
+	## dnp3_max_application_layer_fragment_size_exceeded weird and
+	## switch the DNP3 analyzer into "skipping mode".
+	##
+	## Setting the value to 0 disables the limit.
+	##
+	## If you find the default to be too low for real-world DNP3 traffic,
+	## please report to the Zeek project, preferably including sample traffic.
+	const max_application_layer_fragment_size = 100 * 1024 &redef;
+}
+
+module FTP;
+
+export {
+	## Limits the size of commands accepted by the FTP analyzer. Longer commands
+	## raise a FTP_max_command_length_exceeded weird and are discarded.
+	const max_command_length = 100 &redef;
+}
+
+module IMAP;
+
+export {
+	## Limits the maximum number of capabilities exposed via the
+	## :zeek:see:`imap_capabilities` event from a server in response to
+	## a CAPABILITY command. As of 2026, there's only
+	## `78 capabilities allocated by IANA <https://www.iana.org/assignments/imap-capabilities>`_.
+	## More capabilities are discarded and an imap_max_capabilities_reached
+	## weird raised and the connection history marked with an X. Setting this
+	## value to 0 disables the limit.
+	const max_capabilities = 100 &redef;
+}
+
+module SMTP;
+
+export {
+	## The maximum line length within a BDAT chunk before a forceful linebreak
+	## is introduced and a weird is raised. Conventionally, MIME messages
+	## have a maximum line length of 1000 octets when properly encoded.
+	const bdat_max_line_length = 4096 &redef;
+
+	## Whether to send data of individual top-level RFC822 messages
+	## in SMTP transactions to the file analysis framework.
+	##
+	## If this option is enabled, the first :zeek:see:`file_over_new_connection`
+	## event for a new SMTP transaction will be for the top-level RFC822
+	## message. The file's :zeek:field:`mime_type` will be ``message/rfc822``.
+	const enable_rfc822_msg_file_analysis = F &redef;
+}
+
 module TCP;
+
 export {
 	## A TCP Option field parsed from a TCP header.
 	type Option: record {
@@ -380,14 +772,29 @@ export {
 		send_timestamp: count &optional;
 		## Kind 8: 4-byte echo reply timestamp value.
 		echo_timestamp: count &optional;
+		## Kind 27: TCP Quick Start Response value.
+		rate: count &optional;
+		ttl_diff: count &optional;
+		qs_nonce: count &optional;
 	};
 
 	## The full list of TCP Option fields parsed from a TCP header.
 	type OptionList: vector of Option;
+
+	## A Raw TCP Option field from a TCP header
+	type RawOption: record {
+		## Number identifying the option
+		kind: count;
+		## Raw, unparsed data of the option
+		data: string;
+	};
+
+	## The full list of TCP option fields in a TCP header.
+	type RawOptionList: vector of RawOption;
 }
-module GLOBAL;
 
 module Tunnel;
+
 export {
 	## Records the identity of an encapsulating parent of a tunneled connection.
 	type EncapsulatingConn: record {
@@ -403,7 +810,122 @@ export {
 		## cross-references the *uid* field of :zeek:type:`connection`.
 		uid: string &optional;
 	} &log;
-} # end export
+
+	## The number of tunnel_changed events that will be sent for a connection. Once
+	## this limit is hit, no more of those events will be sent to avoid a large number
+	## of events being sent for connections that regularly swap. This can be set to
+	## zero to disable this limiting. This has a maximum value of 255.
+	const max_changes_per_connection: count = 5 &redef;
+
+	## The maximum depth of a tunnel to decapsulate until giving up.
+	## Setting this to zero will disable all types of tunnel decapsulation.
+	const max_depth: count = 4 &redef;
+
+	## With this set, the Teredo analyzer waits until it sees both sides
+	## of a connection using a valid Teredo encapsulation before issuing
+	## a :zeek:see:`analyzer_confirmation_info`.  If it's false, the first
+	## occurrence of a packet with valid Teredo encapsulation causes a
+	## confirmation.
+	const delay_teredo_confirmation = T &redef;
+
+	## With this set, the GTP analyzer waits until the most-recent upflow
+	## and downflow packets are a valid GTPv1 encapsulation before
+	## issuing :zeek:see:`analyzer_confirmation_info`.  If it's false, the
+	## first occurrence of a packet with valid GTPv1 encapsulation causes
+	## confirmation.  Since the same inner connection can be carried
+	## differing outer upflow/downflow connections, setting to false
+	## may work better.
+	const delay_gtp_confirmation = F &redef;
+
+	## How often to cleanup internal state for inactive IP tunnels
+	## (includes GRE tunnels).
+	const ip_tunnel_timeout = 24hrs &redef;
+
+	## Whether to validate the checksum supplied in the outer UDP header
+	## of a VXLAN encapsulation.  The spec says the checksum should be
+	## transmitted as zero, but if not, then the decapsulating destination
+	## may choose whether to perform the validation.
+	const validate_vxlan_checksums = T &redef;
+
+}
+
+module HTTP;
+
+export {
+	## Lookup table for Upgrade analyzers. First, a case sensitive lookup
+	## is done using the client's Upgrade header. If no match is found,
+	## the all lower-case value is used. If there's still no match Zeek
+	## uses dynamic protocol detection for the upgraded to protocol instead.
+	const upgrade_analyzers: table[string] of Analyzer::Tag &redef;
+
+	## Maximum number of uncompressed bytes a ZIP support analyzer forwards.
+	## This applies to gzip content encoding. Set to 0 to disable the limit.
+	const max_uncompressed_size = 128 * 1024 * 1024 &redef;
+
+	## Only allow that many pending requests on a single connection.
+	## If this number is exceeded, all pending requests are flushed
+	## out and request/response tracking reset to prevent unbounded
+	## state growth.
+	const max_pending_requests = 100 &redef;
+}
+
+module IRC;
+
+export {
+	## Maximum number of uncompressed bytes a ZIP support analyzer forwards.
+	## This applies to compressed server-to-server links. Set to 0 to disable
+	## the limit.
+	const max_uncompressed_size = 128 * 1024 * 1024 &redef;
+}
+
+module WebSocket;
+
+export {
+	## The WebSocket analyzer consumes and forwards
+	## frame payload in chunks to keep memory usage
+	## bounded. There should not be a reason to change
+	## this value except for debugging and
+	## testing reasons.
+	const payload_chunk_size = 8192 &redef;
+
+	## The WebSocket analyzer will cap any control frames
+	## (CLOSE, PING, PONG) to this limit and emit a weird if
+	## exceeded. This is defined in the RFC as 125 bytes.
+	## Set to 0 to disable this check.
+	const max_control_frame_size = 125 &redef;
+
+	## Whether to enable DPD on WebSocket frame payload by default.
+	const use_dpd_default = T &redef;
+
+	## Whether to use the Spicy WebSocket protocol analyzer.
+	##
+	## As of now, the BinPac version has better performance, but
+	## we may change the default in the future.
+	const use_spicy_analyzer = F &redef;
+
+	## Record type that is passed to :zeek:see:`WebSocket::configure_analyzer`.
+	##
+	## This record allows to configure the WebSocket analyzer given
+	## parameters collected from HTTP headers.
+	type AnalyzerConfig: record {
+		## The analyzer to attach for analysis of the WebSocket
+		## frame payload. See *use_dpd* below for the behavior
+		## when unset.
+		analyzer: Analyzer::Tag &optional;
+
+		## If *analyzer* is unset, determines whether to attach a
+		## PIA_TCP analyzer for dynamic protocol detection with
+		## WebSocket payload.
+		use_dpd: bool &default=use_dpd_default;
+
+		## The subprotocol as selected by the server, if any.
+		subprotocol: string &optional;
+
+		## The WebSocket extensions as selected by the server, if any.
+		server_extensions: vector of string &optional;
+	};
+}
+
 module GLOBAL;
 
 ## A type alias for a vector of encapsulating "connections", i.e. for when
@@ -414,7 +936,45 @@ module GLOBAL;
 ##    directly and then remove this alias.
 type EncapsulatingConnVector: vector of Tunnel::EncapsulatingConn;
 
+## A type alias for event metadata.
+type event_metadata_vec: vector of EventMetadata::Entry;
+
 ## Statistics about a :zeek:type:`connection` endpoint.
+##
+## .. note::
+##
+##     As of version 8.1, Zeek does not reliably keep the state, num_pkts and
+##     num_bytes_ip fields of endpoint records up-to-date. This means that within
+##     early connection events, protocol analyzer events or scheduled events,
+##     these fields may be stale and not reflect the most recent values as stored
+##     within Zeek's core after processing a packet.
+##
+##     Most notably, the packet and byte counts in a ``new_connection()`` handler
+##     are zero, rather than non-zero for the originator endpoint of a connection.
+##     The same applies to protocol analyzer events: The packet counts may not
+##     include the packet that raised the event.
+##
+##     If you use packet or byte counts in event handlers, the workaround to
+##     get the most recent values on the endpoint records is to execute the
+##     ``lookup_connection()`` function within a handler which will refresh
+##     the script-layer records to what the core holds::
+##
+##         # Refresh dynamic fields on the connection and endpoint records
+##         event new_connection(c: connection) {
+##             print c$orig$num_pkts;  # Prints 0 - stale.
+##
+##             local _ = lookup_connection(c$id);
+##
+##             print c$orig$num_pkts;  # Prints 1.
+##         }
+##
+##     References to issues and PRs with a description, ideas and discussions:
+##
+##       * https://github.com/zeek/zeek/issues/4214
+##       * https://github.com/zeek/zeek/issues/4786
+##       * https://github.com/zeek/zeek/pull/4785
+##       * https://github.com/zeek/zeek/pull/4788
+##       * https://github.com/zeek/zeek/pull/4886
 ##
 ## .. zeek:see:: connection
 type endpoint: record {
@@ -442,6 +1002,37 @@ type endpoint: record {
 ## transport-layer information about the conversation. Note that Zeek uses a
 ## liberal interpretation of "connection" and associates instances of this type
 ## also with UDP and ICMP flows.
+##
+## .. note::
+##
+##     As of version 8.1, Zeek's core does not reliably keep the duration and
+##     history fields of connection records up-to-date. This means that within
+##     early connection events, protocol analyzer events or scheduled events,
+##     these fields may be stale and not reflect the most recent values as
+##     stored within Zeek's core after processing a packet.
+##
+##     If you use duration or history in such event handlers, the workaround to
+##     get the most recent values is to execute the ``lookup_connection()`` function
+##     within a handler which will refresh the script-layer records to what
+##     the core holds::
+##
+##         # Refresh dynamic fields on the connection and endpoint records
+##         event new_connection(c: connection) {
+##             print c$history;  # Prints "" - stale.
+##
+##             local _ = lookup_connection(c$id);
+##
+##             print c$history;  # Prints "S" for a TCP connection starting with a SYN packet.
+##         }
+##
+##     References to issues and PRs with a description, ideas and discussions:
+##
+##       * https://github.com/zeek/zeek/issues/4214
+##       * https://github.com/zeek/zeek/issues/4786
+##       * https://github.com/zeek/zeek/pull/4785
+##       * https://github.com/zeek/zeek/pull/4788
+##       * https://github.com/zeek/zeek/pull/4886
+##
 type connection: record {
 	id: conn_id;	##< The connection's identifying 4-tuple.
 	orig: endpoint;	##< Statistics about originator side.
@@ -458,7 +1049,7 @@ type connection: record {
 	## principle it is possible that more than one protocol analyzer is able
 	## to parse the same data. If so, all will be recorded. Also note that
 	## the recorded services are independent of any transport-level protocols.
-	service: set[string];
+	service: set[string] &ordered;
 	history: string;	##< State history of connections. See *history* in :zeek:see:`Conn::Info`.
 	## A globally unique connection identifier. For each connection, Zeek
 	## creates an ID that is very likely unique across independent Zeek runs.
@@ -479,17 +1070,9 @@ type connection: record {
 	inner_vlan: int &optional;
 };
 
-## Arguments given to Zeek from the command line. In order to use this, Zeek
-## must use a ``--`` command line argument immediately followed by a script
-## file and additional arguments after that. For example::
-##
-##   zeek --bare-mode -- myscript.zeek -a -b -c
-##
-## To use Zeek as an executable interpreter, include a line at the top of a script
-## like the following and make the script executable::
-##
-##   #!/usr/local/zeek/bin/zeek --
-const zeek_script_args: vector of string = vector();
+## The maximum size of a connection's history field. Setting this value to 0
+## disables the limit.
+const max_connection_history_size = 1000 &redef;
 
 ## Default amount of time a file can be inactive before the file analysis
 ## gives up and discards any internal state related to the file.
@@ -577,6 +1160,60 @@ type fa_metadata: record {
 	inferred: bool &default=T;
 };
 
+
+## Generic analyzer confirmation info record.
+##
+## .. zeek:see:: analyzer_confirmation_info
+type AnalyzerConfirmationInfo: record {
+	## The connection related to this confirmation, if any.
+	## This field may be set if there's any connection related information
+	## available for this confirmation. For protocol analyzers it is guaranteed
+	## to be set, but may also be added by file analyzers as additional
+	## contextual information.
+	c: connection &optional;
+
+	## The file object related to this confirmation, if any.
+	f: fa_file &optional;
+
+	## Specific analyzer instance that can be used to reference the analyzer
+	## when using builtin functions like :zeek:id:`disable_analyzer`.
+	aid: count &optional;
+};
+
+## Generic analyzer violation info record.
+##
+## .. zeek:see:: analyzer_violation_info
+type AnalyzerViolationInfo: record {
+	## The reason for the violation - should be user readable.
+	reason: string;
+
+	## The connection related to this violation, if any.
+	## This field may be set if there's any connection related information
+	## available for this violation. For protocol analyzers it is guaranteed
+	## to be set, but may also be added by file analyzers as additional
+	## contextual information.
+	c: connection &optional;
+
+	## The file object related to this violation, if any.
+	f: fa_file &optional;
+
+	## Specific analyzer instance that can be used to reference the analyzer
+	## when using builtin functions like :zeek:id:`disable_analyzer`.
+	aid: count &optional;
+
+	## Piece of binary data that was parsed and caused the violation.
+	data: string &optional;
+};
+
+## The maximum number of analyzer violations the core generates before
+## suppressing them for a given analyzer instance. A weird providing
+## information about the analyzer and connection is generated once the
+## limit is reached.
+##
+## An analyzer generating this many violations is unlikely parsing
+## the right protocol or potentially buggy.
+const max_analyzer_violations = 1000 &redef;
+
 ## Fields of a SYN packet.
 ##
 ## .. zeek:see:: connection_SYN_packet
@@ -588,7 +1225,7 @@ type SYN_packet: record {
 	win_size: count;	##< The window size from the TCP header.
 	win_scale: int;	##< The window scale option if present, or -1 if not.
 	MSS: count;	##< The maximum segment size if present, or 0 if not.
-	SACK_OK: bool;	##< True if the *SACK* option is present.
+	SACK_OK: bool;	##< True if the *SACK* option (Selective ACKnowledgement) is present.
 	TSval: count &optional;	##< The TCP TS value if present.
 	TSecr: count &optional;	##< The TCP TS echo reply if present.
 };
@@ -597,15 +1234,16 @@ type SYN_packet: record {
 ##
 ## .. zeek:see:: get_net_stats
 type NetStats: record {
-	pkts_recvd:   count &default=0;	##< Packets received by Zeek.
-	pkts_dropped: count &default=0;	##< Packets reported dropped by the system.
+	pkts_recvd:    count &default=0; ##< Packets received by Zeek.
+	pkts_dropped:  count &default=0; ##< Packets reported dropped by the system.
 	## Packets seen on the link. Note that this may differ
 	## from *pkts_recvd* because of a potential capture_filter. See
 	## :doc:`/scripts/base/frameworks/packet-filter/main.zeek`. Depending on the
 	## packet capture system, this value may not be available and will then
 	## be always set to zero.
-	pkts_link:    count &default=0;
-	bytes_recvd:  count &default=0;	##< Bytes received by Zeek.
+	pkts_link:     count &default=0;
+	bytes_recvd:   count &default=0; ##< Bytes received by Zeek.
+	pkts_filtered: count &optional;  ##< Packets filtered by the packet source.
 };
 
 type ConnStats: record {
@@ -628,6 +1266,7 @@ type ConnStats: record {
 	num_icmp_conns: count;        ##< Current number of ICMP flows in memory.
 	max_icmp_conns: count;        ##< Maximum number of concurrent ICMP flows so far.
 	cumulative_icmp_conns: count; ##< Total number of ICMP flows so far.
+	num_packets_unprocessed: count; ##< Total number of packets not processed by any analyzer.
 
 	killed_by_inactivity: count;
 };
@@ -711,6 +1350,8 @@ type DNSStats: record {
 	pending:          count; ##< Current pending queries.
 	cached_hosts:     count; ##< Number of cached hosts.
 	cached_addresses: count; ##< Number of cached addresses.
+	cached_texts:     count; ##< Number of cached text entries.
+	cached_total:     count; ##< Total number of cached entries.
 };
 
 ## Statistics about number of gaps in TCP connections.
@@ -734,11 +1375,8 @@ type ThreadStats: record {
 ##
 ## .. zeek:see:: get_broker_stats
 type BrokerStats: record {
+	## Number of active peers.
 	num_peers: count;
-	## Number of active data stores.
-	num_stores: count;
-	## Number of pending data store queries.
-	num_pending_queries: count;
 	## Number of total log messages received.
 	num_events_incoming: count;
 	## Number of total log messages sent.
@@ -753,6 +1391,20 @@ type BrokerStats: record {
 	num_ids_outgoing: count;
 };
 
+## Broker statistics for an individual peering.
+##
+type BrokerPeeringStats: record {
+	## The number of messages currently queued locally for transmission.
+	num_queued: count;
+	## The maximum number of messages queued in the recent
+	## :zeek:see:`Broker::buffer_stats_reset_interval` time interval.
+	max_queued_recently: count;
+	## The number of times the send buffer has overflowed.
+	num_overflows: count;
+};
+
+type BrokerPeeringStatsTable: table[string] of BrokerPeeringStats;
+
 ## Statistics about reporter messages and weirds.
 ##
 ## .. zeek:see:: get_reporter_stats
@@ -764,14 +1416,32 @@ type ReporterStats: record {
 	weirds_by_type:	table[string] of count;
 };
 
-## Table type used to map variable names to their memory allocation.
+## Statistics about how many times each event name is queued.
 ##
-## .. zeek:see:: global_sizes
+## .. zeek:see:: get_event_handler_stats
+type EventNameCounter: record {
+	## Name of the zeek event.
+	name: string &log;
+	## Times it was called, as counted by the event handlers.
+	times_called: count &log;
+} &log;
+
+type EventNameStats: vector of EventNameCounter;
+
+## Table type used to map variable names to their memory allocation.
 ##
 ## .. todo:: We need this type definition only for declaring builtin functions
 ##    via ``bifcl``. We should extend ``bifcl`` to understand composite types
 ##    directly and then remove this alias.
 type var_sizes: table[string] of count;
+
+## Meta-information about script-level attribute.
+type script_id_attr: record {
+    name: string;  ##< The name of the attribute including the &.
+    expr: string &optional;  ##< The stringified expression, if any.
+};
+
+type script_id_attrs: vector of script_id_attr;
 
 ## Meta-information about a script-level identifier.
 ##
@@ -783,8 +1453,8 @@ type script_id: record {
 	enum_constant: bool;	##< True if the identifier is an enum value.
 	option_value: bool;	##< True if the identifier is an option.
 	redefinable: bool;	##< True if the identifier is declared with the :zeek:attr:`&redef` attribute.
-	broker_backend: bool;	##< True if the identifier has a Broker backend defined using the :zeek:attr:`&backend` attribute.
 	value: any &optional;	##< The current value of the identifier.
+	attributes: script_id_attrs &optional; ##< Attributes attached to this identifier, if any.
 };
 
 ## Table type used to map script-level identifiers to meta-information
@@ -807,6 +1477,7 @@ type record_field: record {
 	## :zeek:see:`record_fields` (if it has one).
 	value: any &optional;
 	default_val: any &optional;	##< The value of the :zeek:attr:`&default` attribute if defined.
+	optional: bool;	##< True if the field is :zeek:attr:`&optional`, else false.
 };
 
 ## Table type used to map record field declarations to meta-information
@@ -857,6 +1528,45 @@ type BacktraceElement: record {
 ## .. zeek:see:: backtrace print_backtrace
 type Backtrace: vector of BacktraceElement;
 
+## A hook that is invoked when an assert statement fails.
+##
+## By default, a reporter error message is logged describing the failing
+## assert similarly to how scripting errors are reported after invoking
+## this hook. Using the :zeek:see:`break` statement in an assertion_failure
+## hook handler allows to suppress this message.
+##
+## cond: The string representation of the condition.
+##
+## msg: Evaluated message as string given to the assert statement.
+##
+## bt: Backtrace of the assertion error. The top element will contain
+##     the location of the assert statement that failed.
+##
+## .. zeek:see:: assertion_result
+type assertion_failure: hook(cond: string, msg: string, bt: Backtrace);
+
+## A hook that is invoked with the result of every assert statement.
+##
+## This is a potentially expensive hook meant to be used by testing
+## frameworks to summarize assert results. In a production setup,
+## this hook is likely detrimental to performance.
+##
+## Using the :zeek:see:`break` statement within an assertion_failure hook
+## handler allows to suppress the reporter error message generated for
+## failing assert statements.
+##
+## result: The result of evaluating **cond**.
+##
+## cond: The string representation of the condition.
+##
+## msg: Evaluated message as string given to the assert statement.
+##
+## bt: Backtrace of the assertion error. The top element will contain
+##     the location of the assert statement that failed.
+##
+## .. zeek:see:: assertion_failure
+type assertion_result: hook(result: bool, cond: string, msg: string, bt: Backtrace);
+
 # todo:: Do we still need these here? Can they move into the packet filter
 # framework?
 #
@@ -888,9 +1598,9 @@ type PcapFilterID: enum { None };
 type IPAddrAnonymization: enum {
 	KEEP_ORIG_ADDR,
 	SEQUENTIALLY_NUMBERED,
-	RANDOM_MD5,
 	PREFIX_PRESERVING_A50,
-	PREFIX_PRESERVING_MD5,
+	RANDOM_SHA256,
+	PREFIX_PRESERVING_SHA256,
 };
 
 ## .. zeek:see:: anonymize_addr
@@ -984,12 +1694,44 @@ type geo_location: record {
 	longitude: double &optional;	##< Longitude.
 } &log;
 
+## GeoIP autonomous system information.
+##
+## .. zeek:see:: lookup_autonomous_system
+type geo_autonomous_system: record {
+	number: count &optional;	##< The autonomous system number.
+	organization: string &optional;	##< Associated organization.
+} &log;
+
 ## The directory containing MaxMind DB (.mmdb) files to use for GeoIP support.
 const mmdb_dir: string = "" &redef;
 
+## Default name of the MaxMind City database file:
+const mmdb_city_db: string = "GeoLite2-City.mmdb" &redef;
+## Default name of the MaxMind Country database file:
+const mmdb_country_db: string = "GeoLite2-Country.mmdb" &redef;
+## Default name of the MaxMind ASN database file:
+const mmdb_asn_db: string = "GeoLite2-ASN.mmdb" &redef;
+
+## Fallback locations for MaxMind databases. Zeek attempts these when
+## :zeek:see:`mmdb_dir` is not set, or it cannot read a DB file from it. For
+## geolocation lookups, Zeek will first attempt to locate the city database in
+## each of the fallback locations, and should this fail, attempt to locate the
+## country one.
+const mmdb_dir_fallbacks: vector of string = vector(
+	"/usr/share/GeoIP",
+	"/var/lib/GeoIP",
+	"/usr/local/share/GeoIP",
+	"/usr/local/var/GeoIP",
+) &redef;
+
+## Sets the interval for MaxMind DB file staleness checks. When Zeek detects a
+## change in inode or modification time, the database is re-opened. Setting
+## a negative interval disables staleness checks.
+const mmdb_stale_check_interval: interval = 5min &redef;
+
 ## Computed entropy values. The record captures a number of measures that are
 ## computed in parallel. See `A Pseudorandom Number Sequence Test Program
-## <http://www.fourmilab.ch/random>`_ for more information, Zeek uses the same
+## <https://www.fourmilab.ch/random>`_ for more information, Zeek uses the same
 ## code.
 ##
 ## .. zeek:see:: entropy_test_add entropy_test_finish entropy_test_init find_entropy
@@ -999,6 +1741,21 @@ type entropy_test_result: record {
 	mean: double;	##< Arithmetic Mean.
 	monte_carlo_pi: double;	##< Monte-carlo value for pi.
 	serial_correlation: double;	##< Serial correlation coefficient.
+};
+
+## The default JSON key mapper function. Identity function.
+function from_json_default_key_mapper(s: string): string
+	{
+	return s;
+	}
+
+## Return type for from_json BIF.
+##
+## .. zeek:see:: from_json
+type from_json_result: record {
+	v: any &optional;	##< Parsed value.
+	valid: bool;	##< True if parsing was successful.
+	err: string &optional;	## Error string if unsuccessful.
 };
 
 # TCP values for :zeek:see:`endpoint` *state* field.
@@ -1016,18 +1773,34 @@ const TCP_RESET = 6;	##< Endpoint has sent RST.
 const UDP_INACTIVE = 0;	##< Endpoint is still inactive.
 const UDP_ACTIVE = 1;	##< Endpoint has sent something.
 
-## If true, don't verify checksums, and accept packets that give a length of
-## zero in the IPv4 header. This is useful when running against traces of local
-## traffic and the NIC checksum offloading feature is enabled. It can also
-## be useful for running on altered trace files, and for saving a few cycles
-## at the risk of analyzing invalid data.
+## If true, don't verify checksums at all. This saves the cost of computing
+## them, but bad checksums are then neither reported through weirds nor
+## recorded in the connection's history (``C``/``c``).
 ## With this option, packets that have a value of zero in the total-length field
 ## of the IPv4 header are also accepted, and the capture-length is used instead.
-## The total-length field is commonly set to zero when the NIC sequence offloading
-## feature is enabled.
+## The total-length field is commonly set to zero when the NIC segmentation
+## offloading feature is enabled.
 ## Note that the ``-C`` command-line option overrides the setting of this
 ## variable.
+##
+## .. zeek:see:: drop_bad_checksums
 const ignore_checksums = F &redef;
+
+## If true, packets that fail checksum validation are dropped. Otherwise,
+## by default, packets with bad checksums will be analyzed. Bad checksums are reported
+## through weirds and the connection history (``C`` and ``c``).
+##
+## With this set to false, packets with a value of zero in the
+## total-length field of the IPv4 header are accepted as with
+## :zeek:see:`ignore_checksums`.
+##
+## Analyzing packets with bad checksums (the default) means Zeek may process
+## packets that are discarded by the endpoint. If that matters for your deployment,
+## set this to true.
+##
+## This has no effect for packets whose checksums are not validated due to
+## :zeek:see:`ignore_checksums` or :zeek:see:`ignore_checksums_nets`.
+const drop_bad_checksums = F &redef;
 
 ## Checksums are ignored for all packets with a src address within this set of
 ## networks. Useful for cases where a host might be seeing packets collected
@@ -1085,20 +1858,35 @@ const non_analyzed_lifetime = 0 secs &redef;
 ## If a TCP connection is inactive, time it out after this interval. If 0 secs,
 ## then don't time it out.
 ##
-## .. zeek:see:: udp_inactivity_timeout icmp_inactivity_timeout set_inactivity_timeout
+## .. zeek:see:: udp_inactivity_timeout icmp_inactivity_timeout unknown_ip_inactivity_timeout set_inactivity_timeout
 const tcp_inactivity_timeout = 5 min &redef;
 
 ## If a UDP flow is inactive, time it out after this interval. If 0 secs, then
 ## don't time it out.
 ##
-## .. zeek:see:: tcp_inactivity_timeout icmp_inactivity_timeout set_inactivity_timeout
+## .. zeek:see:: tcp_inactivity_timeout icmp_inactivity_timeout unknown_ip_inactivity_timeout set_inactivity_timeout
 const udp_inactivity_timeout = 1 min &redef;
 
 ## If an ICMP flow is inactive, time it out after this interval. If 0 secs, then
 ## don't time it out.
 ##
-## .. zeek:see:: tcp_inactivity_timeout udp_inactivity_timeout set_inactivity_timeout
+## .. zeek:see:: tcp_inactivity_timeout udp_inactivity_timeout unknown_ip_inactivity_timeout set_inactivity_timeout
 const icmp_inactivity_timeout = 1 min &redef;
+
+## If a flow with an unknown IP-based protocol is inactive, time it out after
+## this interval. If 0 secs, then don't time it out.
+##
+## .. zeek:see:: tcp_inactivity_timeout udp_inactivity_timeout icmp_inactivity_timeout set_inactivity_timeout
+const unknown_ip_inactivity_timeout = 1 min &redef;
+
+## A hook that can be used to veto timing out a connection via :zeek:see:`break`.
+## The connection will then wait another inactivity interval until attempting
+## another timeout.
+##
+## c: The connection
+##
+## .. zeek:see:: tcp_inactivity_timeout udp_inactivity_timeout icmp_inactivity_timeout unknown_ip_inactivity_timeout set_inactivity_timeout
+type connection_timing_out: hook(c: connection);
 
 ## Number of FINs/RSTs in a row that constitute a "storm". Storms are reported
 ## as ``weird`` via the notice framework, and they must also come within
@@ -1138,21 +1926,15 @@ const tcp_max_above_hole_without_any_acks = 16384 &redef;
 const tcp_excessive_data_without_further_acks = 10 * 1024 * 1024 &redef;
 
 ## Number of TCP segments to buffer beyond what's been acknowledged already
-## to detect retransmission inconsistencies. Zero disables any additonal
+## to detect retransmission inconsistencies. Zero disables any additional
 ## buffering.
 const tcp_max_old_segments = 0 &redef;
 
-## For services without a handler, these sets define originator-side ports
-## that still trigger reassembly.
-##
-## .. zeek:see:: tcp_reassembler_ports_resp
-const tcp_reassembler_ports_orig: set[port] = {} &redef;
-
-## For services without a handler, these sets define responder-side ports
-## that still trigger reassembly.
-##
-## .. zeek:see:: tcp_reassembler_ports_orig
-const tcp_reassembler_ports_resp: set[port] = {} &redef;
+## The maximum number of blocks the TCP reassembler will hold. If this limit reached, the
+## reassembler will reset its state and stop reassembly for that direction.. A
+## ``tcp_max_reassembler_blocks_exceeded`` weird will be emitted. Set this to zero to
+## disable the limit.
+const tcp_max_reassembler_blocks: count = 50000 &redef;
 
 ## Defines destination TCP ports for which the contents of the originator stream
 ## should be delivered via :zeek:see:`tcp_contents`.
@@ -1274,9 +2056,21 @@ const dns_session_timeout = 10 sec &redef;
 ## Time to wait before timing out an RPC request.
 const rpc_timeout = 24 sec &redef;
 
+## Maximum number of pending RPC calls without replies.
+##
+## When a new RPC call needs to be stored that would exceed this value,
+## Zeek will discard all currently pending RPC calls and raise
+## a ``RPC_pending_calls_discarded`` weird as well as the
+## :zeek:see:`rpc_discarded_pending_calls` event. Setting this value
+## to 0 disables the limit. This may lead to unbounded state growth.
+const rpc_max_pending_calls = 1000 &redef;
+
+## Maximum length of an RPC message.
+const rpc_max_length = 65536 &redef;
+
 ## How long to hold onto fragments for possible reassembly.  A value of 0.0
 ## means "forever", which resists evasion, but can lead to state accrual.
-const frag_timeout = 0.0 sec &redef;
+const frag_timeout = 5 min &redef;
 
 ## Whether to use the ``ConnSize`` analyzer to count the number of packets and
 ## IP-level bytes transferred by each endpoint. If true, these values are
@@ -1639,8 +2433,12 @@ type ip4_hdr: record {
 	tos: count;		##< Type of service.
 	len: count;		##< Total length.
 	id: count;		##< Identification.
+	DF: bool;		##< True if the packet's *don't fragment* flag is set.
+	MF: bool;		##< True if the packet's *more fragments* flag is set.
+	offset: count;		##< Fragment offset.
 	ttl: count;		##< Time to live.
 	p: count;		##< Protocol.
+	sum: count;		##< Checksum.
 	src: addr;		##< Source address.
 	dst: addr;		##< Destination address.
 };
@@ -1708,7 +2506,11 @@ type l2_hdr: record {
 	src: string &optional;	##< L2 source (if Ethernet).
 	dst: string &optional;	##< L2 destination (if Ethernet).
 	vlan: count &optional;	##< Outermost VLAN tag if any (and Ethernet).
+	vlan_pcp: count &optional;	##< Outermost VLAN PCP if vlan header is present.
+	vlan_dei: bool &optional;	##< Outermost VLAN DEI if vlan header is present.
 	inner_vlan: count &optional;	##< Innermost VLAN tag if any (and Ethernet).
+	inner_vlan_pcp: count &optional;	##< Innermost VLAN PCP if inner vlan header is present.
+	inner_vlan_dei: bool &optional;	##< Innermost VLAN DEI if inner vlan header is present.
 	eth_type: count &optional;	##< Innermost Ethertype (if Ethernet).
 	proto: layer3_proto;	##< L3 protocol.
 };
@@ -1734,12 +2536,12 @@ type raw_pkt_hdr: record {
 type teredo_auth: record {
 	id:      string;  ##< Teredo client identifier.
 	value:   string;  ##< HMAC-SHA1 over shared secret key between client and
-	                  ##< server, nonce, confirmation byte, origin indication
-	                  ##< (if present), and the IPv6 packet.
+			  ##< server, nonce, confirmation byte, origin indication
+			  ##< (if present), and the IPv6 packet.
 	nonce:   count;   ##< Nonce chosen by Teredo client to be repeated by
-	                  ##< Teredo server.
+			  ##< Teredo server.
 	confirm: count;   ##< Confirmation byte to be set to 0 by Teredo client
-	                  ##< and non-zero by server if client needs new key.
+			  ##< and non-zero by server if client needs new key.
 };
 
 ## A Teredo authentication header.  See :rfc:`4380` for more information
@@ -1942,6 +2744,7 @@ type gtp_delete_pdp_ctx_response_elements: record {
 
 # Prototypes of Zeek built-in functions.
 @load base/bif/zeek.bif
+@load base/bif/communityid.bif
 @load base/bif/stats.bif
 @load base/bif/reporter.bif
 @load base/bif/strings.bif
@@ -1950,6 +2753,7 @@ type gtp_delete_pdp_ctx_response_elements: record {
 @load base/bif/supervisor.bif
 @load base/bif/packet_analysis.bif
 @load base/bif/CPP-load.bif
+@load base/bif/mmdb.bif
 
 ## Internal function.
 function add_interface(iold: string, inew: string): string
@@ -2062,8 +2866,8 @@ global discarder_check_icmp: function(p: pkt_hdr): bool;
 ## Zeek's watchdog interval.
 const watchdog_interval = 10 sec &redef;
 
-## The maximum number of timers to expire after processing each new
-## packet.  The value trades off spreading out the timer expiration load
+## The maximum number of expired timers to process after processing each new
+## packet. The value trades off spreading out the timer expiration load
 ## with possibly having to hold state longer.  A value of 0 means
 ## "process all expired timers with each new packet".
 const max_timer_expires = 300 &redef;
@@ -2233,6 +3037,569 @@ const RPC_status = {
 	[RPC_AUTH_ERROR] = "auth error",
 	[RPC_UNKNOWN_ERROR] = "unknown"
 };
+
+## Write profiling info into this file in regular intervals. The easiest way to
+## activate profiling is loading :doc:`/scripts/policy/misc/profiling.zeek`.
+##
+## .. zeek:see:: profiling_interval expensive_profiling_multiple
+global profiling_file: file &redef;
+
+## Update interval for profiling (0 disables).  The easiest way to activate
+## profiling is loading  :doc:`/scripts/policy/misc/profiling.zeek`.
+##
+## .. zeek:see:: profiling_file expensive_profiling_multiple
+const profiling_interval = 0 secs &redef;
+
+## Multiples of :zeek:see:`profiling_interval` at which (more expensive) memory
+## profiling is done (0 disables).
+##
+## .. zeek:see:: profiling_interval profiling_file
+const expensive_profiling_multiple = 0 &redef;
+
+## Output modes for packet profiling information.
+##
+## .. zeek:see:: pkt_profile_mode pkt_profile_freq pkt_profile_file
+type pkt_profile_modes: enum {
+	PKT_PROFILE_MODE_NONE,	##< No output.
+	PKT_PROFILE_MODE_SECS,	##< Output every :zeek:see:`pkt_profile_freq` seconds.
+	PKT_PROFILE_MODE_PKTS,	##< Output every :zeek:see:`pkt_profile_freq` packets.
+	PKT_PROFILE_MODE_BYTES,	##< Output every :zeek:see:`pkt_profile_freq` bytes.
+};
+
+## Output mode for packet profiling information.
+##
+## .. zeek:see:: pkt_profile_modes pkt_profile_freq pkt_profile_file
+const pkt_profile_mode = PKT_PROFILE_MODE_NONE &redef;
+
+## Frequency associated with packet profiling.
+##
+## .. zeek:see:: pkt_profile_modes pkt_profile_mode pkt_profile_file
+const pkt_profile_freq = 0.0 &redef;
+
+## File where packet profiles are logged.
+##
+## .. zeek:see:: pkt_profile_modes pkt_profile_freq pkt_profile_mode
+global pkt_profile_file: file &redef;
+
+
+## A DNS message.
+##
+## .. zeek:see:: dns_AAAA_reply dns_A_reply dns_CNAME_reply dns_EDNS_addl
+##    dns_HINFO_reply dns_MX_reply dns_NS_reply dns_PTR_reply dns_SOA_reply
+##    dns_SRV_reply dns_TSIG_addl dns_TXT_reply dns_WKS_reply dns_end
+##    dns_message dns_query_reply dns_rejected dns_request dns_dynamic_update
+type dns_msg: record {
+	id: count;	##< Transaction ID.
+
+	opcode: count;	##< Operation code.
+	rcode: count;	##< Return code.
+
+	QR: bool;	##< Query response flag.
+	AA: bool;	##< Authoritative answer flag.
+	TC: bool;	##< Truncated packet flag.
+	RD: bool;	##< Recursion desired flag.
+	RA: bool;	##< Recursion available flag.
+	Z: count;	##< 3 bit field (includes AD and CD)
+	AD: bool;	##< authentic data
+	CD: bool;	##< checking disabled
+
+	num_queries: count;	##< Number of query records. For dynamic update messages, this is the number of zones.
+	num_answers: count;	##< Number of answer records. For dynamic update messages, this is the number of prerequisites.
+	num_auth: count;	##< Number of authoritative records. For dynamic update messages, this is the number of updates.
+	num_addl: count;	##< Number of additional records.
+
+	is_netbios: bool;	##< Whether this message came from NetBIOS.
+};
+
+## A DNS SOA record.
+##
+## .. zeek:see:: dns_SOA_reply
+type dns_soa: record {
+	mname: string;	##< Primary source of data for zone.
+	rname: string;	##< Mailbox for responsible person.
+	serial: count;	##< Version number of zone.
+	refresh: interval;	##< Seconds before refreshing.
+	retry: interval;	##< How long before retrying failed refresh.
+	expire: interval;	##< When zone no longer authoritative.
+	minimum: interval;	##< Minimum TTL to use when exporting.
+};
+
+## An additional DNS EDNS record.
+##
+## .. zeek:see:: dns_EDNS_addl
+type dns_edns_additional: record {
+	query: string;	##< Query.
+	qtype: count;	##< Query type.
+	t: count;	##< TODO.
+	payload_size: count;	##< TODO.
+	extended_rcode: count;	##< Extended return code.
+	version: count;	##< Version.
+	z_field: count;	##< TODO.
+	TTL: interval;	##< Time-to-live.
+	is_query: count;	##< TODO.
+};
+
+## An DNS EDNS Client Subnet (ECS) record.
+##
+## .. zeek:see:: dns_EDNS_ecs
+type dns_edns_ecs: record {
+	family: string;	##< IP Family
+	source_prefix_len: count;	##< Source Prefix Length.
+	scope_prefix_len: count;	##< Scope Prefix Length.
+	address: addr;	##< Client Subnet Address.
+};
+
+## An DNS EDNS TCP KEEPALIVE (TCP KEEPALIVE) record.
+##
+## .. zeek:see:: dns_EDNS_tcp_keepalive
+type dns_edns_tcp_keepalive: record {
+	keepalive_timeout_omitted: bool;	##< Whether timeout value is omitted.
+	keepalive_timeout: count;	##< Timeout value, in 100ms.
+};
+
+## An DNS EDNS COOKIE (COOKIE) record.
+##
+## .. zeek:see:: dns_EDNS_cookie
+type dns_edns_cookie: record {
+	client_cookie: string;	##< Cookie from the client (fixed 8 bytes).
+	server_cookie: string &default="";	##< Cookie from the server (0 bytes if missing, or 8 to 32 bytes).
+};
+
+## A DNS TKEY record.
+##
+## .. zeek:see:: dns_TKEY
+type dns_tkey: record {
+	query: string;		##< Query.
+	qtype: count;		##< Query type.
+	alg_name: string;	##< Algorithm name.
+	inception: time;	##< Requested or provided start of validity interval for keying material.
+	expiration: time;	##< Requested or provided end of validity interval for keying material.
+	mode: count;		##< Key agreement or purpose of the message.
+	rr_error: count;	##< Error code.
+	key_data: string;	##< Key exchange data field.
+	is_query: count;	##< The RR is a query/Response.
+};
+
+## An additional DNS TSIG record.
+##
+## .. zeek:see:: dns_TSIG_addl
+type dns_tsig_additional: record {
+	query: string;	##< Query.
+	qtype: count;	##< Query type.
+	alg_name: string;	##< Algorithm name.
+	sig: string;	##< Signature.
+	time_signed: time;	##< Time when signed.
+	fudge: time;	##< TODO.
+	orig_id: count;	##< TODO.
+	rr_error: count;	##< TODO.
+	is_query: count;	##< TODO.
+};
+
+## A DNSSEC RRSIG record.
+##
+## .. zeek:see:: dns_RRSIG
+type dns_rrsig_rr: record {
+	query: string;			##< Query.
+	answer_type: count;		##< Ans type.
+	type_covered: count;	##< qtype covered by RRSIG RR.
+	algorithm: count;		##< Algorithm.
+	labels: count;			##< Labels in the owner's name.
+	orig_ttl: interval;		##< Original TTL.
+	sig_exp: time;			##< Time when signed RR expires.
+	sig_incep: time;		##< Time when signed.
+	key_tag: count;			##< Key tag value.
+	signer_name: string;	##< Signature.
+	signature: string;		##< Hash of the RRDATA.
+	is_query: count;		##< The RR is a query/Response.
+};
+
+## A DNSSEC DNSKEY record.
+##
+## .. zeek:see:: dns_DNSKEY
+type dns_dnskey_rr: record {
+	query: string;		##< Query.
+	answer_type: count;	##< Ans type.
+	flags: count;		##< flags filed.
+	protocol: count;	##< Protocol, should be always 3 for DNSSEC.
+	algorithm: count;	##< Algorithm for Public Key.
+	public_key: string;	##< Public Key
+	is_query: count;	##< The RR is a query/Response.
+};
+
+## A DNSSEC NSEC3 record.
+##
+## .. zeek:see:: dns_NSEC3
+type dns_nsec3_rr: record {
+	query: string;			##< Query.
+	answer_type: count;		##< Ans type.
+	nsec_flags: count;		##< flags field.
+	nsec_hash_algo: count;		##< Hash algorithm.
+	nsec_iter: count;		##< Iterations.
+	nsec_salt_len: count; 		##< Salt length.
+	nsec_salt: string;		##< Salt value
+	nsec_hlen: count;		##< Hash length.
+	nsec_hash: string;		##< Hash value.
+	bitmaps: string_vec;		##< Type Bit Maps.
+	is_query: count;		##< The RR is a query/Response.
+};
+
+## A DNSSEC NSEC3PARAM record.
+##
+## .. zeek:see:: dns_NSEC3PARAM
+type dns_nsec3param_rr: record {
+	query: string;			##< Query.
+	answer_type: count;		##< Ans type.
+	nsec_flags: count;		##< flags field.
+	nsec_hash_algo: count;		##< Hash algorithm.
+	nsec_iter: count;		##< Iterations.
+	nsec_salt_len: count; 		##< Salt length.
+	nsec_salt: string;		##< Salt value
+	is_query: count;		##< The RR is a query/Response.
+};
+
+## A DNSSEC DS record.
+##
+## .. zeek:see:: dns_DS
+type dns_ds_rr: record {
+	query: string;		##< Query.
+	answer_type: count;	##< Ans type.
+	key_tag: count;		##< flags filed.
+	algorithm: count;	##< Algorithm for Public Key.
+	digest_type: count;	##< Digest Type.
+	digest_val: string;	##< Digest Value.
+	is_query: count;	##< The RR is a query/Response.
+};
+
+## A Private RR type BINDS record.
+##
+## .. zeek:see:: dns_BINDS
+type dns_binds_rr: record {
+	query: string;		##< Query.
+	answer_type: count;	##< Ans type.
+	algorithm: count;	##< Algorithm for Public Key.
+	key_id: count;		##< key tag.
+	removal_flag: count;	##< rm flag.
+	complete_flag: count;	##< complete flag.
+	is_query: count;	##< The RR is a query/Response.
+};
+
+## A Private RR type LOC record.
+##
+## .. zeek:see:: dns_LOC
+type dns_loc_rr: record {
+	query: string;		##< Query.
+	answer_type: count;	##< Ans type.
+	version: count;		##< version number of the representation.
+	size: count;		##< Diameter of a sphere enclosing the entity.
+	horiz_pre: count;	##< The horizontal precision of the data, in centimeters.
+	vert_pre: count;	##< The vertical precision of the data, in centimeters.
+	latitude: count;	##< The latitude of the center of the sphere.
+	longitude: count;	##< The longitude of the center of the sphere.
+	altitude: count;	##< The altitude of the center of the sphere.
+	is_query: count;	##< The RR is a query/Response.
+};
+
+## A SvcParamKey with an optional SvcParamValue.
+#
+## .. zeek:see:: dns_svcb_rr
+type dns_svcb_param: record {
+	key: count;				##< SvcParamKey
+	mandatory: vector of count &optional;	##< "mandatory" SvcParamKey values
+	alpn: vector of string &optional;	##< "alpn" IDs
+	p: count &optional;			##< "port" number, TCP or UDP
+	hint: vector of addr &optional;		##< "ipv4hint" or "ipv6hint" IP addresses
+	ech: string &optional;			##< "ech" base64 encoded ECHConfigList blob
+	raw: string &optional;			##< reserved key's or malformed value
+};
+
+type dns_svcb_param_vec: vector of dns_svcb_param;
+
+## A SVCB or HTTPS record.
+##
+## See also RFC 9460 - Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records).
+##
+## .. zeek:see:: dns_SVCB dns_HTTPS
+type dns_svcb_rr: record {
+	svc_priority: count;				##< Service priority. If zero, the record is in AliasMode and has no SvcParam.
+	target_name: string;				##< Target name, the hostname of the service endpoint.
+	svc_params: dns_svcb_param_vec &optional;	##< Service parameters, if any.
+};
+
+## A NAPTR record.
+##
+## See also RFC 2915 - The Naming Authority Pointer (NAPTR) DNS Resource Record.
+##
+## .. zeek:see:: dns_NAPTR_reply
+type dns_naptr_rr: record {
+	order: count;        ##< Order in which to process NAPTR records.
+	preference: count;   ##< Preference specifying processing order for *equal* :zeek:field:`dns_naptr_rr$order` fields.
+	flags: string;       ##< Flags to control rewriting. E.g. "u", "a", "s" or "p".
+	service: string;     ##< The services available down this rewrite path.
+	regexp: string;      ##< Substitution expression to be applied to the original query.
+	replacement: string; ##< The next name to query, where the type is depending on the :zeek:field:`dns_naptr_rr$flags` field.
+};
+
+# DNS answer types.
+#
+# .. zeek:see:: dns_answer
+#
+# todo:: use enum to make them autodoc'able
+const DNS_QUERY = 0;		##< A query. This shouldn't occur, just for completeness.
+const DNS_ANS = 1;		##< An answer record.
+const DNS_AUTH = 2;		##< An authoritative record.
+const DNS_ADDL = 3;		##< An additional record.
+const DNS_PREREQUISITE = 4; 	##< A prerequisite record for dynamic update.
+const DNS_UPDATE = 5;		##< A update record for dynamic update.
+
+## The general part of a DNS reply.
+##
+## .. zeek:see:: dns_AAAA_reply dns_A_reply dns_CNAME_reply dns_HINFO_reply
+##    dns_MX_reply dns_NS_reply dns_PTR_reply dns_SOA_reply dns_SRV_reply
+##    dns_TXT_reply dns_WKS_reply
+type dns_answer: record {
+	## Answer type. One of :zeek:see:`DNS_QUERY`, :zeek:see:`DNS_ANS`,
+	## :zeek:see:`DNS_AUTH` and :zeek:see:`DNS_ADDL`.
+	answer_type: count;
+	query: string;	##< Query.
+	qtype: count;	##< Query type.
+	qclass: count;	##< Query class.
+	TTL: interval;	##< Time-to-live.
+};
+
+## For DNS servers in these sets, omit processing the AUTH records they include
+## in their replies.
+##
+## .. zeek:see:: dns_skip_all_auth dns_skip_addl
+global dns_skip_auth: set[addr] &redef;
+
+## For DNS servers in these sets, omit processing the ADDL records they include
+## in their replies.
+##
+## .. zeek:see:: dns_skip_all_addl dns_skip_auth
+global dns_skip_addl: set[addr] &redef;
+
+## If true, all DNS AUTH records are skipped.
+##
+## .. zeek:see:: dns_skip_all_addl dns_skip_auth
+global dns_skip_all_auth = T &redef;
+
+## If true, all DNS ADDL records are skipped.
+##
+## .. zeek:see:: dns_skip_all_auth dns_skip_addl
+global dns_skip_all_addl = T &redef;
+
+## If a DNS request includes more than this many queries, assume it's non-DNS
+## traffic and do not process it.  Set to 0 to turn off this functionality.
+global dns_max_queries = 25 &redef;
+
+## The maximum depth of a compression chain in DNS. If this limit is reached, a weird is
+## reported and parsing of the chain is halted. See :rfc:`1035#section-4.1.4`.
+global dns_max_compression_chain_depth = 20 &redef;
+
+## The maximum number of character strings extracted from a single TXT
+## resource record and exposed via the :zeek:see:`dns_TXT_reply` event.
+## When this limit is reached, the connection history is marked with an X, additional
+## character strings in the resource record skipped and a DNS_TXT_too_many_character_strings
+## weird raised. Setting this value to 0 disables the limit.
+global dns_max_txt_character_strings = 257 &redef;
+
+## The maximum number of character strings extracted from a single SPF
+## resource record and exposed via the :zeek:see:`dns_SPF_reply` event.
+## When this limit is reached, the connection history is marked with an X, additional
+## character strings in the resource record skipped and a DNS_SPF_too_many_character_strings
+## weird raised. Setting this value to 0 disables the limit.
+global dns_max_spf_character_strings = 257 &redef;
+
+## The maximum number of type bitmaps extracted from a single NSEC
+## resource record and exposed via the :zeek:see:`dns_NSEC` event.
+## When this limit is reached, the connection history is marked with an X, additional
+## type bitmaps in the resource record skipped and a DNS_NSEC_too_many_type_bitmaps
+## weird raised. Setting this value to 0 disables the limit.
+global dns_max_nsec_type_bitmaps = 256 &redef;
+
+## The maximum number of type bitmaps extracted from a single NSEC3
+## resource record and exposed via the :zeek:see:`dns_NSEC3` event.
+## When this limit is reached, the connection history is marked with an X, additional
+## type bitmaps in the resource record skipped and a DNS_NSEC3_too_many_type_bitmaps
+## weird raised. Setting this value to 0 disables the limit.
+global dns_max_nsec3_type_bitmaps = 256 &redef;
+
+## HTTP session statistics.
+##
+## .. zeek:see:: http_stats
+type http_stats_rec: record {
+	num_requests: count;	##< Number of requests.
+	num_replies: count;	##< Number of replies.
+	request_version: double;	##< HTTP version of the requests.
+	reply_version: double;	##< HTTP Version of the replies.
+};
+
+## HTTP message statistics.
+##
+## .. zeek:see:: http_message_done
+type http_message_stat: record {
+	## When the request/reply line was complete.
+	start: time;
+	## Whether the message was interrupted.
+	interrupted: bool;
+	## Reason phrase if interrupted.
+	finish_msg: string;
+	## Length of body processed (before finished/interrupted).
+	body_length: count;
+	## Total length of gaps within *body_length*.
+	content_gap_length: count;
+	## Length of headers (including the req/reply line, but not CR/LF's).
+	header_length: count;
+};
+
+## Maximum number of HTTP entity data delivered to events.
+##
+## .. zeek:see:: http_entity_data skip_http_entity_data skip_http_data
+global http_entity_data_delivery_size = 1500 &redef;
+
+## Skip HTTP data for performance considerations. The skipped
+## portion will not go through TCP reassembly.
+##
+## .. zeek:see:: http_entity_data skip_http_entity_data http_entity_data_delivery_size
+const skip_http_data = F &redef;
+
+## Maximum length of HTTP URIs passed to events. Longer ones will be truncated
+## to prevent over-long URIs (usually sent by worms) from slowing down event
+## processing.  A value of -1 means "do not truncate".
+##
+## .. zeek:see:: http_request
+const truncate_http_URI = -1 &redef;
+
+## IRC join information.
+##
+## .. zeek:see:: irc_join_list
+type irc_join_info: record {
+	nick: string;
+	channel: string;
+	password: string;
+	usermode: string;
+};
+
+## Set of IRC join information.
+##
+## .. zeek:see:: irc_join_message
+type irc_join_list: set[irc_join_info];
+
+## Description of a signature match.
+##
+## .. zeek:see:: signature_match
+type signature_state: record {
+	sig_id:       string;	##< ID of the matching signature.
+	conn:         connection;	##< Matching connection.
+	is_orig:      bool;	##< True if matching endpoint is originator.
+	payload_size: count;	##< Payload size of the first matching packet of current endpoint.
+};
+
+## A BitTorrent peer.
+##
+## .. zeek:see:: bittorrent_peer_set
+type bittorrent_peer: record {
+	h: addr;	##< The peer's address.
+	p: port;	##< The peer's port.
+};
+
+## A set of BitTorrent peers.
+##
+## .. zeek:see:: bt_tracker_response
+type bittorrent_peer_set: set[bittorrent_peer];
+
+## BitTorrent "benc" value. Note that "benc" = Bencode ("Bee-Encode"), per
+## https://en.wikipedia.org/wiki/Bencode.
+##
+## .. zeek:see:: bittorrent_benc_dir
+type bittorrent_benc_value: record {
+	i: int &optional;	##< TODO.
+	s: string &optional;	##< TODO.
+	d: string &optional;	##< TODO.
+	l: string &optional;	##< TODO.
+};
+
+## A table of BitTorrent "benc" values.
+##
+## .. zeek:see:: bt_tracker_response
+type bittorrent_benc_dir: table[string] of bittorrent_benc_value;
+
+## Header table type used by BitTorrent analyzer.
+##
+## .. zeek:see:: bt_tracker_request bt_tracker_response
+##    bt_tracker_response_not_ok
+type bt_tracker_headers: table[string] of string;
+
+## A vector of boolean values that indicate the setting
+## for a range of modbus coils.
+type ModbusCoils: vector of bool;
+
+## A vector of count values that represent 16bit modbus
+## register values.
+type ModbusRegisters: vector of count;
+
+type ModbusHeaders: record {
+	## Transaction identifier
+	tid:           count;
+	## Protocol identifier
+	pid:           count;
+	## Unit identifier (previously 'slave address')
+	uid:           count;
+	## MODBUS function code
+	function_code: count;
+	## Length of the application PDU following the header plus
+	## one byte for the uid field.
+	len:           count;
+};
+
+type ModbusFileRecordRequest: record {
+	ref_type: count;
+	file_num: count;
+	record_num: count;
+	record_len: count;
+};
+
+type ModbusFileRecordRequests: vector of ModbusFileRecordRequest;
+
+type ModbusFileRecordResponse: record {
+	file_len: count;
+	ref_type: count;
+	record_data: string;
+};
+
+type ModbusFileRecordResponses: vector of ModbusFileRecordResponse;
+
+type ModbusFileReference: record {
+	ref_type: count;
+	file_num: count;
+	record_num: count;
+	record_len: count;
+	record_data: string;
+};
+
+type ModbusFileReferences: vector of ModbusFileReference;
+
+module Analyzer;
+
+export {
+	## A hook taking a connection, analyzer tag and analyzer id that can be
+	## used to veto disabling protocol analyzers. Specifically, an analyzer
+	## can be prevented from being disabled by using a :zeek:see:`break`
+	## statement within the hook.
+	## This hook is invoked synchronously during a :zeek:see:`disable_analyzer` call.
+	##
+	## Scripts implementing this hook should have other logic that will eventually
+	## disable the analyzer for the given connection. That is, if a script vetoes
+	## disabling an analyzer, it takes responsibility for a later call to
+	## :zeek:see:`disable_analyzer`, which may be never.
+	##
+	## c: The connection
+	##
+	## atype: The type / tag of the analyzer being disabled.
+	##
+	## aid: The analyzer ID.
+	type disabling_analyzer: hook(c: connection, atype: AllAnalyzers::Tag, aid: count) &redef;
+}
 
 module NFS3;
 
@@ -2423,7 +3790,7 @@ export {
 		fh: string;	##< File handle to write to.
 		offset: count;	##< Offset in file.
 		size: count;	##< Number of bytes to write.
-		stable: stable_how_t;	##< How and when data is commited.
+		stable: stable_how_t;	##< How and when data is committed.
 		data: string &optional;	##< The actual data; not implemented yet.
 	};
 
@@ -2548,10 +3915,46 @@ export {
 		afiles: double;	##< TODO.
 		invarsec: interval;	##< TODO.
 	};
-} # end export
+}
 
+module MIME;
+
+export {
+	## Stop analysis of nested multipart MIME entities if this depth is
+	## reached. Setting this value to 0 removes the limit.
+	const max_depth = 100 &redef;
+
+	## Stop analysis of MIME headers that exceed this byte limit.
+	## Setting this value to 0 removes the limit.
+	const max_header_bytes = 65536 &redef;
+
+	## Stop analysis of MIME headers that exceed this number of
+	## continuation lines. Setting this value to 0 removes the limit.
+	const max_header_continuation_lines = 1000 &redef;
+
+	## Accumulate at most this many bytes for the data argument of the
+	## :zeek:see:`mime_entity_data` event. When exceeded, the connection's
+	## history is marked with an X and an exceeded_max_mime_entity_data_size
+	## weird is raised. Additional data is discarded.
+	##
+	## Setting this value to 0 removes the limit, but you should almost
+	## never process this many bytes using Zeek script. Instead, consider
+	## implementing a custom file analyzer or extending protocol parsers.
+	const max_mime_entity_data_size = 128 * 1024 * 1024 &redef;
+
+	## Accumulate at most this many bytes for the data argument of the
+	## :zeek:see:`mime_all_data` event. When exceeded, the connection's
+	## history is marked with an X and an exceeded_max_mime_all_data_size
+	## weird is raised. Additional data is discarded.
+	##
+	## Setting this value to 0 removes the limit, but you should almost
+	## never process this many bytes using Zeek script. Instead, consider
+	## implementing a custom file analyzer or extending protocol parsers.
+	const max_mime_all_data_size = 128 * 1024 * 1024 &redef;
+}
 
 module MOUNT3;
+
 export {
 
 	## Record summarizing the general results and status of MOUNT3
@@ -2612,8 +4015,125 @@ export {
 		auth_flavors: vector of auth_flavor_t &optional;	##< Returned authentication flavors
 	};
 
-} # end export
+}
 
+module Log;
+
+export {
+	## Default interval for flushing the write buffers of all
+	## enabled log streams.
+	##
+	## In earlier Zeek releases this was governed by :zeek:see:`Threading::heartbeat_interval`.
+	## For Broker, see also :zeek:see:`Broker::log_batch_interval`.
+	##
+	## Setting this value to a zero interval (0.0sec), disables the global
+	## log flushing timer. Note that it is then your responsibility to call
+	## :zeek:see:`Log::flush_all` regularly, or disable log buffering of
+	## all active streams via :zeek:see:`Log::set_buf`.
+	##
+	## .. :zeek:see:`Log::flush`
+	## .. :zeek:see:`Log::flush_all`
+	## .. :zeek:see:`Log::set_buf`
+	## .. :zeek:see:`Log::write_buffer_size`
+	const flush_interval = 1.0sec &redef;
+
+	## Default maximum size of the log write buffer per filter/path pair.
+	## If this many log writes are buffered, the writer frontend flushes
+	## its writes to its backend before flush_interval expires.
+	##
+	## In earlier Zeek releases this was hard-coded to 1000.
+	##
+	## .. :zeek:see:`Log::flush`
+	## .. :zeek:see:`Log::set_buf`
+	## .. :zeek:see:`Log::flush_interval`
+	const write_buffer_size = 1000 &redef;
+
+	## Sets the high water mark of the log writer backend thread queues
+	## within the logging framework.
+	##
+	## Zeek batches up to :zeek:see:`Log::write_buffer_size` log records for
+	## delivery to log writer backend threads. Each such batch is placed into a
+	## per writer queue and takes up one slot in it. If the queue's size reaches the
+	## configured high water mark, Zeek will discard any new batches that don't
+	## fit and increase the :zeek:metric:`zeek_log_writer_backend_thread_queue_drops_total`
+	## metric by the number of log records in the dropped batch.
+	##
+	## Each entry in this queue holds up to :zeek:see:`Log::write_buffer_size`
+	## log records. Under extreme loads, Zeek may therefore still buffer many
+	## log records per log writer when setting the limit to 100 and consume
+	## significant amounts of memory. Consider tweaking :zeek:see:`Log::write_buffer_size`
+	## as well, to control the maximum memory usage.
+	##
+	## Setting this value to zero disables the high water mark and makes the
+	## queues unbounded. This can result in out-of-memory scenarios when writer
+	## threads are falling behind due to the queues backing up.
+	##
+	## .. versionadded:: 9.1
+	const backend_thread_queue_hwm = 0 &redef;
+
+	## Reporting of dropped log writes is rate limited to avoid overwhelming
+	## the system. This interval specifies for how long to suppress repeated
+	## drop reporting events.
+	##
+	## This rate-limit is across all log writes at this point. If you ever see
+	## the message about dropped log writes, check the metric
+	## :zeek:metric:`zeek_log_writer_backend_thread_queue_drops_total` for
+	## details.
+	##
+	## .. versionadded:: 9.1
+	const drop_report_suppress_interval = 1sec &redef;
+
+	## Maximum size of a message that can be sent to a remote logger or logged
+	## locally. If this limit is met, report a ``log_line_too_large`` weird and drop
+	## the log entry. This isn't necessarily the full size of a line that might be
+	## written to a log, but a general representation of the size as the log record is
+	## serialized for writing. The size of end result from serialization might be
+	## higher than this limit, but it prevents runaway-sized log entries from causing
+	## problems.
+	const max_log_record_size = 1024*1024*64 &redef;
+
+	## The maximum number of bytes that a single string field can contain when
+	## logging. If a string reaches this limit, the log output for the field will be
+	## truncated. Setting this to zero disables the limiting.
+	const default_max_field_string_bytes = 4096 &redef;
+
+	## The maximum number of elements a single container field can contain when
+	## logging. If a container reaches this limit, the log output for the field will
+	## be truncated. Setting this to zero disables the limiting.
+	const default_max_field_container_elements = 100 &redef;
+
+	## The maximum total bytes a record may log for string fields. This is the sum of
+	## all bytes in string fields logged for the record. If this limit is reached, all
+	## further string fields will be logged as empty strings. Any containers holding
+	## string fields will be logged as empty containers. If the limit is reached while
+	## processing a container holding string fields, the container will be truncated
+	## in the log output. Setting this to zero disables the limiting.
+	const default_max_total_string_bytes = 256000 &redef;
+
+	## The maximum total number of container elements a record may log. This is the
+	## sum of all container elements logged for the record. If this limit is reached,
+	## all further containers will be logged as empty containers. If the limit is
+	## reached while processing a container, the container will be truncated in the
+	## output. Setting this to zero disables the limiting.
+	const default_max_total_container_elements = 500 &redef;
+}
+
+module POP3;
+
+export {
+	## How many commands a POP3 client may have pending
+	## before Zeek forcefully removes the oldest.
+	##
+	## Setting this value to 0 removes the limit.
+	const max_pending_commands = 10 &redef;
+
+	## How many invalid commands a POP3 client may use
+	## before Zeek starts raising analyzer violations.
+	##
+	## Setting this value to 0 removes the limit.
+	const max_unknown_client_commands = 10 &redef;
+
+}
 
 module Threading;
 
@@ -2623,6 +4143,8 @@ export {
 	## several tests.
 	const heartbeat_interval = 1.0 secs &redef;
 }
+
+@load base/bif/plugins/Zeek_SSH.types.bif
 
 module SSH;
 
@@ -2657,6 +4179,115 @@ export {
 		## Are these the capabilities of the server?
 		is_server:                  bool;
 	};
+
+	## When the SSH analyzer observes packets with a packet length
+	## field that exceeds below value, it truncates the length to
+	## the limit and raises a ``SSH_max_packet_exceeded`` weird.
+	## Subsequent parsing will likely fail, but it's probable that
+	## this was not valid SSH traffic to begin with.
+	## According to RFC 4253, the minimum packet length all implementations
+	## must support is an arbitrary 35000 bytes. The default is 8MB,
+	## which is a roughly double and two magnitutes larger than that.
+	##
+	## Setting this value to zero disables the capping mechanism.
+	const max_packet_length = 8 * 1024 * 1024 &redef;
+
+	## When the SSH analyzer observes SSH string fields with lengths
+	## that exceeds below value, it truncates the length to
+	## the limit and raises a ``SSH_max_string_length_exceeded`` weird.
+	## Subsequent parsing will likely fail, but it's probable that
+	## this was not valid SSH traffic to begin with. Strings are used
+	## to exchange MAC and compression algorithms. A 2MB string listing
+	## such algorithms is weird.
+	##
+	## Setting this value to zero disables the capping mechanism.
+	const max_string_length = 2 * 1024 * 1024 &redef;
+
+	## The maximum number of KEX algorithms extracted from a KEXINIT packet
+	## and included in the ``ssh_capabilities`` event. As a consequence, this
+	## also limits the number of KEX algorithms used to determine which one
+	## was chosen.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_kex_algorithms_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_kex_algorithms = 100 &redef;
+
+	## The maximum number of hostkey algorithms extracted from a
+	## KEXINIT packet and included in the ``ssh_capabilities`` event.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_hostkey_algorithms_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_hostkey_algorithms = 100 &redef;
+
+	## The maximum number of encryption algorithms extracted from a
+	## KEXINIT packet and included in the ``ssh_capabilities`` event.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_encryption_algorithms_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_encryption_algorithms = 100 &redef;
+
+	## The maximum number of mac algorithms extracted from a
+	## KEXINIT packet and included in the ``ssh_capabilities`` event.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_mac_algorithms_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_mac_algorithms = 100 &redef;
+
+	## The maximum number of compression algorithms extracted from a
+	## KEXINIT packet and included in the ``ssh_capabilities`` event.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_compression_algorithms_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_compression_algorithms = 100 &redef;
+
+	## The maximum number of languages extracted from a
+	## KEXINIT packet and included in the ``ssh_capabilities`` event.
+	## Setting this value to zero disables the limit. If the limit
+	## is reached, a ``SSH_max_kexinit_languages_exceeded``
+	## weird is raised and an X added to the connection's history.
+	const max_kexinit_languages = 100 &redef;
+
+	## Maps negotiated key exchange method names to the family the SSH
+	## analyzer uses to parse the following key exchange messages. Patterns
+	## must match the whole name. If several patterns match, the first one in
+	## table order wins. Methods without a match raise an
+	## ``ssh_unknown_kex_algorithm`` weird and their key exchange messages are
+	## not parsed.
+	## Pattern matching uses a lazily constructed DFA that retains its states.
+	## Avoid complex patterns, particularly wildcards followed by additional
+	## characters, as peer-controlled algorithm names may cause significant
+	## memory growth.
+	## See :zeek:see:`table_pattern_matcher_stats` for diagnostics.
+	const kex_methods: table[pattern] of KexMethod = {
+		[/rsa1024-sha1/] = KEX_RSA, # untested
+		[/rsa2048-sha256/] = KEX_RSA, # untested
+		[/diffie-hellman-group1-sha1/] = KEX_DH, # untested
+		[/diffie-hellman-group14-sha1/] = KEX_DH, # untested
+		[/diffie-hellman-group14-sha256/] = KEX_DH, # untested
+		[/diffie-hellman-group14-sha256@ssh.com/] = KEX_DH,
+		[/diffie-hellman-group15-sha512/] = KEX_DH,
+		[/diffie-hellman-group16-sha512/] = KEX_DH, # untested
+		[/diffie-hellman-group17-sha512/] = KEX_DH,
+		[/diffie-hellman-group18-sha512/] = KEX_DH,
+		[/diffie-hellman-group-exchange-sha1/] = KEX_DH_GEX,
+		[/diffie-hellman-group-exchange-sha256/] = KEX_DH_GEX,
+		[/diffie-hellman-group-exchange-sha512@ssh.com/] = KEX_DH_GEX,
+		[/gss-.*/] = KEX_GSS,
+		[/ecdh-sha2-.*/] = KEX_ECC,
+		[/ecmqv-sha2/] = KEX_ECC,
+		[/curve25519-sha256.*/] = KEX_ECC,
+		[/curve448-sha512/] = KEX_ECC,
+		[/sntrup761x25519-sha512.*/] = KEX_ECC,
+		[/mlkem.*/] = KEX_ECC,
+	} &ordered &redef;
+}
+
+module MySQL;
+
+export {
+	## The maximum number of query attributes allowed in a COM_QUERY
+	## command. Parsing aborts with an analyzer violation if exceeded.
+	const max_com_query_attributes = 65535 &redef;
 }
 
 module NTLM;
@@ -2690,7 +4321,7 @@ export {
 		## If set, requests and identify level token
 		negotiate_identify         : bool;
 		## If set, requests usage of NTLM v2 session security
-		## Note: NTML v2 session security is actually NTLM v1
+		## Note: NTLM v2 session security is actually NTLM v1
 		negotiate_extended_sessionsecurity : bool;
 		## If set, TargetName must be a server name
 		target_type_server         : bool;
@@ -2768,6 +4399,8 @@ export {
 	type NTLM::Challenge: record {
 		## The negotiate flags
 		flags       : NTLM::NegotiateFlags;
+		## A 64-bit value that contains the NTLM challenge.
+		challenge   : count;
 		## The server authentication realm. If the server is
 		## domain-joined, the name of the domain. Otherwise
 		## the server name. See flags.target_type_domain
@@ -2792,6 +4425,8 @@ export {
 		session_key : string &optional;
 		## The Windows version information, if supplied
 		version     : NTLM::Version &optional;
+		## The client's response for the challenge
+		response    : string &optional;
 	};
 }
 
@@ -2828,6 +4463,33 @@ export {
 	##
 	## .. zeek:see:: smb_pipe_connect_heuristic
 	const SMB::pipe_filenames: set[string] &redef;
+
+	## The maximum number of messages for which to retain state
+	## about offsets, fids, or tree ids within the parser. When
+	## the limit is reached, internal parser state is discarded
+	## and :zeek:see:`smb2_discarded_messages_state` raised.
+	##
+	## Setting this to zero will disable the functionality.
+	##
+	## .. zeek:see:: smb2_discarded_messages_state
+	const SMB::max_pending_messages = 1000 &redef;
+
+	## Maximum number of DCE-RPC analyzers per connection
+	## before discarding them to avoid unbounded state growth.
+	##
+	## .. zeek:see:: smb_discarded_dce_rpc_analyzers
+	const max_dce_rpc_analyzers = 1000 &redef;
+
+	## Maximum number of AndX commands that are allowed in a chain. When the limit is
+	## reached, a `smb_andx_depth_exceeded` weird is raised. Setting this to zero will
+	## disable the functionality.
+	const SMB::max_andx_depth = 10 &redef;
+
+	## Maximum size of the internal per connection ``tree_is_pipe_map``
+	## before discarding entries to avoid unbounded state growth.
+	##
+	## .. zeek:see:: smb_discarded_tree_is_pipe_map
+	const max_tree_is_pipe_map_size = 1000 &redef;
 }
 
 module SMB1;
@@ -2878,7 +4540,7 @@ export {
 		unicode		   : bool;
 		## The server supports large files with 64 bit offsets
 		large_files	   : bool;
-		## The server supports the SMBs particilar to the NT LM 0.12 dialect. Implies nt_find.
+		## The server supports the SMBs particular to the NT LM 0.12 dialect. Implies nt_find.
 		nt_smbs		   : bool;
 
 		## The server supports remote admin API requests via DCE-RPC
@@ -3166,7 +4828,7 @@ export {
 		info_level			: count;
 		## Specify whether to search for directories or files
 		search_storage_type	: count;
-		## The string to serch for (note: may contain wildcards)
+		## The string to search for (note: may contain wildcards)
 		file_name			: string;
 	};
 
@@ -3364,7 +5026,7 @@ export {
 
 	type SMB2::NegotiateContextValues: vector of SMB2::NegotiateContextValue;
 
-	## The response to an SMB2 *negotiate* request, which is used by tghe client to notify the server
+	## The response to an SMB2 *negotiate* request, which is used by the client to notify the server
 	## what dialects of the SMB2 protocol the client understands.
 	##
 	## For more information, see MS-SMB2:2.2.4
@@ -3478,10 +5140,10 @@ export {
 	type SMB2::Fscontrol: record {
 		## minimum amount of free disk space required to begin document filtering
 		free_space_start_filtering : int;
-		## minimum amount of free disk space required to continue document filtering
+		## minimum amount of free disk space required to continue filtering documents and merging word lists
 		free_space_threshold       : int;
-		## minimum amount of free disk space required to continue document filtering
-		free_space_threshold       : int;
+		## minimum amount of free disk space required to continue content filtering
+		free_space_stop_filtering  : int;
 		## default per-user disk quota
 		delete_quota_threshold     : count;
 		## default per-user disk limit
@@ -3492,7 +5154,7 @@ export {
 
 	## This information class is used to query or set extended attribute (EA) information for a file.
 	##
-	## For more infomation, see MS-SMB2:2.2.39 and MS-FSCC:2.4.15
+	## For more information, see MS-SMB2:2.2.39 and MS-FSCC:2.4.15
 	##
 	type SMB2::FileEA: record {
 		## Specifies the extended attribute name
@@ -3503,7 +5165,7 @@ export {
 
 	## A vector of extended attribute (EA) information for a file.
 	##
-	## For more infomation, see MS-SMB2:2.2.39 and MS-FSCC:2.4.15
+	## For more information, see MS-SMB2:2.2.39 and MS-FSCC:2.4.15
 	##
 	type SMB2::FileEAs: vector of SMB2::FileEA;
 
@@ -3532,8 +5194,6 @@ export {
 	};
 }
 
-module GLOBAL;
-
 module DHCP;
 
 export {
@@ -3544,6 +5204,7 @@ export {
 	type DHCP::Addrs: vector of addr;
 
 	## A DHCP message.
+	##
 	## .. zeek:see:: dhcp_message
 	type DHCP::Msg: record {
 		op: count;      ##< Message OP code. 1 = BOOTREQUEST, 2 = BOOTREPLY
@@ -3563,6 +5224,7 @@ export {
 	};
 
 	## DHCP Client Identifier (Option 61)
+	##
 	## .. zeek:see:: dhcp_message
 	type DHCP::ClientID: record {
 		hwtype: count;
@@ -3583,6 +5245,7 @@ export {
 	};
 
 	## DHCP Relay Agent Information Option (Option 82)
+	##
 	## .. zeek:see:: dhcp_message
 	type DHCP::SubOpt: record {
 		code: count;
@@ -3692,570 +5355,152 @@ export {
 	};
 }
 
-module GLOBAL;
-## A DNS message.
-##
-## .. zeek:see:: dns_AAAA_reply dns_A_reply dns_CNAME_reply dns_EDNS_addl
-##    dns_HINFO_reply dns_MX_reply dns_NS_reply dns_PTR_reply dns_SOA_reply
-##    dns_SRV_reply dns_TSIG_addl dns_TXT_reply dns_WKS_reply dns_end
-##    dns_message dns_query_reply dns_rejected dns_request
-type dns_msg: record {
-	id: count;	##< Transaction ID.
-
-	opcode: count;	##< Operation code.
-	rcode: count;	##< Return code.
-
-	QR: bool;	##< Query response flag.
-	AA: bool;	##< Authoritative answer flag.
-	TC: bool;	##< Truncated packet flag.
-	RD: bool;	##< Recursion desired flag.
-	RA: bool;	##< Recursion available flag.
-	Z: count;	##< TODO.
-
-	num_queries: count;	##< Number of query records.
-	num_answers: count;	##< Number of answer records.
-	num_auth: count;	##< Number of authoritative records.
-	num_addl: count;	##< Number of additional records.
-};
-
-## A DNS SOA record.
-##
-## .. zeek:see:: dns_SOA_reply
-type dns_soa: record {
-	mname: string;	##< Primary source of data for zone.
-	rname: string;	##< Mailbox for responsible person.
-	serial: count;	##< Version number of zone.
-	refresh: interval;	##< Seconds before refreshing.
-	retry: interval;	##< How long before retrying failed refresh.
-	expire: interval;	##< When zone no longer authoritative.
-	minimum: interval;	##< Minimum TTL to use when exporting.
-};
-
-## An additional DNS EDNS record.
-##
-## .. zeek:see:: dns_EDNS_addl
-type dns_edns_additional: record {
-	query: string;	##< Query.
-	qtype: count;	##< Query type.
-	t: count;	##< TODO.
-	payload_size: count;	##< TODO.
-	extended_rcode: count;	##< Extended return code.
-	version: count;	##< Version.
-	z_field: count;	##< TODO.
-	TTL: interval;	##< Time-to-live.
-	is_query: count;	##< TODO.
-};
-
-## An DNS EDNS Client Subnet (ECS) record.
-##
-## .. zeek:see:: dns_EDNS_ecs
-type dns_edns_ecs: record {
-	family: string;	##< IP Family
-	source_prefix_len: count;	##< Source Prefix Length.
-	scope_prefix_len: count;	##< Scope Prefix Length.
-	address: addr;	##< Client Subnet Address.
-};
-
-## An DNS EDNS TCP KEEPALIVE (TCP KEEPALIVE) record.
-##
-## .. zeek:see:: dns_EDNS_tcp_keepalive
-type dns_edns_tcp_keepalive: record {
-	keepalive_timeout_omitted: bool;	##< Whether timeout value is omitted.
-	keepalive_timeout: count;	##< Timeout value, in 100ms.
-};
-
-## An DNS EDNS COOKIE (COOKIE) record.
-##
-## .. zeek:see:: dns_EDNS_cookie
-type dns_edns_cookie: record {
-	client_cookie: string;	##< Cookie from the client (fixed 8 bytes).
-	server_cookie: string &default="";	##< Cookie from the server (0 bytes if missing, or 8 to 32 bytes).
-};
-
-## An additional DNS TSIG record.
-##
-## .. zeek:see:: dns_TSIG_addl
-type dns_tsig_additional: record {
-	query: string;	##< Query.
-	qtype: count;	##< Query type.
-	alg_name: string;	##< Algorithm name.
-	sig: string;	##< Signature.
-	time_signed: time;	##< Time when signed.
-	fudge: time;	##< TODO.
-	orig_id: count;	##< TODO.
-	rr_error: count;	##< TODO.
-	is_query: count;	##< TODO.
-};
-
-## A DNSSEC RRSIG record.
-##
-## .. zeek:see:: dns_RRSIG
-type dns_rrsig_rr: record {
-	query: string;			##< Query.
-	answer_type: count;		##< Ans type.
-	type_covered: count;	##< qtype covered by RRSIG RR.
-	algorithm: count;		##< Algorithm.
-	labels: count;			##< Labels in the owner's name.
-	orig_ttl: interval;		##< Original TTL.
-	sig_exp: time;			##< Time when signed RR expires.
-	sig_incep: time;		##< Time when signed.
-	key_tag: count;			##< Key tag value.
-	signer_name: string;	##< Signature.
-	signature: string;		##< Hash of the RRDATA.
-	is_query: count;		##< The RR is a query/Response.
-};
-
-## A DNSSEC DNSKEY record.
-##
-## .. zeek:see:: dns_DNSKEY
-type dns_dnskey_rr: record {
-	query: string;		##< Query.
-	answer_type: count;	##< Ans type.
-	flags: count;		##< flags filed.
-	protocol: count;	##< Protocol, should be always 3 for DNSSEC.
-	algorithm: count;	##< Algorithm for Public Key.
-	public_key: string;	##< Public Key
-	is_query: count;	##< The RR is a query/Response.
-};
-
-## A DNSSEC NSEC3 record.
-##
-## .. zeek:see:: dns_NSEC3
-type dns_nsec3_rr: record {
-	query: string;			##< Query.
-	answer_type: count;		##< Ans type.
-	nsec_flags: count;		##< flags field.
-	nsec_hash_algo: count;		##< Hash algorithm.
-	nsec_iter: count;		##< Iterations.
-	nsec_salt_len: count; 		##< Salt length.
-	nsec_salt: string;		##< Salt value
-	nsec_hlen: count;		##< Hash length.
-	nsec_hash: string;		##< Hash value.
-	bitmaps: string_vec;		##< Type Bit Maps.
-	is_query: count;		##< The RR is a query/Response.
-};
-
-## A DNSSEC NSEC3PARAM record.
-##
-## .. zeek:see:: dns_NSEC3PARAM
-type dns_nsec3param_rr: record {
-	query: string;			##< Query.
-	answer_type: count;		##< Ans type.
-	nsec_flags: count;		##< flags field.
-	nsec_hash_algo: count;		##< Hash algorithm.
-	nsec_iter: count;		##< Iterations.
-	nsec_salt_len: count; 		##< Salt length.
-	nsec_salt: string;		##< Salt value
-	is_query: count;		##< The RR is a query/Response.
-};
-
-## A DNSSEC DS record.
-##
-## .. zeek:see:: dns_DS
-type dns_ds_rr: record {
-	query: string;		##< Query.
-	answer_type: count;	##< Ans type.
-	key_tag: count;		##< flags filed.
-	algorithm: count;	##< Algorithm for Public Key.
-	digest_type: count;	##< Digest Type.
-	digest_val: string;	##< Digest Value.
-	is_query: count;	##< The RR is a query/Response.
-};
-
-## A Private RR type BINDS record.
-##
-## .. zeek:see:: dns_BINDS
-type dns_binds_rr: record {
-	query: string;		##< Query.
-	answer_type: count;	##< Ans type.
-	algorithm: count;	##< Algorithm for Public Key.
-	key_id: count;		##< key tag.
-	removal_flag: count;	##< rm flag.
-	complte_flag: string;	##< complete flag.
-	is_query: count;	##< The RR is a query/Response.
-};
-
-## A Private RR type LOC record.
-##
-## .. zeek:see:: dns_LOC
-type dns_loc_rr: record {
-	query: string;		##< Query.
-	answer_type: count;	##< Ans type.
-	version: count;		##< version number of the representation.
-	size: count;		##< Diameter of a sphere enclosing the entity.
-	horiz_pre: count;	##< The horizontal precision of the data, in centimeters.
-	vert_pre: count;	##< The vertical precision of the data, in centimeters.
-	latitude: count;	##< The latitude of the center of the sphere.
-	longitude: count;	##< The longitude of the center of the sphere.
-	altitude: count;	##< The altitude of the center of the sphere.
-	is_query: count;	##< The RR is a query/Response.
-};
-
-## DNS SVCB and HTTPS RRs
-##
-## .. zeek:see:: dns_SVCB dns_HTTPS
-type dns_svcb_rr: record {
-	svc_priority: count;	##< Service priority for the current record, 0 indicates that this record is in AliasMode and cannot carry svc_params; otherwise this is in ServiceMode, and may include svc_params
-	target_name: string;	##< Target name, the hostname of the service endpoint.
-};
-
-# DNS answer types.
-#
-# .. zeek:see:: dns_answerr
-#
-# todo:: use enum to make them autodoc'able
-const DNS_QUERY = 0;	##< A query. This shouldn't occur, just for completeness.
-const DNS_ANS = 1;	##< An answer record.
-const DNS_AUTH = 2;	##< An authoritative record.
-const DNS_ADDL = 3;	##< An additional record.
-
-## The general part of a DNS reply.
-##
-## .. zeek:see:: dns_AAAA_reply dns_A_reply dns_CNAME_reply dns_HINFO_reply
-##    dns_MX_reply dns_NS_reply dns_PTR_reply dns_SOA_reply dns_SRV_reply
-##    dns_TXT_reply dns_WKS_reply
-type dns_answer: record {
-	## Answer type. One of :zeek:see:`DNS_QUERY`, :zeek:see:`DNS_ANS`,
-	## :zeek:see:`DNS_AUTH` and :zeek:see:`DNS_ADDL`.
-	answer_type: count;
-	query: string;	##< Query.
-	qtype: count;	##< Query type.
-	qclass: count;	##< Query class.
-	TTL: interval;	##< Time-to-live.
-};
-
-## For DNS servers in these sets, omit processing the AUTH records they include
-## in their replies.
-##
-## .. zeek:see:: dns_skip_all_auth dns_skip_addl
-global dns_skip_auth: set[addr] &redef;
-
-## For DNS servers in these sets, omit processing the ADDL records they include
-## in their replies.
-##
-## .. zeek:see:: dns_skip_all_addl dns_skip_auth
-global dns_skip_addl: set[addr] &redef;
-
-## If true, all DNS AUTH records are skipped.
-##
-## .. zeek:see:: dns_skip_all_addl dns_skip_auth
-global dns_skip_all_auth = T &redef;
-
-## If true, all DNS ADDL records are skipped.
-##
-## .. zeek:see:: dns_skip_all_auth dns_skip_addl
-global dns_skip_all_addl = T &redef;
-
-## If a DNS request includes more than this many queries, assume it's non-DNS
-## traffic and do not process it.  Set to 0 to turn off this functionality.
-global dns_max_queries = 25 &redef;
-
-## HTTP session statistics.
-##
-## .. zeek:see:: http_stats
-type http_stats_rec: record {
-	num_requests: count;	##< Number of requests.
-	num_replies: count;	##< Number of replies.
-	request_version: double;	##< HTTP version of the requests.
-	reply_version: double;	##< HTTP Version of the replies.
-};
-
-## HTTP message statistics.
-##
-## .. zeek:see:: http_message_done
-type http_message_stat: record {
-	## When the request/reply line was complete.
-	start: time;
-	## Whether the message was interrupted.
-	interrupted: bool;
-	## Reason phrase if interrupted.
-	finish_msg: string;
-	## Length of body processed (before finished/interrupted).
-	body_length: count;
-	## Total length of gaps within *body_length*.
-	content_gap_length: count;
-	## Length of headers (including the req/reply line, but not CR/LF's).
-	header_length: count;
-};
-
-## Maximum number of HTTP entity data delivered to events.
-##
-## .. zeek:see:: http_entity_data skip_http_entity_data skip_http_data
-global http_entity_data_delivery_size = 1500 &redef;
-
-## Skip HTTP data for performance considerations. The skipped
-## portion will not go through TCP reassembly.
-##
-## .. zeek:see:: http_entity_data skip_http_entity_data http_entity_data_delivery_size
-const skip_http_data = F &redef;
-
-## Maximum length of HTTP URIs passed to events. Longer ones will be truncated
-## to prevent over-long URIs (usually sent by worms) from slowing down event
-## processing.  A value of -1 means "do not truncate".
-##
-## .. zeek:see:: http_request
-const truncate_http_URI = -1 &redef;
-
-## IRC join information.
-##
-## .. zeek:see:: irc_join_list
-type irc_join_info: record {
-	nick: string;
-	channel: string;
-	password: string;
-	usermode: string;
-};
-
-## Set of IRC join information.
-##
-## .. zeek:see:: irc_join_message
-type irc_join_list: set[irc_join_info];
-
 module PE;
+
 export {
-type PE::DOSHeader: record {
-	## The magic number of a portable executable file ("MZ").
-	signature                : string;
-	## The number of bytes in the last page that are used.
-	used_bytes_in_last_page  : count;
-	## The number of pages in the file that are part of the PE file itself.
-	file_in_pages            : count;
-	## Number of relocation entries stored after the header.
-	num_reloc_items          : count;
-	## Number of paragraphs in the header.
-	header_in_paragraphs     : count;
-	## Number of paragraps of additional memory that the program will need.
-	min_extra_paragraphs     : count;
-	## Maximum number of paragraphs of additional memory.
-	max_extra_paragraphs     : count;
-	## Relative value of the stack segment.
-	init_relative_ss         : count;
-	## Initial value of the SP register.
-	init_sp                  : count;
-	## Checksum. The 16-bit sum of all words in the file should be 0. Normally not set.
-	checksum                 : count;
-	## Initial value of the IP register.
-	init_ip                  : count;
-	## Initial value of the CS register (relative to the initial segment).
-	init_relative_cs         : count;
-	## Offset of the first relocation table.
-	addr_of_reloc_table      : count;
-	## Overlays allow you to append data to the end of the file. If this is the main program,
-	## this will be 0.
-	overlay_num              : count;
-	## OEM identifier.
-	oem_id                   : count;
-	## Additional OEM info, specific to oem_id.
-	oem_info                 : count;
-	## Address of the new EXE header.
-	addr_of_new_exe_header   : count;
-};
-
-type PE::FileHeader: record {
-	## The target machine that the file was compiled for.
-	machine              : count;
-	## The time that the file was created at.
-	ts                   : time;
-	## Pointer to the symbol table.
-	sym_table_ptr        : count;
-	## Number of symbols.
-	num_syms             : count;
-	## The size of the optional header.
-	optional_header_size : count;
-	## Bit flags that determine if this file is executable, non-relocatable, and/or a DLL.
-	characteristics      : set[count];
-};
-
-type PE::OptionalHeader: record {
-	## PE32 or PE32+ indicator.
-	magic                   : count;
-	## The major version of the linker used to create the PE.
-	major_linker_version    : count;
-	## The minor version of the linker used to create the PE.
-	minor_linker_version    : count;
-	## Size of the .text section.
-	size_of_code            : count;
-	## Size of the .data section.
-	size_of_init_data       : count;
-	## Size of the .bss section.
-	size_of_uninit_data     : count;
-	## The relative virtual address (RVA) of the entry point.
-	addr_of_entry_point     : count;
-	## The relative virtual address (RVA) of the .text section.
-	base_of_code            : count;
-	## The relative virtual address (RVA) of the .data section.
-	base_of_data            : count &optional;
-	## Preferred memory location for the image to be based at.
-	image_base              : count;
-	## The alignment (in bytes) of sections when they're loaded in memory.
-	section_alignment       : count;
-	## The alignment (in bytes) of the raw data of sections.
-	file_alignment          : count;
-	## The major version of the required OS.
-	os_version_major        : count;
-	## The minor version of the required OS.
-	os_version_minor        : count;
-	## The major version of this image.
-	major_image_version     : count;
-	## The minor version of this image.
-	minor_image_version     : count;
-	## The major version of the subsystem required to run this file.
-	major_subsys_version    : count;
-	## The minor version of the subsystem required to run this file.
-	minor_subsys_version    : count;
-	## The size (in bytes) of the iamge as the image is loaded in memory.
-	size_of_image           : count;
-	## The size (in bytes) of the headers, rounded up to file_alignment.
-	size_of_headers         : count;
-	## The image file checksum.
-	checksum                : count;
-	## The subsystem that's required to run this image.
-	subsystem               : count;
-	## Bit flags that determine how to execute or load this file.
-	dll_characteristics     : set[count];
-	## A vector with the sizes of various tables and strings that are
-	## defined in the optional header data directories. Examples include
-	## the import table, the resource table, and debug information.
-	table_sizes             : vector of count;
-
-};
-
-## Record for Portable Executable (PE) section headers.
-type PE::SectionHeader: record {
-	## The name of the section
-	name             : string;
-	## The total size of the section when loaded into memory.
-	virtual_size     : count;
-	## The relative virtual address (RVA) of the section.
-	virtual_addr     : count;
-	## The size of the initialized data for the section, as it is
-	## in the file on disk.
-	size_of_raw_data : count;
-	## The virtual address of the initialized dat for the section,
-	## as it is in the file on disk.
-	ptr_to_raw_data  : count;
-	## The file pointer to the beginning of relocation entries for
-	## the section.
-	ptr_to_relocs    : count;
-	## The file pointer to the beginning of line-number entries for
-	## the section.
-	ptr_to_line_nums : count;
-	## The number of relocation entries for the section.
-	num_of_relocs    : count;
-	## The number of line-number entrie for the section.
-	num_of_line_nums : count;
-	## Bit-flags that describe the characteristics of the section.
-	characteristics  : set[count];
-};
-}
-module GLOBAL;
-
-## Description of a signature match.
-##
-## .. zeek:see:: signature_match
-type signature_state: record {
-	sig_id:       string;	##< ID of the matching signature.
-	conn:         connection;	##< Matching connection.
-	is_orig:      bool;	##< True if matching endpoint is originator.
-	payload_size: count;	##< Payload size of the first matching packet of current endpoint.
-};
-
-# Type used to report load samples via :zeek:see:`load_sample`. For now, it's a
-# set of names (event names, source file names, and perhaps ``<source file, line
-# number>``), which were seen during the sample.
-type load_sample_info: set[string];
-
-## A BitTorrent peer.
-##
-## .. zeek:see:: bittorrent_peer_set
-type bittorrent_peer: record {
-	h: addr;	##< The peer's address.
-	p: port;	##< The peer's port.
-};
-
-## A set of BitTorrent peers.
-##
-## .. zeek:see:: bt_tracker_response
-type bittorrent_peer_set: set[bittorrent_peer];
-
-## BitTorrent "benc" value. Note that "benc" = Bencode ("Bee-Encode"), per
-## http://en.wikipedia.org/wiki/Bencode.
-##
-## .. zeek:see:: bittorrent_benc_dir
-type bittorrent_benc_value: record {
-	i: int &optional;	##< TODO.
-	s: string &optional;	##< TODO.
-	d: string &optional;	##< TODO.
-	l: string &optional;	##< TODO.
-};
-
-## A table of BitTorrent "benc" values.
-##
-## .. zeek:see:: bt_tracker_response
-type bittorrent_benc_dir: table[string] of bittorrent_benc_value;
-
-## Header table type used by BitTorrent analyzer.
-##
-## .. zeek:see:: bt_tracker_request bt_tracker_response
-##    bt_tracker_response_not_ok
-type bt_tracker_headers: table[string] of string;
-
-## A vector of boolean values that indicate the setting
-## for a range of modbus coils.
-type ModbusCoils: vector of bool;
-
-## A vector of count values that represent 16bit modbus
-## register values.
-type ModbusRegisters: vector of count;
-
-type ModbusHeaders: record {
-	## Transaction identifier
-	tid:           count;
-	## Protocol identifier
-	pid:           count;
-	## Unit identifier (previously 'slave address')
-	uid:           count;
-	## MODBUS function code
-	function_code: count;
-};
-
-module Unified2;
-export {
-	type Unified2::IDSEvent: record {
-		sensor_id:          count;
-		event_id:           count;
-		ts:                 time;
-		signature_id:       count;
-		generator_id:       count;
-		signature_revision: count;
-		classification_id:  count;
-		priority_id:        count;
-		src_ip:             addr;
-		dst_ip:             addr;
-		src_p:              port;
-		dst_p:              port;
-		impact_flag:        count;
-		impact:             count;
-		blocked:            count;
-		## Not available in "legacy" IDS events.
-		mpls_label:         count  &optional;
-		## Not available in "legacy" IDS events.
-		vlan_id:            count  &optional;
-		## Only available in "legacy" IDS events.
-		packet_action:      count  &optional;
+	type PE::DOSHeader: record {
+		## The magic number of a portable executable file ("MZ").
+		signature                : string;
+		## The number of bytes in the last page that are used.
+		used_bytes_in_last_page  : count;
+		## The number of pages in the file that are part of the PE file itself.
+		file_in_pages            : count;
+		## Number of relocation entries stored after the header.
+		num_reloc_items          : count;
+		## Number of paragraphs in the header.
+		header_in_paragraphs     : count;
+		## Number of paragraphs of additional memory that the program will need.
+		min_extra_paragraphs     : count;
+		## Maximum number of paragraphs of additional memory.
+		max_extra_paragraphs     : count;
+		## Relative value of the stack segment.
+		init_relative_ss         : count;
+		## Initial value of the SP register.
+		init_sp                  : count;
+		## Checksum. The 16-bit sum of all words in the file should be 0. Normally not set.
+		checksum                 : count;
+		## Initial value of the IP register.
+		init_ip                  : count;
+		## Initial value of the CS register (relative to the initial segment).
+		init_relative_cs         : count;
+		## Offset of the first relocation table.
+		addr_of_reloc_table      : count;
+		## Overlays allow you to append data to the end of the file. If this is the main program,
+		## this will be 0.
+		overlay_num              : count;
+		## OEM identifier.
+		oem_id                   : count;
+		## Additional OEM info, specific to oem_id.
+		oem_info                 : count;
+		## Address of the new EXE header.
+		addr_of_new_exe_header   : count;
 	};
 
-	type Unified2::Packet: record {
-		sensor_id:    count;
-		event_id:     count;
-		event_second: count;
-		packet_ts:    time;
-		link_type:    count;
-		data:         string;
+	type PE::FileHeader: record {
+		## The target machine that the file was compiled for.
+		machine              : count;
+		## The time that the file was created at.
+		ts                   : time;
+		## Pointer to the symbol table.
+		sym_table_ptr        : count;
+		## Number of symbols.
+		num_syms             : count;
+		## The size of the optional header.
+		optional_header_size : count;
+		## Bit flags that determine if this file is executable, non-relocatable, and/or a DLL.
+		characteristics      : set[count];
 	};
+
+	type PE::OptionalHeader: record {
+		## PE32 or PE32+ indicator.
+		magic                   : count;
+		## The major version of the linker used to create the PE.
+		major_linker_version    : count;
+		## The minor version of the linker used to create the PE.
+		minor_linker_version    : count;
+		## Size of the .text section.
+		size_of_code            : count;
+		## Size of the .data section.
+		size_of_init_data       : count;
+		## Size of the .bss section.
+		size_of_uninit_data     : count;
+		## The relative virtual address (RVA) of the entry point.
+		addr_of_entry_point     : count;
+		## The relative virtual address (RVA) of the .text section.
+		base_of_code            : count;
+		## The relative virtual address (RVA) of the .data section.
+		base_of_data            : count &optional;
+		## Preferred memory location for the image to be based at.
+		image_base              : count;
+		## The alignment (in bytes) of sections when they're loaded in memory.
+		section_alignment       : count;
+		## The alignment (in bytes) of the raw data of sections.
+		file_alignment          : count;
+		## The major version of the required OS.
+		os_version_major        : count;
+		## The minor version of the required OS.
+		os_version_minor        : count;
+		## The major version of this image.
+		major_image_version     : count;
+		## The minor version of this image.
+		minor_image_version     : count;
+		## The major version of the subsystem required to run this file.
+		major_subsys_version    : count;
+		## The minor version of the subsystem required to run this file.
+		minor_subsys_version    : count;
+		## The size (in bytes) of the image as the image is loaded in memory.
+		size_of_image           : count;
+		## The size (in bytes) of the headers, rounded up to file_alignment.
+		size_of_headers         : count;
+		## The image file checksum.
+		checksum                : count;
+		## The subsystem that's required to run this image.
+		subsystem               : count;
+		## Bit flags that determine how to execute or load this file.
+		dll_characteristics     : set[count];
+		## A vector with the sizes of various tables and strings that are
+		## defined in the optional header data directories. Examples include
+		## the import table, the resource table, and debug information.
+		table_sizes             : vector of count;
+
+	};
+
+	## Record for Portable Executable (PE) section headers.
+	type PE::SectionHeader: record {
+		## The name of the section
+		name             : string;
+		## The total size of the section when loaded into memory.
+		virtual_size     : count;
+		## The relative virtual address (RVA) of the section.
+		virtual_addr     : count;
+		## The size of the initialized data for the section, as it is
+		## in the file on disk.
+		size_of_raw_data : count;
+		## The virtual address of the initialized dat for the section,
+		## as it is in the file on disk.
+		ptr_to_raw_data  : count;
+		## The file pointer to the beginning of relocation entries for
+		## the section.
+		ptr_to_relocs    : count;
+		## The file pointer to the beginning of line-number entries for
+		## the section.
+		ptr_to_line_nums : count;
+		## The number of relocation entries for the section.
+		num_of_relocs    : count;
+		## The number of line-number entries for the section.
+		num_of_line_nums : count;
+		## Bit-flags that describe the characteristics of the section.
+		characteristics  : set[count];
+	};
+
+	## Maximum number of COFF sections that will be processed (i.e. the maximum value
+	## of the NumberOfSections field). If this limit is reached a binpac exception
+	## will be reported. Setting this to zero will disable the limit.
+	const max_number_of_sections: count = 4000 &redef;
 }
 
 module SSL;
+
 export {
 	type SignatureAndHashAlgorithm: record {
 		HashAlgorithm: count; ##< Hash algorithm number
@@ -4267,15 +5512,24 @@ export {
 		obfuscated_ticket_age: count;
 	};
 
-## Number of non-DTLS frames that can occur in a DTLS connection before
-## parsing of the connection is suspended.
-## DTLS does not immediately stop parsing a connection because other protocols
-## might be interleaved in the same UDP "connection".
-const SSL::dtls_max_version_errors = 10 &redef;
+	## Number of non-DTLS frames that can occur in a DTLS connection before
+	## parsing of the connection is suspended.
+	## DTLS does not immediately stop parsing a connection because other protocols
+	## might be interleaved in the same UDP "connection".
+	const SSL::dtls_max_version_errors = 10 &redef;
 
-## Maximum number of invalid version errors to report in one DTLS connection.
-const SSL::dtls_max_reported_version_errors = 1 &redef;
+	## Maximum number of invalid version errors to report in one DTLS connection.
+	const SSL::dtls_max_reported_version_errors = 1 &redef;
 
+	## Maximum number of Alert messages parsed from an SSL record with
+	## content_type alert (21). The remaining alerts are discarded. For
+	## TLS 1.3 connections, this is implicitly 1 as defined by RFC 8446.
+	const SSL::max_alerts_per_record = 10 &redef;
+
+	## Maximum number of certificates parsed across TLS Certificate handshake
+	## messages on a single connection. The remaining certificates are
+	## discarded. A value of 0 disables the limit.
+	const SSL::max_certificates = 100 &redef;
 }
 
 module GLOBAL;
@@ -4290,13 +5544,14 @@ type signature_and_hashalgorithm_vec: vector of SSL::SignatureAndHashAlgorithm;
 type psk_identity_vec: vector of SSL::PSKIdentity;
 
 module X509;
+
 export {
 	type Certificate: record {
 		version: count &log;	##< Version number.
 		serial: string &log;	##< Serial number.
 		subject: string &log;	##< Subject.
 		issuer: string &log;	##< Issuer.
-		cn: string &optional; ##< Last (most specific) common name.
+		cn: string &optional;	##< Last (most specific) common name.
 		not_valid_before: time &log;	##< Timestamp before when certificate is not valid.
 		not_valid_after: time &log;	##< Timestamp after when certificate is not valid.
 		key_alg: string &log;	##< Name of the key algorithm
@@ -4305,6 +5560,7 @@ export {
 		key_length: count &optional &log;	##< Key length in bits
 		exponent: string &optional &log;	##< Exponent, if RSA-certificate
 		curve: string &optional &log;	##< Curve, if EC-certificate
+		tbs_sig_alg: string; ##< Name of the signature algorithm given inside the tbsCertificate. Should be equivalent to `sig_alg`.
 	};
 
 	type Extension: record {
@@ -4337,9 +5593,24 @@ export {
 		## References to the final certificate chain, if verification successful. End-host certificate is first.
 		chain_certs: vector of opaque of x509 &optional;
 	};
+
+	## The maximum size of an X509 file in bytes. If this limit is exceeded, a
+	## x509_response_too_large weird will be reported. Setting this value to zero
+	## disables the limitation.
+	const max_bytes: count = 4194304 &redef;
+}
+
+module OCSP;
+
+export {
+	## The maximum size of an OCSP file in bytes. If this limit is exceeded, a
+	## ocsp_response_too_large weird will be reported. Setting this value to zero
+	## disables the limitation.
+	const max_bytes: count = 1048576 &redef;
 }
 
 module SOCKS;
+
 export {
 	## This record is for a SOCKS client or server to provide either a
 	## name or an address to represent a desired or established connection.
@@ -4368,6 +5639,7 @@ export {
 }
 
 module RDP;
+
 export {
 	type RDP::EarlyCapabilityFlags: record {
 		support_err_info_pdu:       bool;
@@ -4482,6 +5754,7 @@ export {
 @load base/bif/plugins/Zeek_SNMP.types.bif
 
 module SNMP;
+
 export {
 	## The top-level message data structure of an SNMPv1 datagram, not
 	## including the PDU data.  See :rfc:`1157`.
@@ -4503,6 +5776,24 @@ export {
 		name:      string;
 	};
 
+	## The UserSecurityParaneters for SNMPv3 messages using the
+	## User-based Security Model. See :rfc:`3414`.
+	## Experimental: the format of this record can change till Zeek 9.
+	type SNMP::UserSecurityParameters: record {
+		## snmpEngineID of the authoritative SNMP engine.
+		AuthoritativeEngineID: string;
+		## snmpEngineBoots value of the authoritative SNMP engine.
+		AuthoritativeEngineBoots: int;
+		## snmpEngineTime value of the authoritative SNMP engine
+		AuthoritativeEngineTime: int;
+		## User on the behalf of which the message is exchanged.
+		UserName: string;
+		## raw msgAuthenticationParameters.
+		AuthenticationParameters: string;
+		## raw msgPrivacyParameters.
+		PrivacyParameters: string;
+	};
+
 	## The top-level message data structure of an SNMPv3 datagram, not
 	## including the PDU data.  See :rfc:`3412`.
 	type SNMP::HeaderV3: record {
@@ -4515,6 +5806,7 @@ export {
 		security_model:  count;
 		security_params: string;
 		pdu_context:     SNMP::ScopedPDU_Context &optional;
+		user_security_parameters: SNMP::UserSecurityParameters &optional;
 	};
 
 	## A generic SNMP header data structure that may include data from
@@ -4596,7 +5888,7 @@ export {
 	type SNMP::BulkPDU: record {
 		request_id:      int;
 		non_repeaters:   count;
-		max_repititions: count;
+		max_repetitions: count;
 		bindings:        SNMP::Bindings;
 	};
 }
@@ -4604,6 +5896,7 @@ export {
 @load base/bif/plugins/Zeek_KRB.types.bif
 
 module KRB;
+
 export {
 	## Kerberos keytab file name. Used to decrypt tickets encountered on the wire.
 	const keytab = "" &redef;
@@ -4660,6 +5953,15 @@ export {
 
 	type KRB::Type_Value_Vector: vector of KRB::Type_Value;
 
+	type KRB::Encrypted_Data: record {
+		## The key version number
+		kvno		: count &optional;
+		## The cipher the data was encrypted with
+		cipher		: count;
+		## The encrypted data
+		ciphertext	: string;
+	};
+
 	## A Kerberos host address See :rfc:`4120`.
 	type KRB::Host_Address: record {
 		## IPv4 or IPv6 address
@@ -4679,7 +5981,7 @@ export {
 		## The message type (20 for SAFE_MSG)
 		msg_type	: count;
 		## The application-specific data that is being passed
-		## from the sender to the reciever
+		## from the sender to the receiver
 		data		: string;
 		## Current time from the sender of the message
 		timestamp	: time &optional;
@@ -4784,285 +6086,65 @@ export {
 
 		## The ticket that was issued
 		ticket			: KRB::Ticket;
+		## The encrypted session key for the client
+		enc_part		: KRB::Encrypted_Data;
 	};
+
+	## The maximum number of PA_DATA records that will be processed from a single
+	## connection. If the limit is reached, a "krb_max_pa_data_records_exceeded" weird
+	## will be reported. Setting this to zero will disable the limitation.
+	const max_pa_data_records: count = 5000 &redef;
 }
 
-module GLOBAL;
-
-@load base/bif/event.bif
-
-## BPF filter the user has set via the -f command line options. Empty if none.
-const cmd_line_bpf_filter = "" &redef;
-
-## Base time of log rotations in 24-hour time format (``%H:%M``), e.g. "12:00".
-const log_rotate_base_time = "0:00" &redef;
-
-## Write profiling info into this file in regular intervals. The easiest way to
-## activate profiling is loading :doc:`/scripts/policy/misc/profiling.zeek`.
-##
-## .. zeek:see:: profiling_interval expensive_profiling_multiple segment_profiling
-global profiling_file: file &redef;
-
-## Update interval for profiling (0 disables).  The easiest way to activate
-## profiling is loading  :doc:`/scripts/policy/misc/profiling.zeek`.
-##
-## .. zeek:see:: profiling_file expensive_profiling_multiple segment_profiling
-const profiling_interval = 0 secs &redef;
-
-## Multiples of :zeek:see:`profiling_interval` at which (more expensive) memory
-## profiling is done (0 disables).
-##
-## .. zeek:see:: profiling_interval profiling_file segment_profiling
-const expensive_profiling_multiple = 0 &redef;
-
-## If true, then write segment profiling information (very high volume!)
-## in addition to profiling statistics.
-##
-## .. zeek:see:: profiling_interval expensive_profiling_multiple profiling_file
-const segment_profiling = F &redef;
-
-## Output modes for packet profiling information.
-##
-## .. zeek:see:: pkt_profile_mode pkt_profile_freq pkt_profile_file
-type pkt_profile_modes: enum {
-	PKT_PROFILE_MODE_NONE,	##< No output.
-	PKT_PROFILE_MODE_SECS,	##< Output every :zeek:see:`pkt_profile_freq` seconds.
-	PKT_PROFILE_MODE_PKTS,	##< Output every :zeek:see:`pkt_profile_freq` packets.
-	PKT_PROFILE_MODE_BYTES,	##< Output every :zeek:see:`pkt_profile_freq` bytes.
-};
-
-## Output mode for packet profiling information.
-##
-## .. zeek:see:: pkt_profile_modes pkt_profile_freq pkt_profile_file
-const pkt_profile_mode = PKT_PROFILE_MODE_NONE &redef;
-
-## Frequency associated with packet profiling.
-##
-## .. zeek:see:: pkt_profile_modes pkt_profile_mode pkt_profile_file
-const pkt_profile_freq = 0.0 &redef;
-
-## File where packet profiles are logged.
-##
-## .. zeek:see:: pkt_profile_modes pkt_profile_freq pkt_profile_mode
-global pkt_profile_file: file &redef;
-
-## Rate at which to generate :zeek:see:`load_sample` events. As all
-## events, the event is only generated if you've also defined a
-## :zeek:see:`load_sample` handler.  Units are inverse number of packets; e.g.,
-## a value of 20 means "roughly one in every 20 packets".
-##
-## .. zeek:see:: load_sample
-global load_sample_freq = 20 &redef;
-
-## Whether to attempt to automatically detect SYN/FIN/RST-filtered trace
-## and not report missing segments for such connections.
-## If this is enabled, then missing data at the end of connections may not
-## be reported via :zeek:see:`content_gap`.
-const detect_filtered_trace = F &redef;
-
-## Whether we want :zeek:see:`content_gap` for partial
-## connections. A connection is partial if it is missing a full handshake. Note
-## that gap reports for partial connections might not be reliable.
-##
-## .. zeek:see:: content_gap partial_connection
-const report_gaps_for_partial = F &redef;
-
-## Flag to prevent Zeek from exiting automatically when input is exhausted.
-## Normally Zeek terminates when all packet sources have gone dry
-## and communication isn't enabled. If this flag is set, Zeek's main loop will
-## instead keep idling until :zeek:see:`terminate` is explicitly called.
-##
-## This is mainly for testing purposes when termination behaviour needs to be
-## controlled for reproducing results.
-const exit_only_after_terminate = F &redef;
-
-## Default mode for Zeek's user-space dynamic packet filter. If true, packets
-## that aren't explicitly allowed through, are dropped from any further
-## processing.
-##
-## .. note:: This is not the BPF packet filter but an additional dynamic filter
-##    that Zeek optionally applies just before normal processing starts.
-##
-## .. zeek:see:: install_dst_addr_filter install_dst_net_filter
-##    install_src_addr_filter install_src_net_filter  uninstall_dst_addr_filter
-##    uninstall_dst_net_filter uninstall_src_addr_filter uninstall_src_net_filter
-const packet_filter_default = F &redef;
-
-## Maximum size of regular expression groups for signature matching.
-const sig_max_group_size = 50 &redef;
-
-## Description transmitted to remote communication peers for identification.
-const peer_description = "zeek" &redef;
-
-## Reassemble the beginning of all TCP connections before doing
-## signature matching. Enabling this provides more accurate matching at the
-## expense of CPU cycles.
-##
-## .. zeek:see:: dpd_buffer_size
-##    dpd_match_only_beginning dpd_ignore_ports
-##
-## .. note:: Despite the name, this option affects *all* signature matching, not
-##    only signatures used for dynamic protocol detection.
-const dpd_reassemble_first_packets = T &redef;
-
-## Size of per-connection buffer used for dynamic protocol detection. For each
-## connection, Zeek buffers this initial amount of payload in memory so that
-## complete protocol analysis can start even after the initial packets have
-## already passed through (i.e., when a DPD signature matches only later).
-## However, once the buffer is full, data is deleted and lost to analyzers that
-## are activated afterwards. Then only analyzers that can deal with partial
-## connections will be able to analyze the session.
-##
-## .. zeek:see:: dpd_reassemble_first_packets dpd_match_only_beginning
-##    dpd_ignore_ports dpd_max_packets
-const dpd_buffer_size = 1024 &redef;
-
-## Maximum number of per-connection packets that will be buffered for dynamic
-## protocol detection. For each connection, Zeek buffers up to this amount
-## of packets in memory so that complete protocol analysis can start even after
-## the initial packets have already passed through (i.e., when a DPD signature
-## matches only later). However, once the buffer is full, data is deleted and lost
-## to analyzers that are activated afterwards. Then only analyzers that can deal
-## with partial connections will be able to analyze the session.
-##
-## .. zeek:see:: dpd_reassemble_first_packets dpd_match_only_beginning
-##    dpd_ignore_ports dpd_buffer_size
-const dpd_max_packets = 100 &redef;
-
-## If true, stops signature matching if :zeek:see:`dpd_buffer_size` has been
-## reached.
-##
-## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
-##    dpd_ignore_ports
-##
-## .. note:: Despite the name, this option affects *all* signature matching, not
-##    only signatures used for dynamic protocol detection.
-const dpd_match_only_beginning = T &redef;
-
-## If true, stops signature matching after a late match. A late match may occur
-## in case the DPD buffer is exhausted but a protocol signature matched. To
-## allow late matching, :zeek:see:`dpd_match_only_beginning` must be disabled.
-##
-## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
-##    dpd_match_only_beginning
-##
-## .. note:: Despite the name, this option stops *all* signature matching, not
-##    only signatures used for dynamic protocol detection but is triggered by
-##    DPD signatures only.
-const dpd_late_match_stop = F &redef;
-
-## If true, don't consider any ports for deciding which protocol analyzer to
-## use.
-##
-## .. zeek:see:: dpd_reassemble_first_packets dpd_buffer_size
-##    dpd_match_only_beginning
-const dpd_ignore_ports = F &redef;
-
-## Ports which the core considers being likely used by servers. For ports in
-## this set, it may heuristically decide to flip the direction of the
-## connection if it misses the initial handshake.
-const likely_server_ports: set[port] &redef;
-
-## Per-incident timer managers are drained after this amount of inactivity.
-const timer_mgr_inactivity_timeout = 1 min &redef;
-
-## If true, output profiling for Time-Machine queries.
-const time_machine_profiling = F &redef;
-
-## If true, warns about unused event handlers at startup.
-const check_for_unused_event_handlers = F &redef;
-
-## Holds the filename of the trace file given with ``-w`` (empty if none).
-##
-## .. zeek:see:: record_all_packets
-const trace_output_file = "";
-
-## If a trace file is given with ``-w``, dump *all* packets seen by Zeek into it.
-## By default, Zeek applies (very few) heuristics to reduce the volume. A side
-## effect of setting this to true is that we can write the packets out before we
-## actually process them, which can be helpful for debugging in case the
-## analysis triggers a crash.
-##
-## .. zeek:see:: trace_output_file
-const record_all_packets = F &redef;
-
-## Ignore certain TCP retransmissions for :zeek:see:`conn_stats`.  Some
-## connections (e.g., SSH) retransmit the acknowledged last byte to keep the
-## connection alive. If *ignore_keep_alive_rexmit* is set to true, such
-## retransmissions will be excluded in the rexmit counter in
-## :zeek:see:`conn_stats`.
-##
-## .. zeek:see:: conn_stats
-const ignore_keep_alive_rexmit = F &redef;
-
 module JSON;
+
 export {
 	type TimestampFormat: enum {
 		## Timestamps will be formatted as UNIX epoch doubles.  This is
 		## the format that Zeek typically writes out timestamps.
 		TS_EPOCH,
+		## Timestamps will be formatted as signed integers that
+		## represent the number of milliseconds since the UNIX
+		## epoch. Timestamps before the UNIX epoch are represented
+		## as negative values.
+		TS_MILLIS,
 		## Timestamps will be formatted as unsigned integers that
 		## represent the number of milliseconds since the UNIX
-		## epoch.
-		TS_MILLIS,
+		## epoch. Timestamps before the UNIX epoch result in negative
+		## values being interpreted as large unsigned integers.
+		TS_MILLIS_UNSIGNED,
 		## Timestamps will be formatted in the ISO8601 DateTime format.
 		## Subseconds are also included which isn't actually part of the
 		## standard but most consumers that parse ISO8601 seem to be able
 		## to cope with that.
 		TS_ISO8601,
 	};
+
+	## Escaping policy for non-printable non-UTF8 sequences.
+	type StringEscapePolicy: enum {
+		## By default, Zeek escapes bytes of non-UTF8 sequences as \\xXX
+		## without backslash escaping, resulting in non-reversible encodings.
+		## Byte \x07 becomes \\x07 and literal string \x07 also becomes \\x07
+		## in the resulting JSON string.
+		STRING_ESCAPE_POLICY_HEX,
+		## All control characters and non-printable bytes not part of valid UTF-8
+		## sequences are mapped into Unicode Supplementary Private Use Area-A
+		## (U+F0000..U+FFFFF) and encoded as surrogate pair:
+		## In a JSON string, the byte value \x07 will become "\udb80\udc07".
+		## The literal string \x07 will become "\\x07".
+		STRING_ESCAPE_POLICY_PUA,
+		## Strings are first escaped as in TSV logs: all control characters
+		## and non-printable bytes not part of valid UTF-8 sequences are ``\xXX`` escaped.
+		## Lone backslashes are backslash escaped. Then, standard JSON escaping is applied,
+		## escaping all backslashes again.
+		## Byte \x07 becomes \\x07 and literal string \x07 becomes \\\\x07
+		## in the resulting JSON string.
+		STRING_ESCAPE_POLICY_TSV,
+	};
 }
 
-module Tunnel;
-export {
-	## The maximum depth of a tunnel to decapsulate until giving up.
-	## Setting this to zero will disable all types of tunnel decapsulation.
-	const max_depth: count = 2 &redef;
-
-	## Toggle whether to do IPv{4,6}-in-IPv{4,6} decapsulation.
-	const enable_ip = T &redef;
-
-	## Toggle whether to do IPv{4,6}-in-AYIYA decapsulation.
-	const enable_ayiya = T &redef;
-
-	## Toggle whether to do IPv6-in-Teredo decapsulation.
-	const enable_teredo = T &redef;
-
-	## Toggle whether to do GTPv1 decapsulation.
-	const enable_gtpv1 = T &redef;
-
-	## Toggle whether to do GRE decapsulation.
-	const enable_gre = T &redef;
-
-	## With this set, the Teredo analyzer waits until it sees both sides
-	## of a connection using a valid Teredo encapsulation before issuing
-	## a :zeek:see:`analyzer_confirmation`.  If it's false, the first
-	## occurrence of a packet with valid Teredo encapsulation causes a
-	## confirmation.
-	const delay_teredo_confirmation = T &redef;
-
-	## With this set, the GTP analyzer waits until the most-recent upflow
-	## and downflow packets are a valid GTPv1 encapsulation before
-	## issuing :zeek:see:`analyzer_confirmation`.  If it's false, the
-	## first occurrence of a packet with valid GTPv1 encapsulation causes
-	## confirmation.  Since the same inner connection can be carried
-	## differing outer upflow/downflow connections, setting to false
-	## may work better.
-	const delay_gtp_confirmation = F &redef;
-
-	## How often to cleanup internal state for inactive IP tunnels
-	## (includes GRE tunnels).
-	const ip_tunnel_timeout = 24hrs &redef;
-
-	## Whether to validate the checksum supplied in the outer UDP header
-	## of a VXLAN encapsulation.  The spec says the checksum should be
-	## transmitted as zero, but if not, then the decapsulating destination
-	## may choose whether to perform the validation.
-	const validate_vxlan_checksums = T &redef;
-
-} # end export
-
 module Reporter;
+
 export {
 	## Tunable for sending reporter info messages to STDERR.  The option to
 	## turn it off is presented here in case Zeek is being run by some
@@ -5081,6 +6163,7 @@ export {
 }
 
 module Pcap;
+
 export {
 	## Number of bytes per packet to capture from live interfaces.
 	const snaplen = 9216 &redef;
@@ -5088,6 +6171,37 @@ export {
 	## Number of Mbytes to provide as buffer space when capturing from live
 	## interfaces.
 	const bufsize = 128 &redef;
+
+	## Number of bytes to use for buffering file read operations when reading
+	## from a PCAP file. Setting this to 0 uses operating system defaults
+	## as chosen by fopen().
+	const bufsize_offline_bytes = 128 * 1024 &redef;
+
+	## Default timeout for packet sources without file descriptors.
+	##
+	## For libpcap based packet sources that do not provide a usable
+	## file descriptor for select(), the timeout provided to the IO
+	## loop is either zero if a packet was most recently available
+	## or else this value.
+	##
+	## Depending on the expected packet rate per-worker and the amount of
+	## available packet buffer, raising this value can significantly reduce
+	## Zeek's CPU usage at the cost of a small delay before processing
+	## packets. Setting this value too high may cause packet drops due
+	## to running out of available buffer space.
+	##
+	## Increasing this value to 200usec on low-traffic Myricom based systems
+	## (5 kpps per Zeek worker) has shown a 50% reduction in CPU usage.
+	##
+	## This is an advanced setting. Do monitor dropped packets and capture
+	## loss information when changing it.
+	##
+	## .. note:: Packet sources that override ``GetNextTimeout()`` method
+	##    may not respect this value.
+	##
+	## .. zeek:see:: io_poll_interval_live
+	##
+	const non_fd_timeout = 20usec &redef;
 
 	## The definition of a "pcap interface".
 	type Interface: record {
@@ -5108,32 +6222,71 @@ export {
 	};
 
 	type Interfaces: set[Pcap::Interface];
-} # end export
+
+	## The state of the compilation for a pcap filter.
+	type filter_state: enum {
+		ok,     # no issues encountered
+		fatal,  # fatal issue, something that would prevent zeek from continuing
+		warning # non-fatal issue that should just be logged
+	};
+}
+
+module AF_Packet;
+
+export {
+	## Size of the ring-buffer.
+	const buffer_size = 128 * 1024 * 1024 &redef;
+	## Size of an individual block. Needs to be a multiple of page size.
+	const block_size = 4096 * 8 &redef;
+	## Retire timeout for a single block.
+	const block_timeout = 10msec &redef;
+	## Toggle whether to use hardware timestamps.
+	const enable_hw_timestamping = F &redef;
+	## Toggle whether to use PACKET_FANOUT.
+	const enable_fanout = T &redef;
+	## Toggle defragmentation of IP packets using PACKET_FANOUT_FLAG_DEFRAG.
+	const enable_defrag = F &redef;
+	## Fanout mode.
+	const fanout_mode = FANOUT_HASH &redef;
+	## Fanout ID.
+	const fanout_id = 23 &redef;
+	## Link type (default Ethernet).
+	const link_type = 1 &redef;
+	## Checksum validation mode.
+	const checksum_validation_mode: ChecksumMode = CHECKSUM_ON &redef;
+}
 
 module DCE_RPC;
+
 export {
 	## The maximum number of simultaneous fragmented commands that
-	## the DCE_RPC analyzer will tolerate before the it will generate
-	## a weird and skip further input.
+	## the DCE_RPC analyzer will tolerate before it will generate
+	## a weird and discard all pending commands.
+	##
+	## Setting this variable to 0 disables the limit.
 	const max_cmd_reassembly = 20 &redef;
 
 	## The maximum number of fragmented bytes that the DCE_RPC analyzer
 	## will tolerate on a command before the analyzer will generate a weird
-	## and skip further input.
-	const max_frag_data = 30000 &redef;
+	## and discard the fragment.
+	##
+	## Setting this variable to 0 disables the limit.
+	const max_frag_data = 1024 * 1024 &redef;
 }
 
 module NCP;
+
 export {
 	## The maximum number of bytes to allocate when parsing NCP frames.
 	const max_frame_size = 65536 &redef;
 }
 
 module NTP;
+
 export {
 	## NTP standard message as defined in :rfc:`5905` for modes 1-5
 	## This record contains the standard fields used by the NTP protocol
-	## for standard syncronization operations.
+	## for standard synchronization operations.
 	type NTP::StandardMessage: record {
 		## This value mainly identifies the type of server (primary server,
 		## secondary server, etc.). Possible values, as in :rfc:`5905`, are:
@@ -5249,7 +6402,7 @@ export {
 		sequence:       count;
 		## The number of the implementation this request code
 		## is defined by.  An implementation number of zero is used
-		## for requst codes/data formats which all implementations
+		## for request codes/data formats which all implementations
 		## agree on.  Implementation number 255 is reserved (for
 		## extensions, in case we run out).
 		implementation: count;
@@ -5286,7 +6439,7 @@ export {
 		##   * 6 - NTP control message
 		##   * 7 - reserved for private use
 		mode:           count;
-		## If mode 1-5, the standard fields for syncronization operations are
+		## If mode 1-5, the standard fields for synchronization operations are
 		## here.  See :rfc:`5905`
 		std_msg:        NTP::StandardMessage &optional;
 		## If mode 6, the fields for control operations are here.
@@ -5304,6 +6457,7 @@ export {
 }
 
 module MQTT;
+
 export {
 	type MQTT::ConnectMsg: record {
 		## Protocol name
@@ -5376,14 +6530,141 @@ export {
 	## payload information in :zeek:see:`mqtt_publish` events (and the
 	## default MQTT logs generated from that).
 	option max_payload_size = 100;
+
+	## The maximum number of topics to parse from one MQTT SUBSCRIBE or
+	## UNSUBSCRIBE message. A value of zero removes the limit.
+	const max_topics_per_subscription: count = 1024 &redef;
+}
+
+module Gnutella;
+
+export {
+	## Stop processing lines that exceed this byte limit before encountering
+	## a line terminator.
+	const max_line_length = 8192 &redef;
+
+	## Stop processing headers when the Gnutella headers hit this limit, with
+	## all included lines.
+	const max_header_length = 32768 &redef;
+}
+
+module Finger;
+
+export {
+	## The maximum line length for Finger requests and replies. If any lines
+	## exceed this limit, then this will trigger a violation.
+	option max_line_length = 1024;
 }
 
 module Cluster;
+
 export {
 	type Cluster::Pool: record {};
+
+	## Cluster backend to use. Default is the None backend.
+	const backend = Cluster::CLUSTER_BACKEND_NONE &redef;
+
+	## The event serializer to use by the cluster backend.
+	##
+	## This currently has no effect for backend BROKER.
+	const event_serializer = Cluster::EVENT_SERIALIZER_BROKER_BIN_V1 &redef;
+
+	## The log serializer to use by the backend.
+	##
+	## This currently has no effect for backend BROKER.
+	const log_serializer = Cluster::LOG_SERIALIZER_ZEEK_BIN_V1 &redef;
+
+	## The maximum number of subscriptions a WebSocket client may request.
+	## Set this value to 0 for unlimited.
+	const max_websocket_client_subscriptions = 1000 &redef;
+
+	## Default maximum batch size for the :zeek:attr:`&publish_on_change` attribute.
+	option default_table_publish_on_change_max_batch_size = 10;
+
+	## Default maximum delay size for the the :zeek:attr:`&publish_on_change` attribute.
+	option default_table_publish_on_change_max_batch_delay = 10msec;
+
+	## The record type used for the :zeek:attr:`&publish_on_change` attribute.
+	type PublishOnChangeAttr: record {
+		## Which changes to publish. Cannot be empty.
+		changes: set[TableChange];
+		## Either a string or a function returning a string with function parameters
+		## matching the index types of the :zeek:type:`table` or :zeek:type:`set`.
+		topic: any &optional;
+		## Maximum number of changes to queue into a batch before publishing.
+		## Setting this value to 0 disables batching behavior.
+		max_batch_size: count &default=default_table_publish_on_change_max_batch_size;
+		## Maximum interval to delay the publish.
+		## Setting this value to 0sec disables batching behavior.
+		max_batch_delay: interval &default=default_table_publish_on_change_max_batch_delay;
+	};
+
+	## Record encapsulating a single table change / modification for
+	## distribution to other Zeek processes in a cluster.
+	type TableChangeInfo: record {
+		## The type of change.
+		change: TableChange;
+		## The network time of this change.
+		ts: time;
+		## The index value. Internally tables and sets use ListVal
+		## instances, but for cluster communication we use vector
+		## of any.
+		index: vector of any;
+		## The new, updated or removed value of the new element.
+		## Unused for sets.
+		value: any &optional;
+		## The previous value in the table when the change field
+		## is :zeek:see:`TABLE_ELEMENT_CHANGED`. Unused for sets.
+		previous_value: any &optional;
+	};
+
+	## Vector of individual :zeek:see:`Cluster::TableChangeInfo` records.
+	type TableChangeInfos: vector of TableChangeInfo;
+
+	## Record passed as "header" into the :zeek:see:`Cluster::table_change_infos`
+	## event that holds common information applying to all of the individual
+	## :zeek:see:`Cluster::TableChangeInfo` records.
+	type TableChangeHeader: record {
+		## The script-layer identifier of this table.
+		id: string;
+		## The network timestamp when this event was published.
+		ts: time;
+		## The :zeek:see:`Cluster::node_id` value of the sending process.
+		node_id: string;
+	};
+
+	## Internal'ish event for propagating table changes via :zeek:see:`Cluster::publish`
+	## to other Zeek processes in a cluster.
+	##
+	## tcheader: Header with common information.
+	## tcinfos: Accumulated changes as a vector.
+	global table_change_infos: event(tcheader: TableChangeHeader, tcinfos: TableChangeInfos);
+
+	## Internal helper event used by worker processes to delegate publishing
+	## to the Zeek manager when running under Broker.
+	##
+	## If ``to`` is manager_topic or starts with /zeek/table/, the manager
+	## will also raise table_change_infos() locally for itself.
+	##
+	## tcheader: Header with common information.
+	## tcinfos: Accumulated changes as a vector.
+	## to_topic: The topic to publish the table_change_infos() event to.
+	global forward_table_change_infos: event(tcheader: TableChangeHeader, tcinfos: TableChangeInfos, to_topic: string);
+
+	## A hook for testing and intercepting changes to tables coming in
+	## via the &publish_on_change mechanism from other Zeek processes.
+	##
+	## Breaking from this hook discards the changes. I.e. they'll not
+	## be applied to the table or set identified by id.
+	##
+	## id: Script-level identifier of the table or set.
+	## ts: Network timestamp at the time of sending.
+	## table_change_infos: vector of changes as batched by the remote Zeek process.
+	global apply_table_change_infos_policy: hook(tcheader: TableChangeHeader, tcinfos: TableChangeInfos);
 }
 
 module Weird;
+
 export {
 	## Prevents rate-limiting sampling of any weirds named in the table.
 	option sampling_whitelist: set[string] = {};
@@ -5417,6 +6698,7 @@ export {
 }
 
 module UnknownProtocol;
+
 export {
 	## How many reports for an analyzer/protocol pair will be allowed to
 	## raise events before becoming rate-limited.
@@ -5439,13 +6721,14 @@ export {
 }
 
 module BinPAC;
+
 export {
 	## Maximum capacity, in bytes, that the BinPAC flowbuffer is allowed to
 	## grow to for use with incremental parsing of a given connection/analyzer.
 	const flowbuffer_capacity_max = 10 * 1024 * 1024 &redef;
 
 	## The initial capacity, in bytes, that will be allocated to the BinPAC
-	## flowbuffer of a given connection/analyzer.  If the buffer buffer is
+	## flowbuffer of a given connection/analyzer.  If the buffer is
 	## later contracted, its capacity is also reduced to this size.
 	const flowbuffer_capacity_min = 512 &redef;
 
@@ -5458,29 +6741,411 @@ export {
 	const flowbuffer_contract_threshold = 2 * 1024 * 1024 &redef;
 }
 
+@load base/bif/telemetry_functions.bif
+@load base/bif/telemetry_types.bif
+
+module Telemetry;
+
+export {
+	## Type that captures options used to create metrics.
+	type MetricOpts: record {
+		## The prefix (namespace) of the metric. Zeek uses the ``zeek``
+		## prefix for any internal metrics and the ``process`` prefix
+		## for any metrics involving process state (CPU, memory, etc).
+		prefix: string;
+
+		## The human-readable name of the metric. This is set to the
+		## full prefixed name including the unit when returned from
+		## :zeek:see:`Telemetry::collect_metrics` or
+		## :zeek:see:`Telemetry::collect_histogram_metrics`.
+		name: string;
+
+		## The unit of the metric. Leave this unset for a unit-less
+		## metric. Will be unset when returned from
+		## :zeek:see:`Telemetry::collect_metrics` or
+		## :zeek:see:`Telemetry::collect_histogram_metrics`.
+		unit: string &optional;
+
+		## Documentation for this metric.
+		help_text: string &optional;
+
+		## The label names (also called dimensions) of the metric. When
+		## instantiating or working with concrete metrics, corresponding
+		## label values have to be provided. Examples of a label might
+		## be the protocol a general observation applies to, the
+		## directionality in a traffic flow, or protocol-specific
+		## context like a particular message type. This field is only
+		## used in the construction of new metrics and will not be
+		## filled in when returned from
+		## :zeek:see:`Telemetry::collect_metrics` or
+		## :zeek:see:`Telemetry::collect_histogram_metrics`,
+		label_names: vector of string &default=vector();
+
+		## Whether the metric represents something that is accumulating.
+		## Defaults to ``T`` for counters and ``F`` for gauges and
+		## histograms.
+		is_total: bool &optional;
+
+		## When creating a :zeek:see:`Telemetry::HistogramFamily`,
+		## describes the number and bounds of the individual buckets.
+		bounds: vector of double &optional;
+
+		## Describes the underlying metric type.
+		## Only set in the return value of
+		## :zeek:see:`Telemetry::collect_metrics` or
+		## :zeek:see:`Telemetry::collect_histogram_metrics`,
+		## otherwise ignored.
+		metric_type: MetricType &optional;
+	};
+
+	## Metrics returned by the :zeek:see:`Telemetry::collect_metrics` function.
+	type Metric: record {
+		## A :zeek:see:`Telemetry::MetricOpts` record describing this metric.
+		opts: MetricOpts;
+
+		## The label names (also called dimensions) of the metric. When
+		## instantiating or working with concrete metrics, corresponding
+		## label values have to be provided. Examples of a label might
+		## be the protocol a general observation applies to, the
+		## directionality in a traffic flow, or protocol-specific
+		## context like a particular message type.
+		label_names: vector of string &default=vector();
+
+		## The label values associated with this metric, if any.
+		label_values: vector of string &optional;
+
+		## The value of gauge or counter cast to a double
+		## independent of the underlying data type.
+		## This value is set for all counter and gauge metrics,
+		## it is unset for histograms.
+		value: double &optional;
+	};
+
+	## Histograms returned by the :zeek:see:`Telemetry::collect_histogram_metrics` function.
+	type HistogramMetric: record {
+		## A :zeek:see:`Telemetry::MetricOpts` record describing this histogram.
+		opts: MetricOpts;
+
+		## The label names (also called dimensions) of the metric. When
+		## instantiating or working with concrete metrics, corresponding
+		## label values have to be provided. Examples of a label might
+		## be the protocol a general observation applies to, the
+		## directionality in a traffic flow, or protocol-specific
+		## context like a particular message type.
+		label_names: vector of string &default=vector();
+
+		## The label values associated with this metric, if any.
+		label_values: vector of string &optional;
+
+		## Individual counters for each of the buckets as
+		## described by the *bounds* field in *opts*;
+		values: vector of double;
+
+		## The number of observations made for this histogram.
+		observations: double;
+
+		## The sum of all observations for this histogram.
+		sum: double;
+	};
+
+	## Telemetry sync hook.
+	##
+	## This hook is invoked when metrics are requested via functions
+	## :zeek:see:`Telemetry::collect_metrics` and :zeek:see:`Telemetry::collect_histogram_metrics`,
+	## or just before Zeek collects metrics when being scraped through
+	## its Prometheus endpoint.
+	## Script writers can use it to synchronize (or mirror) metrics with the
+	## telemetry subsystem. For example, when tracking table or value
+	## footprints with gauges, the value in question can be set on an actual
+	## :zeek:see:`Telemetry::Gauge` instance during execution of this hook.
+	##
+	## Implementations should be lightweight, this hook may be called
+	## multiple times per minute.
+	global sync: hook();
+
+	type MetricVector : vector of Metric;
+	type HistogramMetricVector : vector of HistogramMetric;
+
+	## Maximum amount of time for CivetWeb HTTP threads to
+	## wait for metric callbacks to complete on the IO loop.
+	const callback_timeout: interval = 5sec &redef;
+
+	## Number of CivetWeb threads to use.
+	const civetweb_threads: count = 2 &redef;
+}
+
+module IP;
+
+export {
+	## Mapping from IP protocol identifier values to string names.
+	const protocol_names: table[count] of string = {
+		[0] = "hopopt",
+		[1] = "icmp",
+		[2] = "igmp",
+		[3] = "ggp",
+		[4] = "ip-in-ip",
+		[5] = "st",
+		[6] = "tcp",
+		[7] = "cbt",
+		[8] = "egp",
+		[9] = "igp",
+		[10] = "bbc-rcc-mon",
+		[11] = "nvp-ii",
+		[12] = "pup",
+		[13] = "argus",
+		[14] = "emcon",
+		[15] = "xnet",
+		[16] = "chaos",
+		[17] = "udp",
+		[18] = "mux",
+		[19] = "dcn-meas",
+		[20] = "hmp",
+		[21] = "prm",
+		[22] = "xns-idp",
+		[23] = "trunk-1",
+		[24] = "trunk-2",
+		[25] = "leaf-1",
+		[26] = "leaf-2",
+		[27] = "rdp",
+		[28] = "irtp",
+		[29] = "iso-tp4",
+		[30] = "netblt",
+		[31] = "mfe-nsp",
+		[32] = "merit-inp",
+		[33] = "dccp",
+		[34] = "3pc",
+		[35] = "idpr",
+		[36] = "xtp",
+		[37] = "ddp",
+		[38] = "idpr-cmtp",
+		[39] = "tp++",
+		[40] = "il",
+		[41] = "ipv6",
+		[42] = "sdrp",
+		[43] = "ipv6-route",
+		[44] = "ipv6-frag",
+		[45] = "idrp",
+		[46] = "rsvp",
+		[47] = "gre",
+		[48] = "dsr",
+		[49] = "bna",
+		[50] = "esp",
+		[51] = "ah",
+		[52] = "i-nlsp",
+		[53] = "swipe",
+		[54] = "narp",
+		[55] = "mobile",
+		[56] = "tlsp",
+		[57] = "skip",
+		[58] = "ipv6-icmp",
+		[59] = "ipv6-nonxt",
+		[60] = "ipv6-opts",
+		[61] = "host-protocol",  # Any host internal protocol
+		[62] = "cftp",
+		[63] = "local-network",  # Any local network
+		[64] = "sat-expak",
+		[65] = "kryptolan",
+		[66] = "rvd",
+		[67] = "ippc",
+		[68] = "distributed-files",  # Any distributed file system
+		[69] = "sat-on",
+		[70] = "visa",
+		[71] = "ipcu",
+		[72] = "cpnx",
+		[73] = "cphb",
+		[74] = "wsn",
+		[75] = "pvp",
+		[76] = "br-sat-mon",
+		[77] = "sun-and",
+		[78] = "wb-mon",
+		[79] = "wb-expak",
+		[80] = "iso-ip",
+		[81] = "vmtp",
+		[82] = "secure-vmtp",
+		[83] = "vines",
+		[84] = "ttp or iptm",  # TTP was obsoleted in 3/2023, replaced with IGTM
+		[85] = "nsfnet-igp",
+		[86] = "dgp",
+		[87] = "tcf",
+		[88] = "eigrp",
+		[89] = "ospf",
+		[90] = "sprite-rpc",
+		[91] = "larp",
+		[92] = "mtp",
+		[93] = "ax.25",
+		[94] = "os",
+		[95] = "micp",
+		[96] = "scc-sp",
+		[97] = "etherip",
+		[98] = "encap",
+		[99] = "private-encryption",  # Any private encryption scheme
+		[100] = "gtmp",
+		[101] = "ifmp",
+		[102] = "pnni",
+		[103] = "pim",
+		[104] = "aris",
+		[105] = "scps",
+		[106] = "qnx",
+		[107] = "a/n",
+		[108] = "ipcomp",
+		[109] = "snp",
+		[110] = "compaq-peer",
+		[111] = "ipx-in-ip",
+		[112] = "vrrp",
+		[113] = "pgm",
+		[114] = "zero-hop", # Any 0-hop protocol
+		[115] = "l2tp",
+		[116] = "ddx",
+		[117] = "iatp",
+		[118] = "stp",
+		[119] = "srp",
+		[120] = "uti",
+		[121] = "smp",
+		[122] = "sm",
+		[123] = "ptp",
+		[124] = "is-is-over-ipv4",
+		[125] = "fire",
+		[126] = "crtp",
+		[127] = "crudp",
+		[128] = "sccopmce",
+		[129] = "iplt",
+		[130] = "sps",
+		[131] = "pipe",
+		[132] = "sctp",
+		[133] = "fc",
+		[134] = "rsvp-e2e-ignore",
+		[135] = "mobility-header",
+		[136] = "udplite",
+		[137] = "mpls-in-ip",
+		[138] = "manet",
+		[139] = "hip",
+		[140] = "shim6",
+		[141] = "wesp",
+		[142] = "rohc",
+		[143] = "ethernet",
+		[144] = "aggfrag",
+		[145] = "nsh",
+		[146] = "homa"
+	} &redef &default=function(c: count): string {
+		return fmt("unknown-ip-proto-%d", c);
+	};
+}
+
+module Storage;
+
+export {
+	## The interval used by the storage framework for automatic expiration
+	## of elements in all backends that don't support it natively, or if
+	## using expiration while reading pcap files.
+	const expire_interval = 15.0secs &redef;
+
+	## Common set of statuses that can be returned by storage operations. Backend plugins
+	## can add to this enum if custom values are needed.
+	type ReturnCode: enum {
+		## Operation succeeded.
+		SUCCESS,
+		## Type of value passed to operation does not match type of
+		## value passed when opening backend.
+		VAL_TYPE_MISMATCH,
+		## Type of key passed to operation does not match type of
+		## key passed when opening backend.
+		KEY_TYPE_MISMATCH,
+		## Backend is not connected.
+		NOT_CONNECTED,
+		## Operation timed out.
+		TIMEOUT,
+		## Connection to backed was lost unexpectedly.
+		CONNECTION_LOST,
+		## Generic operation failure.
+		OPERATION_FAILED,
+		## Key requested was not found in backend.
+		KEY_NOT_FOUND,
+		## Key requested for overwrite already exists.
+		KEY_EXISTS,
+		## Generic connection-setup failure. This is not if the connection
+		## was lost, but if it failed to be setup in the first place.
+		CONNECTION_FAILED,
+		## Generic disconnection failure.
+		DISCONNECTION_FAILED,
+		## Generic initialization failure.
+		INITIALIZATION_FAILED,
+		## Returned from async operations when the backend is waiting
+		## for a result.
+		IN_PROGRESS,
+	} &redef;
+
+	## Returned as the result of the various storage operations.
+	type OperationResult: record {
+		## One of a set of backend-redefinable return codes.
+		code: ReturnCode;
+		## An optional error string. This should be set when the
+		## ``code`` field is not set to ``SUCCESS``.
+		error_str: string &optional;
+		## An optional value for operations that can return data. ``get``
+		## operations uses this to return the value when a match was found
+		## for the key requested. ``open_backend`` uses this to return the
+		## backend handle on successful connections.
+		value: any &optional;
+	};
+}
+
+module ConnThreshold;
+
+export {
+	## Number of packets required to be observed on any IP-based session to
+	## trigger :zeek:id:`conn_generic_packet_threshold_crossed`. Note that the
+	## thresholds refers to the total number of packets transferred in both
+	## directions.
+	##
+	## .. zeek:see:: conn_generic_packet_threshold_crossed
+	const generic_packet_thresholds: set[count] = {} &redef;
+}
+
+module ZAM::Prof;
+
+export {
+	## Summarizes ZAM profiling information for a given module.
+	type Profile: record {
+		## How many compiled ZAM bodies are associated with the module.
+		## A value of 0 indicates either the module doesn't exist or ZAM
+		## itself was not activated.
+		num_bodies: count &default=0;
+
+		## Number of calls so far to ZAM bodies in the module.
+		num_calls: count &optional;
+
+		## How many ZAM instructions have executed so far on behalf of
+		## the module.
+		num_inst: count &default=0;
+
+		## The following two will only be present if a previous call to
+		## set_module_profiling() set CPU/memory profiling for the module.
+
+		## Estimated total (user) CPU time so far. Some ZAM bodies include
+		## code for multiple modules. For those, the contribution to the
+		## estimate is based on the ratio of the number of instructions
+		## associated with the module executed vs. total number of
+		## instructions executed for the given shared body. Note: you can
+		## adjust (somewhat) for bias in the measurements by subtracting
+		## "ZAM::Prof::estimated_profiling_overhead() * $num_calls".
+		CPU: interval &optional;
+
+		## Estimate of total memory used to date, in bytes. The number is
+		## only a rough estimate, and uses the same ratio for bodies shared
+		## across multiple modules as for CPU.
+		mem: count &optional;
+	};
+}
+
 module GLOBAL;
 
-## Seed for hashes computed internally for probabilistic data structures. Using
-## the same value here will make the hashes compatible between independent Zeek
-## instances. If left unset, Zeek will use a temporary local seed.
-const global_hash_seed: string = "" &redef;
-
-## Number of bits in UIDs that are generated to identify connections and
-## files.  The larger the value, the more confidence in UID uniqueness.
-## The maximum is currently 128 bits.
-const bits_per_uid: count = 96 &redef;
-
-## This salt value is used for several message digests in Zeek. We
-## use a salt to help mitigate the possibility of an attacker
-## manipulating source data to, e.g., mount complexity attacks or
-## cause ID collisions.
-## This salt is, for example, used by :zeek:see:`get_file_handle`
-## to generate installation-unique file IDs (the *id* field of :zeek:see:`fa_file`).
-const digest_salt = "Please change this value." &redef;
+@load base/bif/event.bif
 
 global done_with_network = F;
 event net_done(t: time)
-	{ done_with_network = T; }
+	{
+	done_with_network = T;
+	}
 
 # This sets up primary BIFs such that they can be used by any
 # further scripts within their global initializations and is intended to be
@@ -5493,3 +7158,7 @@ event net_done(t: time)
 @endif
 
 @load base/packet-protocols
+
+@if ( have_spicy() )
+@load base/frameworks/spicy/init-bare
+@endif

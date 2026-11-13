@@ -1,10 +1,10 @@
 
 %extern{
-	#include <math.h>
-	#define FRAC_16 pow(2,-16)
-	#define FRAC_32 pow(2,-32)
+	#include <cmath>
+	#define FRAC_16 std::pow(2,-16)
+	#define FRAC_32 std::pow(2,-32)
 	// NTP defines the epoch from 1900, not 1970
-	#define EPOCH_OFFSET -2208988800
+	constexpr double EPOCH_OFFSET = -2208988800;
 %}
 
 %header{
@@ -54,7 +54,7 @@
 		default:
 			{
 			const uint8* d = ${nsm.reference_id}.data();
-			rv->Assign(7, zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv4, (const uint32*) d, zeek::IPAddr::Network)));
+			rv->Assign(7, zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv4, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network)));
 			}
 			break;
 		}
@@ -130,10 +130,24 @@
 
 refine flow NTP_Flow += {
 
+	%member{
+		bool flipped_;
+	%}
+
+	%init{
+		flipped_ = false;
+	%}
 
 	function proc_ntp_message(msg: NTP_PDU): bool
 		%{
 		connection()->zeek_analyzer()->AnalyzerConfirmation();
+
+		// Flip roles for SERVER mode message from orig or a CLIENT mode message from resp.
+		if ( ((${msg.mode} == SERVER && is_orig()) || (${msg.mode} == CLIENT && ! is_orig())) && ! flipped_ )
+			{
+			connection()->zeek_analyzer()->Conn()->FlipRoles();
+			flipped_ = true;
+			}
 
 		if ( ! ntp_message )
 			return false;

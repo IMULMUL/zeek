@@ -1,17 +1,13 @@
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager-1 zeek %INPUT"
-# @TEST-EXEC: btest-bg-run worker-1  "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-1 zeek --pseudo-realtime -C -r $TRACES/smtp.trace %INPUT"
-# @TEST-EXEC: btest-bg-wait 45
-# @TEST-EXEC: btest-diff manager-1/openflow.log
-
-@TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1", $interface="eth0"],
-};
-@TEST-END-FILE
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# @TEST-EXEC: btest-bg-run manager  "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager  zeek %INPUT"
+# @TEST-EXEC: btest-bg-run worker-1 "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-1 zeek --pseudo-realtime -C -r $TRACES/smtp.pcap %INPUT"
+# @TEST-EXEC: btest-bg-wait 60
+# @TEST-EXEC: btest-diff manager/openflow.log
 
 redef Log::default_rotation_interval = 0secs;
 #redef exit_only_after_terminate = T;
@@ -74,4 +70,3 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 	{
 	schedule 2sec { terminate_me() };
 	}
-

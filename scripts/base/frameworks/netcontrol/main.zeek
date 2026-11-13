@@ -55,7 +55,7 @@ export {
 	##
 	## t: How long to whitelist it, with 0 being indefinitely.
 	##
-	## location: An optional string describing whitelist was triddered.
+	## location: An optional string describing whitelist was triggered.
 	##
 	## Returns: The id of the inserted rule on success and zero on failure.
 	global whitelist_address: function(a: addr, t: interval, location: string &default="") : string;
@@ -66,7 +66,7 @@ export {
 	##
 	## t: How long to whitelist it, with 0 being indefinitely.
 	##
-	## location: An optional string describing whitelist was triddered.
+	## location: An optional string describing whitelist was triggered.
 	##
 	## Returns: The id of the inserted rule on success and zero on failure.
 	global whitelist_subnet: function(s: subnet, t: interval, location: string &default="") : string;
@@ -167,7 +167,7 @@ export {
 	##
 	## For example, a search for 192.168.17.0/8 will reveal a rule that exists for
 	## 192.168.0.0/16, since this rule affects the subnet. However, it will not reveal
-	## a more specific rule for 192.168.17.1/32, which does not directy affect the whole
+	## a more specific rule for 192.168.17.1/32, which does not directly affect the whole
 	## subnet.
 	##
 	## This function works on both the manager and workers of a cluster. Note that on
@@ -261,6 +261,20 @@ export {
 	##
 	## r: The rule to be added.
 	global NetControl::rule_policy: hook(r: Rule);
+
+	## Hook that allows the modification of rule states after they are returned from
+	## the plugins and have been added to the rules database. This allows low-level
+	## modification of the handling of rules like, e.g., changing rule expiration depending
+	## on context.
+	##
+	## r: The rule now in place.
+	##
+	## p: The state for the plugin that put it into place.
+	##
+	## exists: If the adding plugin flagged the rule as already existing.
+	##
+	## msg: An optional informational message by the plugin.
+	global NetControl::rule_added_policy: hook(r: Rule, p: PluginState, exists: bool, msg: string);
 
 	##### Plugin functions
 
@@ -369,7 +383,7 @@ global rule_entities: table[Entity, RuleType] of Rule;
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(NetControl::LOG, [$columns=Info, $ev=log_netcontrol, $path="netcontrol", $policy=log_policy]);
+	Log::create_stream(NetControl::LOG, Log::Stream($columns=Info, $ev=log_netcontrol, $path="netcontrol", $policy=log_policy));
 	}
 
 function entity_to_info(info: Info, e: Entity)
@@ -475,22 +489,22 @@ function rule_to_info(info: Info, r: Rule)
 
 function log_msg(msg: string, p: PluginState)
 	{
-	Log::write(LOG, [$ts=network_time(), $category=MESSAGE, $msg=msg, $plugin=p$plugin$name(p)]);
+	Log::write(LOG, Info($ts=network_time(), $category=MESSAGE, $msg=msg, $plugin=p$plugin$name(p)));
 	}
 
 function log_error(msg: string, p: PluginState)
 	{
-	Log::write(LOG, [$ts=network_time(), $category=ERROR, $msg=msg, $plugin=p$plugin$name(p)]);
+	Log::write(LOG, Info($ts=network_time(), $category=ERROR, $msg=msg, $plugin=p$plugin$name(p)));
 	}
 
 function log_msg_no_plugin(msg: string)
 	{
-	Log::write(LOG, [$ts=network_time(), $category=MESSAGE, $msg=msg]);
+	Log::write(LOG, Info($ts=network_time(), $category=MESSAGE, $msg=msg));
 	}
 
 function log_rule(r: Rule, cmd: string, state: InfoState, p: PluginState, msg: string &default="")
 	{
-	local info: Info = [$ts=network_time()];
+	local info = Info($ts=network_time());
 	info$category = RULE;
 	info$cmd = cmd;
 	info$state = state;
@@ -505,14 +519,14 @@ function log_rule(r: Rule, cmd: string, state: InfoState, p: PluginState, msg: s
 
 function log_rule_error(r: Rule, msg: string, p: PluginState)
 	{
-	local info: Info = [$ts=network_time(), $category=ERROR, $msg=msg, $plugin=p$plugin$name(p)];
+	local info = Info($ts=network_time(), $category=ERROR, $msg=msg, $plugin=p$plugin$name(p));
 	rule_to_info(info, r);
 	Log::write(LOG, info);
 	}
 
 function log_rule_no_plugin(r: Rule, state: InfoState, msg: string)
 	{
-	local info: Info  = [$ts=network_time()];
+	local info  = Info($ts=network_time());
 	info$category = RULE;
 	info$state = state;
 	info$msg = msg;
@@ -524,16 +538,16 @@ function log_rule_no_plugin(r: Rule, state: InfoState, msg: string)
 
 function whitelist_address(a: addr, t: interval, location: string &default="") : string
 	{
-	local e: Entity = [$ty=ADDRESS, $ip=addr_to_subnet(a)];
-	local r: Rule = [$ty=WHITELIST, $priority=whitelist_priority, $target=FORWARD, $entity=e, $expire=t, $location=location];
+	local e = Entity($ty=ADDRESS, $ip=a as subnet);
+	local r = Rule($ty=WHITELIST, $priority=whitelist_priority, $target=FORWARD, $entity=e, $expire=t, $location=location);
 
 	return add_rule(r);
 	}
 
 function whitelist_subnet(s: subnet, t: interval, location: string &default="") : string
 	{
-	local e: Entity = [$ty=ADDRESS, $ip=s];
-	local r: Rule = [$ty=WHITELIST, $priority=whitelist_priority, $target=FORWARD, $entity=e, $expire=t, $location=location];
+	local e = Entity($ty=ADDRESS, $ip=s);
+	local r = Rule($ty=WHITELIST, $priority=whitelist_priority, $target=FORWARD, $entity=e, $expire=t, $location=location);
 
 	return add_rule(r);
 	}
@@ -542,13 +556,13 @@ function whitelist_subnet(s: subnet, t: interval, location: string &default="") 
 function redirect_flow(f: flow_id, out_port: count, t: interval, location: string &default="") : string
 	{
 	local flow = NetControl::Flow(
-		$src_h=addr_to_subnet(f$src_h),
+		$src_h=f$src_h as subnet,
 		$src_p=f$src_p,
-		$dst_h=addr_to_subnet(f$dst_h),
+		$dst_h=f$dst_h as subnet,
 		$dst_p=f$dst_p
 	);
-	local e: Entity = [$ty=FLOW, $flow=flow];
-	local r: Rule = [$ty=REDIRECT, $target=FORWARD, $entity=e, $expire=t, $location=location, $out_port=out_port];
+	local e = Entity($ty=FLOW, $flow=flow);
+	local r = Rule($ty=REDIRECT, $target=FORWARD, $entity=e, $expire=t, $location=location, $out_port=out_port);
 
 	return add_rule(r);
 	}
@@ -556,19 +570,19 @@ function redirect_flow(f: flow_id, out_port: count, t: interval, location: strin
 function quarantine_host(infected: addr, dns: addr, quarantine: addr, t: interval, location: string &default="") : vector of string
 	{
 	local orules: vector of string = vector();
-	local edrop: Entity = [$ty=FLOW, $flow=Flow($src_h=addr_to_subnet(infected))];
-	local rdrop: Rule = [$ty=DROP, $target=FORWARD, $entity=edrop, $expire=t, $location=location];
+	local edrop = Entity($ty=FLOW, $flow=Flow($src_h=infected as subnet));
+	local rdrop = Rule($ty=DROP, $target=FORWARD, $entity=edrop, $expire=t, $location=location);
 	orules += add_rule(rdrop);
 
-	local todnse: Entity = [$ty=FLOW, $flow=Flow($src_h=addr_to_subnet(infected), $dst_h=addr_to_subnet(dns), $dst_p=53/udp)];
+	local todnse = Entity($ty=FLOW, $flow=Flow($src_h=infected as subnet, $dst_h=dns as subnet, $dst_p=53/udp));
 	local todnsr = Rule($ty=MODIFY, $target=FORWARD, $entity=todnse, $expire=t, $location=location, $mod=FlowMod($dst_h=quarantine), $priority=+5);
 	orules += add_rule(todnsr);
 
-	local fromdnse: Entity = [$ty=FLOW, $flow=Flow($src_h=addr_to_subnet(dns), $src_p=53/udp, $dst_h=addr_to_subnet(infected))];
+	local fromdnse = Entity($ty=FLOW, $flow=Flow($src_h=dns as subnet, $src_p=53/udp, $dst_h=infected as subnet));
 	local fromdnsr = Rule($ty=MODIFY, $target=FORWARD, $entity=fromdnse, $expire=t, $location=location, $mod=FlowMod($src_h=dns), $priority=+5);
 	orules += add_rule(fromdnsr);
 
-	local wle: Entity = [$ty=FLOW, $flow=Flow($src_h=addr_to_subnet(infected), $dst_h=addr_to_subnet(quarantine), $dst_p=80/tcp)];
+	local wle = Entity($ty=FLOW, $flow=Flow($src_h=infected as subnet, $dst_h=quarantine as subnet, $dst_p=80/tcp));
 	local wlr = Rule($ty=WHITELIST, $target=FORWARD, $entity=wle, $expire=t, $location=location, $priority=+5);
 	orules += add_rule(wlr);
 
@@ -678,8 +692,8 @@ function add_subnet_entry(rule: Rule)
 		}
 	else if ( e$ty == CONNECTION )
 		{
-		add_one_subnet_entry(addr_to_subnet(e$conn$orig_h), rule);
-		add_one_subnet_entry(addr_to_subnet(e$conn$resp_h), rule);
+		add_one_subnet_entry(e$conn$orig_h as subnet, rule);
+		add_one_subnet_entry(e$conn$resp_h as subnet, rule);
 		}
 	else if ( e$ty == FLOW )
 		{
@@ -712,8 +726,8 @@ function remove_subnet_entry(rule: Rule)
 		}
 	else if ( e$ty == CONNECTION )
 		{
-		remove_one_subnet_entry(addr_to_subnet(e$conn$orig_h), rule);
-		remove_one_subnet_entry(addr_to_subnet(e$conn$resp_h), rule);
+		remove_one_subnet_entry(e$conn$orig_h as subnet, rule);
+		remove_one_subnet_entry(e$conn$resp_h as subnet, rule);
 		}
 	else if ( e$ty == FLOW )
 		{
@@ -748,7 +762,7 @@ function find_rules_subnet(sn: subnet) : vector of Rule
 
 function find_rules_addr(ip: addr) : vector of Rule
 	{
-	return find_rules_subnet(addr_to_subnet(ip));
+	return find_rules_subnet(ip as subnet);
 	}
 
 function add_rule_impl(rule: Rule) : string
@@ -889,7 +903,7 @@ function remove_rule_impl(id: string, reason: string) : bool
 	return success;
 	}
 
-function rule_expire_impl(r: Rule, p: PluginState) &priority=-5
+function rule_expire_impl(r: Rule, p: PluginState) &priority=-5 &is_used
 	{
 	# do not emit timeout events on shutdown
 	if ( zeek_is_terminating() )
@@ -904,7 +918,7 @@ function rule_expire_impl(r: Rule, p: PluginState) &priority=-5
 	if ( p$_id in rule$_no_expire_plugins )
 		{
 		# in this case - don't log anything, just remove the plugin from the rule
-		# and cleaup
+		# and cleanup
 		delete rule$_active_plugin_ids[p$_id];
 		delete rule$_no_expire_plugins[p$_id];
 		rule_cleanup(rule);
@@ -913,7 +927,7 @@ function rule_expire_impl(r: Rule, p: PluginState) &priority=-5
 		event NetControl::rule_timeout(r, FlowInfo(), p); # timeout implementation will handle the removal
 	}
 
-function rule_added_impl(r: Rule, p: PluginState, exists: bool, msg: string &default="")
+function rule_added_impl(r: Rule, p: PluginState, exists: bool, msg: string &default="") &is_used
 	{
 	if ( r$id !in rules )
 		{
@@ -945,9 +959,11 @@ function rule_added_impl(r: Rule, p: PluginState, exists: bool, msg: string &def
 		# rule was completely added.
 		rule$_added = T;
 		}
+
+	hook NetControl::rule_added_policy(rule, p, exists, msg);
 	}
 
-function rule_removed_impl(r: Rule, p: PluginState, msg: string &default="")
+function rule_removed_impl(r: Rule, p: PluginState, msg: string &default="") &is_used
 	{
 	if ( r$id !in rules )
 		{
@@ -973,7 +989,7 @@ function rule_removed_impl(r: Rule, p: PluginState, msg: string &default="")
 	rule_cleanup(rule);
 	}
 
-function rule_timeout_impl(r: Rule, i: FlowInfo, p: PluginState)
+function rule_timeout_impl(r: Rule, i: FlowInfo, p: PluginState) &is_used
 	{
 	if ( r$id !in rules )
 		{
@@ -1017,7 +1033,7 @@ function rule_timeout_impl(r: Rule, i: FlowInfo, p: PluginState)
 	rule_cleanup(rule);
 	}
 
-function rule_error_impl(r: Rule, p: PluginState, msg: string &default="")
+function rule_error_impl(r: Rule, p: PluginState, msg: string &default="") &is_used
 	{
 	if ( r$id !in rules )
 		{
@@ -1047,7 +1063,7 @@ function rule_error_impl(r: Rule, p: PluginState, msg: string &default="")
 	else
 		{
 		# error during insertion. Meh. If we are the only plugin, remove the rule again.
-		# Otherwhise - keep it, minus us.
+		# Otherwise - keep it, minus us.
 		delete rule$_plugin_ids[p$_id];
 		if ( |rule$_plugin_ids| == 0 )
 			{

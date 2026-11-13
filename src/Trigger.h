@@ -1,32 +1,46 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #pragma once
+
+#include "zeek/zeek-config.h"
 
 #include <list>
 #include <map>
 #include <vector>
 
+#include "zeek/ID.h"
 #include "zeek/IntrusivePtr.h"
 #include "zeek/Notifier.h"
 #include "zeek/Obj.h"
 #include "zeek/iosource/IOSource.h"
 #include "zeek/util.h"
 
-namespace zeek
-	{
+namespace zeek {
 
 class ODesc;
 class Val;
 
-namespace detail
-	{
+using ValPtr = IntrusivePtr<Val>;
+
+namespace telemetry {
+class Gauge;
+class Counter;
+using GaugePtr = std::shared_ptr<Gauge>;
+using CounterPtr = std::shared_ptr<Counter>;
+} // namespace telemetry
+
+namespace detail {
 
 class Frame;
 class Stmt;
 class Expr;
 class CallExpr;
 class ID;
+class WhenInfo;
 
-namespace trigger
-	{
+using StmtPtr = IntrusivePtr<Stmt>;
+
+namespace trigger {
 
 // Triggers are the heart of "when" statements: expressions that when
 // they become true execute a body of statements.
@@ -34,132 +48,156 @@ namespace trigger
 class TriggerTimer;
 class TriggerTraversalCallback;
 
-class Trigger final : public Obj, public notifier::detail::Receiver
-	{
+class Trigger final : public Obj, public notifier::detail::Receiver {
 public:
-	// Don't access Trigger objects; they take care of themselves after
-	// instantiation.  Note that if the condition is already true, the
-	// statements are executed immediately and the object is deleted
-	// right away.
-	Trigger(const Expr* cond, Stmt* body, Stmt* timeout_stmts, Expr* timeout, Frame* f,
-	        bool is_return, const Location* loc);
-	Trigger(const Expr* cond, Stmt* body, Stmt* timeout_stmts, double timeout, Frame* f,
-	        bool is_return, const Location* loc);
-	~Trigger() override;
+    // Use this constructor via make_intrusive<...>. The usual pattern is
+    // to then discard what's returned, i.e. "(void)make_intrusive<...>" -
+    // however, a valid pointer will be returned that can be used for
+    // subsequent method calls.
+    //
+    // The reason for this complexity is that if the trigger condition
+    // is true upon construction, after construction finishes there's
+    // no more to do and the object should be deleted (Unref()'d).
+    // If the condition is not true, then the constructor ensures that
+    // the object will be tracked via sufficient Ref()'ing for further
+    // processing and eventual deletion once the trigger is satisfied
+    // or times out.
+    //
+    // Note that this constructor differs from the deprecated one only
+    // in where the "timeout" parameter appears, and in making the "loc"
+    // parameter optional. ("loc" is only used for internal logging when
+    // debugging triggers.)
+    Trigger(const std::shared_ptr<WhenInfo>& wi, const IDSet& globals, std::vector<ValPtr> local_aggrs, double timeout,
+            Frame* f, const Location* loc = nullptr);
 
-	// Evaluates the condition. If true, executes the body and deletes
-	// the object deleted.
-	//
-	// Returns the state of condition.
-	bool Eval();
+    ~Trigger() override;
 
-	// Executes timeout code and deletes the object.
-	void Timeout();
+    // Evaluates the condition. If true, executes the body and deletes
+    // the object.
+    //
+    // Returns the state of condition.
+    bool Eval();
 
-	// Return the timeout interval (negative if none was specified).
-	double TimeoutValue() const { return timeout_value; }
+    // Executes timeout code and deletes the object.
+    void Timeout();
 
-	// Called if another entity needs to complete its operations first
-	// in any case before this trigger can proceed.
-	void Hold() { delayed = true; }
+    // Return the timeout interval (negative if none was specified).
+    double TimeoutValue() const { return timeout_value; }
 
-	// Complement of Hold().
-	void Release() { delayed = false; }
+    // Called if another entity needs to complete its operations first
+    // in any case before this trigger can proceed.
+    void Hold() { delayed = true; }
 
-	// If we evaluate to true, our return value will be passed on
-	// to the given trigger.  Note, automatically calls Hold().
-	void Attach(Trigger* trigger);
+    // Complement of Hold().
+    void Release() { delayed = false; }
 
-	// Cache for return values of delayed function calls.  Returns whether
-	// the trigger is queued for later evaluation -- it may not be queued
-	// if the Val is null or it's disabled.
-	bool Cache(const CallExpr* expr, Val* val);
-	Val* Lookup(const CallExpr*);
+    // If we evaluate to true, our return value will be passed on
+    // to the given trigger.  Note, automatically calls Hold().
+    void Attach(Trigger* trigger);
 
-	// Disable this trigger completely. Needed because Unref'ing the trigger
-	// may not immediately delete it as other references may still exist.
-	void Disable();
+    // Cache for return values of delayed function calls.  Returns whether
+    // the trigger is queued for later evaluation -- it may not be queued
+    // if the Val is null or it's disabled.  The cache is managed using
+    // void*'s so that the value can be associated with either a CallExpr
+    // (for interpreted execution) or a C++ function (for compiled-to-C++).
+    //
+    // Lookup() returned value must be Ref()'d if you want to hang onto it.
+    bool Cache(const void* obj, Val* val);
+    Val* Lookup(const void* obj);
 
-	bool Disabled() const { return disabled; }
+    // Disable this trigger completely. Needed because Unref'ing the trigger
+    // may not immediately delete it as other references may still exist.
+    void Disable();
 
-	void Describe(ODesc* d) const override;
+    bool Disabled() const { return disabled; }
 
-	// Overidden from Notifier.  We queue the trigger and evaluate it
-	// later to avoid race conditions.
-	void Modified(zeek::notifier::detail::Modifiable* m) override;
+    void Describe(ODesc* d) const override;
 
-	// Overridden from notifer::Receiver.  If we're still waiting
-	// on an ID/Val to be modified at termination time, we can't hope
-	// for any further progress to be made, so just Unref ourselves.
-	void Terminate() override;
+    // Overridden from Notifier.  We queue the trigger and evaluate it
+    // later to avoid race conditions.
+    void Modified(zeek::notifier::detail::Modifiable* m) override;
 
-	const char* Name() const;
+    // Overridden from notifier::Receiver.  If we're still waiting
+    // on an ID/Val to be modified at termination time, we can't hope
+    // for any further progress to be made, so just Unref ourselves.
+    void Terminate() override;
+
+    const char* Name() const { return name.c_str(); }
 
 private:
-	friend class TriggerTraversalCallback;
-	friend class TriggerTimer;
+    friend class TriggerTimer;
 
-	void Init(const Expr* cond, Stmt* body, Stmt* timeout_stmts, Frame* frame, bool is_return,
-	          const Location* location);
+    void ReInit(const std::vector<ValPtr>& index_expr_results);
 
-	void ReInit(std::vector<IntrusivePtr<Val>> index_expr_results);
+    void Register(const ID* id);
+    void Register(Val* val);
+    void UnregisterAll();
 
-	void Register(ID* id);
-	void Register(Val* val);
-	void UnregisterAll();
+    ExprPtr cond;
+    StmtPtr body;
+    StmtPtr timeout_stmts;
+    ExprPtr timeout;
+    double timeout_value;
+    Frame* frame;
+    bool is_return;
 
-	const Expr* cond;
-	Stmt* body;
-	Stmt* timeout_stmts;
-	Expr* timeout;
-	double timeout_value;
-	Frame* frame;
-	bool is_return;
-	const Location* location;
+    std::string name;
 
-	TriggerTimer* timer;
-	Trigger* attached;
+    TriggerTimer* timer;
+    Trigger* attached;
 
-	bool delayed; // true if a function call is currently being delayed
-	bool disabled;
+    bool delayed; // true if a function call is currently being delayed
+    bool disabled;
 
-	std::vector<std::pair<Obj*, notifier::detail::Modifiable*>> objs;
+    // Globals and locals present in the when expression.
+    IDSet globals;
+    IDSet locals; // not needed, present only for matching deprecated logic
 
-	using ValCache = std::map<const CallExpr*, Val*>;
-	ValCache cache;
-	};
+    // Tracks whether we've found the globals/locals, as the work only
+    // has to be done once.
+    bool have_trigger_elems = false;
 
-using TriggerPtr = IntrusivePtr<Trigger>;
+    // Aggregate values seen in locals used in the trigger condition,
+    // so we can detect changes in them that affect whether the condition
+    // holds.
+    std::vector<ValPtr> local_aggrs;
 
-class Manager final : public iosource::IOSource
-	{
+    std::vector<std::pair<Obj*, notifier::detail::Modifiable*>> objs;
+
+    using ValCache = std::map<const void*, Val*>;
+    ValCache cache;
+};
+
+class Manager final : public iosource::IOSource {
 public:
-	Manager();
-	~Manager();
+    Manager();
+    ~Manager() override;
 
-	double GetNextTimeout() override;
-	void Process() override;
-	const char* Tag() override { return "TriggerMgr"; }
+    void InitPostScript();
 
-	void Queue(Trigger* trigger);
+    double GetNextTimeout() override;
+    void Process() override;
+    const char* Tag() override { return "TriggerMgr"; }
 
-	struct Stats
-		{
-		unsigned long total;
-		unsigned long pending;
-		};
+    void Queue(Trigger* trigger);
 
-	void GetStats(Stats* stats);
+    struct Stats {
+        unsigned long total;
+        unsigned long pending;
+    };
+
+    void GetStats(Stats* stats);
 
 private:
-	using TriggerList = std::list<Trigger*>;
-	TriggerList* pending;
-	unsigned long total_triggers = 0;
-	};
+    using TriggerList = std::list<Trigger*>;
+    TriggerList* pending;
+    telemetry::CounterPtr trigger_count;
+    telemetry::GaugePtr trigger_pending;
+};
 
-	} // namespace trigger
+} // namespace trigger
 
-extern trigger::Manager* trigger_mgr;
+ZEEK_EXTERN_DATA trigger::Manager* trigger_mgr;
 
-	} // namespace detail
-	} // namespace zeek
+} // namespace detail
+} // namespace zeek

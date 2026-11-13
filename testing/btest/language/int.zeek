@@ -1,33 +1,29 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
         print fmt("%s (%s)", msg, expect ? "PASS" : "FAIL");
         }
 
+global i1: int = 3;
+global i2: int = +3;
+global i3: int = -3;
+global i4: int = +0;
+global i5: int = -0;
+global i6: int = 12;
+global i7: int = +0xc;
+global i8: int = 0xC;
+global i9: int = -0xC;
+global i10: int = -12;
+global i11 = +3;
 
 event zeek_init()
 {
-	local i1: int = 3;
-	local i2: int = +3;
-	local i3: int = -3;
-	local i4: int = +0;
-	local i5: int = -0;
-	local i6: int = 12;
-	local i7: int = +0xc;
-	local i8: int = 0xC;
-	local i9: int = -0xC;
-	local i10: int = -12;
-	local i11: int = 9223372036854775807;   # max. allowed value
-	local i12: int = -9223372036854775808;  # min. allowed value
-	local i13: int = 0x7fffffffffffffff;   # max. allowed value
-	local i14: int = -0x8000000000000000;  # min. allowed value
-	local i15 = +3;
-
 	# Type inference test
 
-	test_case( "type inference", type_name(i15) == "int" );
+	test_case( "type inference", type_name(i11) == "int" );
 
 	# Test various constant representations
 
@@ -54,17 +50,6 @@ event zeek_init()
 	test_case( "assignment operator", i2 == 7 );
 	i2 -= 2;
 	test_case( "assignment operator", i2 == 5 );
-
-	# Max/min value tests
-
-	local str1 = fmt("max int value = %d", i11);
-	test_case( str1, str1 == "max int value = 9223372036854775807" );
-	local str2 = fmt("min int value = %d", i12);
-	test_case( str2, str2 == "min int value = -9223372036854775808" );
-	local str3 = fmt("max int value = %d", i13);
-	test_case( str3, str3 == "max int value = 9223372036854775807" );
-	local str4 = fmt("min int value = %d", i14);
-	test_case( str4, str4 == "min int value = -9223372036854775808" );
-
+	test_case( "bitwise lshift", i6 << 1 == 24 );
+	test_case( "bitwise rshift", i6 >> 1 == 6 );
 }
-

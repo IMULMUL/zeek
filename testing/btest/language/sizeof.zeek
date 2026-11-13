@@ -1,5 +1,6 @@
-# @TEST-EXEC: zeek -b %INPUT  >output 2>&1
+# @TEST-EXEC: zeek -b %INPUT  >output
 # @TEST-EXEC: btest-diff output
+# @TEST-EXEC: btest-diff-remove-abspath .stderr
 
 # Demo policy for the sizeof operator "|x|".
 # ------------------------------------------
@@ -19,6 +20,14 @@ type example_record: record {
 	k: int &optional;
 };
 
+type example_record_with_enum: record {
+	e: count &default = |ENUM3|;
+} &redef;
+
+type example_record_with_port: record {
+	p: count &default = |80/tcp|;
+} &redef;
+
 global a:  addr = 1.2.3.4;
 global a6: addr = [::1];
 global b:  bool = T;
@@ -35,6 +44,8 @@ global sn: subnet = 192.168.0.0/24;
 global t:  table[string] of string;
 global ti: time = current_time();
 global v:  vector of string;
+global with_enum: example_record_with_enum;
+global with_port: example_record_with_port;
 
 # Additional initialization
 #
@@ -68,7 +79,7 @@ print fmt("Count %s: %d", c, |c|);
 # type, so this wraps to a very large number.  It may be more intuitive if it
 # were to coerce to a signed integer, but it can also be more favorable to
 # simply have consistent behavior across arbitrary arithmetic expressions even
-# if that may result in occassional, unintended overflow/wrapping.
+# if that may result in occasional, unintended overflow/wrapping.
 print fmt("Expr: %d", |5 - 9|);
 # Same arithmetic on signed integers is likely what's originally intended.
 print fmt("Signed Expr: %d", |+5 - +9|);
@@ -78,6 +89,9 @@ print fmt("Double %s: %f", d, |d|);
 
 # Size of enum: returns numeric value of enum constant.
 print fmt("Enum %s: %d", ENUM3, |ENUM3|);
+
+# Within a record, enum sizeof should still be ok
+print fmt("Enum in record: %d %d", with_enum$e, |with_enum$e|);
 
 # Size of file: returns current file size.
 # Note that this is a double so that file sizes >> 4GB
@@ -96,12 +110,15 @@ print fmt("Interval %s: %f", iv, |iv|);
 # Size of port: returns port number as a count.
 print fmt("Port %s: %d", p, |p|);
 
+# Within a record, port sizeof should still be ok
+print fmt("Port in record: %d %d", with_port$p, |with_port$p|);
+
 # Size of record: returns number of fields (assigned + unassigned)
 print fmt("Record %s: %d", r, |r|);
 
 # Size of set: returns number of elements in set.
 # Don't print the set, as its order depends on the seeding of the hash
-# fnction, and it's not worth the trouble to normalize it.
+# function, and it's not worth the trouble to normalize it.
 print fmt("Set: %d", |si|);
 
 # Size of string: returns string length.

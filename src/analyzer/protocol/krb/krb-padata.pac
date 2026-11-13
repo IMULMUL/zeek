@@ -7,24 +7,31 @@
 %}
 
 %header{
-zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnalyzer zeek_analyzer, bool is_error);
+zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnalyzer zeek_analyzer);
 %}
 
 %code{
-zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnalyzer zeek_analyzer, bool is_error)
+
+zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnalyzer zeek_analyzer)
 {
 	auto vv = zeek::make_intrusive<zeek::VectorVal>(zeek::id::find_type<zeek::VectorType>("KRB::Type_Value_Vector"));
 
 	if ( ! data->data()->has_padata() )
 		return vv;
 
-	for ( uint i = 0; i < data->data()->padata_elems()->size(); ++i)
+	for ( KRB_PA_Data* element : *(data->data()->padata_elems()) )
 		{
-		KRB_PA_Data* element = (*data->data()->padata_elems())[i];
 		uint64_t data_type = element->data_type();
 
-		if ( is_error && ( data_type == PA_PW_AS_REQ || data_type == PA_PW_AS_REP ) )
-			data_type = 0;
+		// Do not try to parse errors, just send the placeholder data along.
+		if ( element->pkt_type() == KRB_ERROR )
+			{
+			auto type_val = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::KRB::Type_Value);
+			type_val->Assign(0, element->data_type());
+			type_val->Assign(1, to_stringval(element->pa_data_placeholder()));
+			vv->Assign(vv->Size(), type_val);
+			continue;
+			}
 
 		switch( data_type )
 			{
@@ -32,8 +39,13 @@ zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnaly
 				// will be generated as separate event
 				break;
 			case PA_ENC_TIMESTAMP:
-				// encrypted timestamp is unreadable
+				{
+				auto type_val = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::KRB::Type_Value);
+				type_val->Assign(0, data_type);
+				type_val->Assign(1, to_stringval(element->pa_data_element()->pa_enc_ts()->ciphertext()->encoding()->content()));
+				vv->Assign(vv->Size(), std::move(type_val));
 				break;
+				}
 			case PA_PW_SALT:
 				{
 				auto type_val = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::KRB::Type_Value);
@@ -110,7 +122,7 @@ zeek::VectorValPtr proc_padata(const KRB_PA_Data_Sequence* data, const ZeekAnaly
 				}
 			default:
 				{
-				if ( ! is_error && element->pa_data_element()->unknown()->meta()->length() > 0 )
+				if ( element->pa_data_element()->unknown()->meta()->length() > 0 )
 					{
 					auto type_val = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::KRB::Type_Value);
 					type_val->Assign(0, data_type);
@@ -161,7 +173,7 @@ type KRB_PA_Data_Sequence(is_orig: bool, pkt_type: uint8) = record {
 #
 # Note: This is a separate type due to a BinPAC bug.
 type KRB_PA_Data_Container(is_orig: bool, pkt_type: uint8, tag: uint8, length: uint64) = case tag of {
-	ASN1_SEQUENCE_TAG	-> padata_elems	: KRB_PA_Data(is_orig, pkt_type)[];
+	ASN1_SEQUENCE_TAG	-> padata_elems	: KRB_PA_Data(is_orig, pkt_type)[] &until($input.length() == 0) &until($context.connection.check_pa_data_index($element.index));
 	default 		-> unknown	: bytestring &length=length;
 } &let {
 	has_padata: bool = (tag == ASN1_SEQUENCE_TAG);
@@ -180,11 +192,13 @@ type KRB_PA_Data(is_orig: bool, pkt_type: uint8) = record {
 	} &requires(data_type);
 } &let {
 	data_type: int64 = binary_to_int64(pa_data_type.data.content);
+    index: uint64 = $context.connection.next_pa_data_index();
 };
 
 # Each pre-auth element
 type KRB_PA_Data_Element(is_orig: bool, type: int64, length: uint64) = case type of {
 	PA_TGS_REQ       -> pa_tgs_req	: KRB_PA_AP_REQ_wrapper(is_orig);
+	PA_ENC_TIMESTAMP -> pa_enc_ts   : KRB_Encrypted_Data &length=length;
 	PA_PW_SALT       -> pa_pw_salt	: ASN1OctetString;
 	PA_PW_AS_REQ	   -> pa_pk_as_req	: KRB_PA_PK_AS_Req &length=length;
 	PA_PW_AS_REP	   -> pa_pk_as_rep	: KRB_PA_PK_AS_Rep &length=length;
@@ -198,7 +212,7 @@ type KRB_PA_AP_REQ_wrapper(is_orig: bool) = record {
 	# here for pre-auth ap-req messages.
 	some_meta1 : ASN1EncodingMeta;
 	some_meta2 : ASN1EncodingMeta;
-	req        : KRB_AP_REQ(is_orig);
+	req        : KRB_AP_REQ(is_orig, true);
 };
 
 # The PKINIT certificate structure for a request

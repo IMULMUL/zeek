@@ -1,11 +1,11 @@
 # @TEST-EXEC: zeek -b valid.zeek >valid.out
 # @TEST-EXEC: btest-diff valid.out
 # @TEST-EXEC-FAIL: zeek -b invalid.zeek > invalid.out 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff invalid.out
+# @TEST-EXEC: btest-diff-remove-abspath invalid.out
 
 # hook functions must be called using the "hook" keyword as an operator...
 
-@TEST-START-FILE valid.zeek
+# @TEST-START-FILE valid.zeek
 hook myhook(i: count)
     {
     print "myhook()", i;
@@ -57,9 +57,9 @@ event zeek_init()
 	print hook t[0](3);
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE invalid.zeek
+# @TEST-START-FILE invalid.zeek
 hook myhook(i: count)
 	{
 	print "myhook()", i;
@@ -85,4 +85,4 @@ event zeek_init()
 	print "done";
 	hook foo();
 	}
-@TEST-END-FILE
+# @TEST-END-FILE

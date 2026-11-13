@@ -4,10 +4,8 @@
 
 #include <sys/types.h>
 #include <string>
-#include <tuple>
-#include <type_traits>
 
-#include "zeek/Dict.h"
+#include "zeek/ConnKey.h"
 #include "zeek/IPAddr.h"
 #include "zeek/IntrusivePtr.h"
 #include "zeek/Rule.h"
@@ -20,8 +18,7 @@
 #include "zeek/iosource/Packet.h"
 #include "zeek/session/Session.h"
 
-namespace zeek
-	{
+namespace zeek {
 
 class Connection;
 class EncapsulationStack;
@@ -31,259 +28,216 @@ class RecordVal;
 using ValPtr = IntrusivePtr<Val>;
 using RecordValPtr = IntrusivePtr<RecordVal>;
 
-namespace session
-	{
-class Manager;
-	}
-namespace detail
-	{
+class IPBasedConnKey;
+using IPBasedConnKeyPtr = std::unique_ptr<IPBasedConnKey>;
+
+namespace detail {
 
 class Specific_RE_Matcher;
 class RuleEndpointState;
 class RuleHdrTest;
 
-	} // namespace detail
+} // namespace detail
 
-namespace analyzer
-	{
+namespace analyzer {
 class Analyzer;
-	}
-namespace packet_analysis::IP
-	{
+}
+namespace packet_analysis::IP {
 class SessionAdapter;
-	}
+}
 
-enum ConnEventToFlag
-	{
-	NUL_IN_LINE,
-	SINGULAR_CR,
-	SINGULAR_LF,
-	NUM_EVENTS_TO_FLAG,
-	};
+enum ConnEventToFlag : uint8_t {
+    NUL_IN_LINE,
+    SINGULAR_CR,
+    SINGULAR_LF,
+    NUM_EVENTS_TO_FLAG,
+};
 
-struct ConnTuple
-	{
-	IPAddr src_addr;
-	IPAddr dst_addr;
-	uint32_t src_port;
-	uint32_t dst_port;
-	bool is_one_way; // if true, don't canonicalize order
-	TransportProto proto;
-	};
+static inline int addr_port_canon_lt(const IPAddr& addr1, uint32_t p1, const IPAddr& addr2, uint32_t p2) {
+    return addr1 < addr2 || (addr1 == addr2 && p1 < p2);
+}
 
-using ConnID [[deprecated("Remove in v5.1. Use zeek::ConnTuple.")]] = ConnTuple;
-
-static inline int addr_port_canon_lt(const IPAddr& addr1, uint32_t p1, const IPAddr& addr2,
-                                     uint32_t p2)
-	{
-	return addr1 < addr2 || (addr1 == addr2 && p1 < p2);
-	}
-
-class Connection final : public session::Session
-	{
+class Connection final : public session::Session {
 public:
-	Connection(const detail::ConnKey& k, double t, const ConnTuple* id, uint32_t flow,
-	           const Packet* pkt);
-	~Connection() override;
+    Connection(zeek::IPBasedConnKeyPtr k, double t, uint32_t flow, const Packet* pkt);
 
-	/**
-	 * Invoked when an encapsulation is discovered. It records the encapsulation
-	 * with the connection and raises a "tunnel_changed" event if it's different
-	 * from the previous encapsulation or if it's the first one encountered.
-	 *
-	 * @param encap The new encapsulation. Can be set to null to indicated no
-	 * encapsulation or clear an old one.
-	 */
-	void CheckEncapsulation(const std::shared_ptr<EncapsulationStack>& encap);
+    ~Connection() override;
 
-	/**
-	 * Invoked when the session is about to be removed. Use Ref(this)
-	 * inside Done to keep the session object around, though it'll
-	 * no longer be accessible from the SessionManager.
-	 */
-	void Done() override;
+    /**
+     * Invoked when an encapsulation is discovered. It records the encapsulation
+     * with the connection and raises a "tunnel_changed" event if it's different
+     * from the previous encapsulation or if it's the first one encountered.
+     *
+     * @param encap The new encapsulation. Can be set to null to indicated no
+     * encapsulation or clear an old one.
+     */
+    void CheckEncapsulation(const std::shared_ptr<EncapsulationStack>& encap);
 
-	// Process the connection's next packet.  "data" points just
-	// beyond the IP header.  It's updated to point just beyond
-	// the transport header (or whatever should be saved, if we
-	// decide not to save the full packet contents).
-	//
-	// If record_packet is true, the packet should be recorded.
-	// If record_content is true, then its entire contents should
-	// be recorded, otherwise just up through the transport header.
-	// Both are assumed set to true when called.
-	void NextPacket(double t, bool is_orig, const IP_Hdr* ip, int len, int caplen,
-	                const u_char*& data, int& record_packet, int& record_content,
-	                // arguments for reproducing packets
-	                const Packet* pkt);
+    /**
+     * Invoked when the session is about to be removed. Use Ref(this)
+     * inside Done to keep the session object around, though it'll
+     * no longer be accessible from the SessionManager.
+     */
+    void Done() override;
 
-	// Keys are only considered valid for a connection when a
-	// connection is in the session map. If it is removed, the key
-	// should be marked invalid.
-	const detail::ConnKey& Key() const { return key; }
-	session::detail::Key SessionKey(bool copy) const override
-		{
-		return session::detail::Key{&key, sizeof(key), session::detail::Key::CONNECTION_KEY_TYPE,
-		                            copy};
-		}
+    // Process the connection's next packet.  "data" points just
+    // beyond the IP header.  It's updated to point just beyond
+    // the transport header (or whatever should be saved, if we
+    // decide not to save the full packet contents).
+    //
+    // If record_packet is true, the packet should be recorded.
+    // If record_content is true, then its entire contents should
+    // be recorded, otherwise just up through the transport header.
+    // Both are assumed set to true when called.
+    void NextPacket(double t, bool is_orig, const IP_Hdr* ip, int len, int caplen, const u_char*& data,
+                    int& record_packet, int& record_content,
+                    // arguments for reproducing packets
+                    const Packet* pkt);
 
-	const IPAddr& OrigAddr() const { return orig_addr; }
-	const IPAddr& RespAddr() const { return resp_addr; }
+    // Keys are only considered valid for a connection when a
+    // connection is in the session map. If it is removed, the key
+    // should be marked invalid.
+    //
+    // These touch the key, which we forward-declared above. Therefore this
+    // hides the implementation, which has the full class definition.
+    const ConnKey& Key() const;
+    session::detail::Key SessionKey(bool copy) const override;
+    uint8_t KeyProto() const;
 
-	uint32_t OrigPort() const { return orig_port; }
-	uint32_t RespPort() const { return resp_port; }
+    const IPAddr& OrigAddr() const { return orig_addr; }
+    const IPAddr& RespAddr() const { return resp_addr; }
 
-	void FlipRoles();
+    uint32_t OrigPort() const { return orig_port; }
+    uint32_t RespPort() const { return resp_port; }
 
-	analyzer::Analyzer* FindAnalyzer(analyzer::ID id);
-	analyzer::Analyzer* FindAnalyzer(const zeek::Tag& tag); // find first in tree.
-	analyzer::Analyzer* FindAnalyzer(const char* name); // find first in tree.
+    void FlipRoles();
 
-	TransportProto ConnTransport() const { return proto; }
-	std::string TransportIdentifier() const override
-		{
-		if ( proto == TRANSPORT_TCP )
-			return "tcp";
-		else if ( proto == TRANSPORT_UDP )
-			return "udp";
-		else if ( proto == TRANSPORT_ICMP )
-			return "icmp";
-		else
-			return "unknown";
-		}
+    analyzer::Analyzer* FindAnalyzer(analyzer::ID id);
+    analyzer::Analyzer* FindAnalyzer(const zeek::Tag& tag); // find first in tree.
+    analyzer::Analyzer* FindAnalyzer(const char* name);     // find first in tree.
 
-	// Returns true if the packet reflects a reuse of this
-	// connection (i.e., not a continuation but the beginning of
-	// a new connection).
-	bool IsReuse(double t, const u_char* pkt);
+    TransportProto ConnTransport() const { return proto; }
+    std::string TransportIdentifier() const override {
+        if ( proto == TRANSPORT_TCP )
+            return "tcp";
+        else if ( proto == TRANSPORT_UDP )
+            return "udp";
+        else if ( proto == TRANSPORT_ICMP )
+            return "icmp";
+        else
+            return "unknown";
+    }
 
-	/**
-	 * Returns the associated "connection" record.
-	 */
-	const RecordValPtr& GetVal() override;
+    // Returns true if the packet reflects a reuse of this
+    // connection (i.e., not a continuation but the beginning of
+    // a new connection).
+    bool IsReuse(double t, const u_char* pkt);
 
-	/**
-	 * Append additional entries to the history field in the connection record.
-	 */
-	void AppendAddl(const char* str);
+    /**
+     * Returns the associated "connection" record.
+     */
+    const RecordValPtr& GetVal() override;
 
-	void Match(detail::Rule::PatternType type, const u_char* data, int len, bool is_orig, bool bol,
-	           bool eol, bool clear_state);
+    void Match(detail::Rule::PatternType type, const u_char* data, int len, bool is_orig, bool bol, bool eol,
+               bool clear_state);
 
-	/**
-	 * Generates connection removal event(s).
-	 */
-	void RemovalEvent() override;
+    /**
+     * Generates connection removal event(s).
+     */
+    void RemovalEvent() override;
 
-	void Weird(const char* name, const char* addl = "", const char* source = "");
-	bool DidWeird() const { return weird != 0; }
+    void Weird(const char* name, const char* addl = "", const char* source = "");
+    bool DidWeird() const { return weird; }
 
-	inline bool FlagEvent(ConnEventToFlag e)
-		{
-		if ( e >= 0 && e < NUM_EVENTS_TO_FLAG )
-			{
-			if ( suppress_event & (1 << e) )
-				return false;
-			suppress_event |= 1 << e;
-			}
+    void LimitReachedWeird(const char* name, size_t limit, size_t limit_max = 0, const char* source = "");
 
-		return true;
-		}
+    inline bool FlagEvent(ConnEventToFlag e) {
+        if ( e >= 0 && e < NUM_EVENTS_TO_FLAG ) {
+            if ( suppress_event & (1 << e) )
+                return false;
+            suppress_event |= 1 << e;
+        }
 
-	void Describe(ODesc* d) const override;
-	void IDString(ODesc* d) const;
+        return true;
+    }
 
-	// Statistics.
+    void Describe(ODesc* d) const override;
+    void IDString(ODesc* d) const;
 
-	// Just a lower bound.
-	[[deprecated("Remove in v5.1. MemoryAllocation() is deprecated and will be removed. See "
-	             "GHI-572.")]] unsigned int
-	MemoryAllocation() const override;
-	[[deprecated("Remove in v5.1. MemoryAllocation() is deprecated and will be removed. See "
-	             "GHI-572.")]] unsigned int
-	MemoryAllocationVal() const override;
+    // Statistics.
 
-	static uint64_t TotalConnections() { return total_connections; }
-	static uint64_t CurrentConnections() { return current_connections; }
+    static uint64_t TotalConnections() { return total_connections; }
+    static uint64_t CurrentConnections() { return current_connections; }
 
-	// Returns true if the history was already seen, false otherwise.
-	bool CheckHistory(uint32_t mask, char code)
-		{
-		if ( (hist_seen & mask) == 0 )
-			{
-			hist_seen |= mask;
-			AddHistory(code);
-			return false;
-			}
-		else
-			return true;
-		}
+    // Sets the root of the analyzer tree as well as the primary PIA.
+    void SetSessionAdapter(packet_analysis::IP::SessionAdapter* aa, analyzer::pia::PIA* pia);
+    packet_analysis::IP::SessionAdapter* GetSessionAdapter() { return adapter; }
+    analyzer::pia::PIA* GetPrimaryPIA() { return primary_PIA; }
 
-	// Increments the passed counter and adds it as a history
-	// code if it has crossed the next scaling threshold.  Scaling
-	// is done in terms of powers of the third argument.
-	// Returns true if the threshold was crossed, false otherwise.
-	bool ScaledHistoryEntry(char code, uint32_t& counter, uint32_t& scaling_threshold,
-	                        uint32_t scaling_base = 10);
+    // Sets the transport protocol in use.
+    void SetTransport(TransportProto arg_proto) { proto = arg_proto; }
 
-	void HistoryThresholdEvent(EventHandlerPtr e, bool is_orig, uint32_t threshold);
+    void SetUID(const UID& arg_uid) { uid = arg_uid; }
 
-	void AddHistory(char code) { history += code; }
+    UID GetUID() const { return uid; }
 
-	// Sets the root of the analyzer tree as well as the primary PIA.
-	void SetSessionAdapter(packet_analysis::IP::SessionAdapter* aa, analyzer::pia::PIA* pia);
-	packet_analysis::IP::SessionAdapter* GetSessionAdapter() { return adapter; }
-	analyzer::pia::PIA* GetPrimaryPIA() { return primary_PIA; }
+    std::shared_ptr<EncapsulationStack> GetEncapsulation() const { return encapsulation; }
 
-	// Sets the transport protocol in use.
-	void SetTransport(TransportProto arg_proto) { proto = arg_proto; }
+    void CheckFlowLabel(bool is_orig, uint32_t flow_label);
 
-	void SetUID(const UID& arg_uid) { uid = arg_uid; }
+    uint32_t GetOrigFlowLabel() { return orig_flow_label; }
+    uint32_t GetRespFlowLabel() { return resp_flow_label; }
 
-	UID GetUID() const { return uid; }
+    bool PermitWeird(const char* name, uint64_t threshold, uint64_t rate, double duration);
 
-	std::shared_ptr<EncapsulationStack> GetEncapsulation() const { return encapsulation; }
+    // Returns true once Done() is called.
+    bool IsFinished() { return finished; }
 
-	void CheckFlowLabel(bool is_orig, uint32_t flow_label);
-
-	uint32_t GetOrigFlowLabel() { return orig_flow_label; }
-	uint32_t GetRespFlowLabel() { return resp_flow_label; }
-
-	bool PermitWeird(const char* name, uint64_t threshold, uint64_t rate, double duration);
+    // Runs after all scripts have been parsed.
+    static void InitPostScript();
 
 private:
-	friend class session::detail::Timer;
+    friend class session::detail::Timer;
 
-	IPAddr orig_addr;
-	IPAddr resp_addr;
-	uint32_t orig_port, resp_port; // in network order
-	TransportProto proto;
-	uint32_t orig_flow_label, resp_flow_label; // most recent IPv6 flow labels
-	uint32_t vlan, inner_vlan; // VLAN this connection traverses, if available
-	u_char orig_l2_addr[Packet::L2_ADDR_LEN]; // Link-layer originator address, if available
-	u_char resp_l2_addr[Packet::L2_ADDR_LEN]; // Link-layer responder address, if available
-	int suppress_event; // suppress certain events to once per conn.
-	RecordValPtr conn_val;
-	std::shared_ptr<EncapsulationStack> encapsulation; // tunnels
+    IPAddr orig_addr;
+    IPAddr resp_addr;
+    uint32_t orig_port, resp_port;             // in network order
+    uint32_t orig_flow_label, resp_flow_label; // most recent IPv6 flow labels
+    std::optional<uint16_t> vlan, inner_vlan;  // VLAN this connection traverses, if available
+    u_char orig_l2_addr[Packet::L2_ADDR_LEN];  // Link-layer originator address, if available
+    u_char resp_l2_addr[Packet::L2_ADDR_LEN];  // Link-layer responder address, if available
+    int suppress_event;                        // suppress certain events to once per conn.
+    RecordValPtr conn_val;
+    std::shared_ptr<EncapsulationStack> encapsulation; // tunnels
 
-	detail::ConnKey key;
+    IPBasedConnKeyPtr key;
 
-	unsigned int weird : 1;
-	unsigned int finished : 1;
-	unsigned int saw_first_orig_packet : 1, saw_first_resp_packet : 1;
+    TransportProto proto;
+    uint8_t tunnel_changes = 0;
+    bool weird;
+    bool finished;
+    bool saw_first_orig_packet;
+    bool saw_first_resp_packet;
 
-	uint32_t hist_seen;
-	std::string history;
+    packet_analysis::IP::SessionAdapter* adapter;
+    analyzer::pia::PIA* primary_PIA;
 
-	packet_analysis::IP::SessionAdapter* adapter;
-	analyzer::pia::PIA* primary_PIA;
+    UID uid; // Globally unique connection ID.
+    std::unique_ptr<detail::WeirdStateMap> weird_state;
 
-	UID uid; // Globally unique connection ID.
-	detail::WeirdStateMap weird_state;
+    // Count number of connections.
+    static uint64_t total_connections;
+    static uint64_t current_connections;
 
-	// Count number of connections.
-	static uint64_t total_connections;
-	static uint64_t current_connections;
-	};
+    // When the conn_id_ctx record type has no fields,
+    // this holds a singleton record value for it that
+    // is shared among all conn_id record values.
+    static RecordValPtr conn_id_ctx_singleton;
+};
 
-	} // namespace zeek
+// The following is used by script optimization.
+namespace detail {
+extern RecordValPtr build_dummy_conn_record();
+}
+
+} // namespace zeek

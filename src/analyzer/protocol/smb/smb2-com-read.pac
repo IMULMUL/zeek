@@ -34,6 +34,17 @@ refine connection SMB_Conn += {
 			                                    ${val.read_len});
 			}
 
+		if ( zeek::BifConst::SMB::max_pending_messages > 0 &&
+		     (smb2_read_offsets.size() >= zeek::BifConst::SMB::max_pending_messages ||
+		      smb2_read_fids.size() >= zeek::BifConst::SMB::max_pending_messages) )
+			{
+			if ( smb2_discarded_messages_state )
+				zeek::BifEvent::enqueue_smb2_discarded_messages_state(zeek_analyzer(), zeek_analyzer()->Conn(),
+				                                                      zeek::make_intrusive<zeek::StringVal>("read"));
+			smb2_read_offsets.clear();
+			smb2_read_fids.clear();
+			}
+
 		smb2_read_offsets[${h.message_id}] = ${val.offset};
 		smb2_read_fids[${h.message_id}] = ${val.file_id.persistent} + ${val.file_id._volatile};
 
@@ -82,10 +93,11 @@ type SMB2_read_request(header: SMB2_Header) = record {
 
 type SMB2_read_response(header: SMB2_Header) = record {
 	structure_size    : uint16;
-	data_offset       : uint16;
+	data_offset       : uint8;
+	reserved1         : uint8;
 	data_len          : uint32;
 	data_remaining    : uint32;
-	reserved          : uint32;
+	reserved2         : uint32;
 	pad               : padding to data_offset - header.head_length;
 	data              : bytestring &length=data_len;
 } &let {

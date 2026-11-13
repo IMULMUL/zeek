@@ -1,3 +1,5 @@
+# @TEST-GROUP: broker
+#
 # @TEST-PORT: BROKER_PORT
 #
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
@@ -6,13 +8,13 @@
 # @TEST-EXEC: btest-bg-wait 45
 # @TEST-EXEC: btest-diff recv/recv.out
 # @TEST-EXEC: btest-diff send/send.out
-# 
+#
 # @TEST-EXEC: cat recv/broker.log | awk '/Broker::STATUS/ { $5="XXX"; print; }' >recv/broker.filtered.log
 # @TEST-EXEC: cat send/broker.log | awk '/Broker::STATUS/ { $5="XXX"; print; }' >send/broker.filtered.log
 # @TEST-EXEC: btest-diff recv/broker.filtered.log
 # @TEST-EXEC: btest-diff send/broker.filtered.log
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -24,6 +26,7 @@ event do_terminate()
 event print_something(i: int)
     {
     print "Something sender", i;
+    Broker::publish("zeek/event/my_topic", print_something, i);
     }
 
 event unpeer(endpoint: Broker::EndpointInfo)
@@ -37,7 +40,6 @@ event unpeer(endpoint: Broker::EndpointInfo)
 event zeek_init()
     {
     Broker::subscribe("zeek/event/my_topic");
-    Broker::auto_publish("zeek/event/my_topic", print_something);
     Broker::peer("127.0.0.1", to_port(getenv("BROKER_PORT")));
     }
 
@@ -49,10 +51,10 @@ event Broker::peer_added(endpoint: Broker::EndpointInfo, msg: string)
     }
 
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -74,4 +76,4 @@ event zeek_init()
     }
 
 
-@TEST-END-FILE
+# @TEST-END-FILE

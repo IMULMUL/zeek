@@ -1,284 +1,278 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #include "zeek/Base64.h"
 
-#include "zeek/zeek-config.h"
-
-#include <math.h>
+#include <cmath>
 
 #include "zeek/Conn.h"
 #include "zeek/Reporter.h"
 #include "zeek/ZeekString.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 int Base64Converter::default_base64_table[256];
 const std::string Base64Converter::default_alphabet =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-void Base64Converter::Encode(int len, const unsigned char* data, int* pblen, char** pbuf)
-	{
-	int blen;
-	char* buf;
+void Base64Converter::Encode(int len, const unsigned char* data, int* pblen, char** pbuf) {
+    int blen;
+    char* buf;
 
-	if ( ! pbuf )
-		reporter->InternalError("nil pointer to encoding result buffer");
+    if ( ! pbuf )
+        reporter->InternalError("nil pointer to encoding result buffer");
 
-	if ( *pbuf && (*pblen % 4 != 0) )
-		reporter->InternalError("Base64 encode buffer not a multiple of 4");
+    if ( *pbuf && (*pblen % 4 != 0) )
+        reporter->InternalError("Base64 encode buffer not a multiple of 4");
 
-	if ( *pbuf )
-		{
-		buf = *pbuf;
-		blen = *pblen;
-		}
-	else
-		{
-		blen = (int)(4 * ceil((double)len / 3));
-		*pbuf = buf = new char[blen];
-		*pblen = blen;
-		}
+    if ( *pbuf ) {
+        buf = *pbuf;
+        blen = *pblen;
+    }
+    else {
+        blen = static_cast<int>(4 * ceil(static_cast<double>(len) / 3.0));
+        *pbuf = buf = new char[blen];
+        *pblen = blen;
+    }
 
-	for ( int i = 0, j = 0; (i < len) && (j < blen); )
-		{
-		uint32_t bit32 = data[i++] << 16;
-		bit32 += (i++ < len ? data[i - 1] : 0) << 8;
-		bit32 += i++ < len ? data[i - 1] : 0;
+    for ( int i = 0, j = 0; (i < len) && (j < blen); ) {
+        int remaining = len - i;
+        uint32_t bit32 = 0;
 
-		buf[j++] = alphabet[(bit32 >> 18) & 0x3f];
-		buf[j++] = alphabet[(bit32 >> 12) & 0x3f];
-		buf[j++] = (i == (len + 2)) ? '=' : alphabet[(bit32 >> 6) & 0x3f];
-		buf[j++] = (i >= (len + 1)) ? '=' : alphabet[bit32 & 0x3f];
-		}
-	}
+        bit32 |= (static_cast<uint32_t>(data[i++]) << 16u);
+        if ( remaining > 1 )
+            bit32 |= (static_cast<uint32_t>(data[i++]) << 8u);
+        if ( remaining > 2 )
+            bit32 |= data[i++];
 
-int* Base64Converter::InitBase64Table(const std::string& alphabet)
-	{
-	assert(alphabet.size() == 64);
+        buf[j++] = alphabet[(bit32 >> 18u) & 0x3fu];
+        buf[j++] = alphabet[(bit32 >> 12u) & 0x3fu];
+        buf[j++] = (remaining < 2) ? '=' : alphabet[(bit32 >> 6u) & 0x3fu];
+        buf[j++] = (remaining < 3) ? '=' : alphabet[bit32 & 0x3fu];
+    }
+}
 
-	static bool default_table_initialized = false;
+int* Base64Converter::InitBase64Table(const std::string& alphabet) {
+    assert(alphabet.size() == 64);
 
-	if ( alphabet == default_alphabet && default_table_initialized )
-		return default_base64_table;
+    static bool default_table_initialized = false;
 
-	int* base64_table = nullptr;
+    if ( alphabet == default_alphabet && default_table_initialized )
+        return default_base64_table;
 
-	if ( alphabet == default_alphabet )
-		{
-		base64_table = default_base64_table;
-		default_table_initialized = true;
-		}
-	else
-		base64_table = new int[256];
+    int* base64_table = nullptr;
 
-	int i;
-	for ( i = 0; i < 256; ++i )
-		base64_table[i] = -1;
+    if ( alphabet == default_alphabet ) {
+        base64_table = default_base64_table;
+        default_table_initialized = true;
+    }
+    else
+        base64_table = new int[256];
 
-	for ( i = 0; i < 26; ++i )
-		{
-		base64_table[int(alphabet[0 + i])] = i;
-		base64_table[int(alphabet[26 + i])] = i + 26;
-		}
+    int i;
+    for ( i = 0; i < 256; ++i )
+        base64_table[i] = -1;
 
-	for ( i = 0; i < 10; ++i )
-		base64_table[int(alphabet[52 + i])] = i + 52;
+    for ( i = 0; i < 26; ++i ) {
+        base64_table[static_cast<int>(alphabet[0 + i])] = i;
+        base64_table[static_cast<int>(alphabet[26 + i])] = i + 26;
+    }
 
-	// Casts to avoid compiler warnings.
-	base64_table[int(alphabet[62])] = 62;
-	base64_table[int(alphabet[63])] = 63;
-	base64_table[int('=')] = 0;
+    for ( i = 0; i < 10; ++i )
+        base64_table[static_cast<int>(alphabet[52 + i])] = i + 52;
 
-	return base64_table;
-	}
+    // Casts to avoid compiler warnings.
+    base64_table[static_cast<int>(alphabet[62])] = 62;
+    base64_table[static_cast<int>(alphabet[63])] = 63;
+    base64_table[static_cast<int>('=')] = 0;
 
-Base64Converter::Base64Converter(Connection* arg_conn, const std::string& arg_alphabet)
-	{
-	if ( arg_alphabet.size() > 0 )
-		{
-		assert(arg_alphabet.size() == 64);
-		alphabet = arg_alphabet;
-		}
-	else
-		{
-		alphabet = default_alphabet;
-		}
+    return base64_table;
+}
 
-	base64_table = nullptr;
-	base64_group_next = 0;
-	base64_padding = base64_after_padding = 0;
-	errored = 0;
-	conn = arg_conn;
-	}
+Base64Converter::Base64Converter(Connection* arg_conn, const std::string& arg_alphabet, bool silent) {
+    if ( ! arg_alphabet.empty() ) {
+        assert(arg_alphabet.size() == 64);
+        alphabet = arg_alphabet;
+    }
+    else {
+        alphabet = default_alphabet;
+    }
 
-Base64Converter::~Base64Converter()
-	{
-	if ( base64_table != default_base64_table )
-		delete[] base64_table;
-	}
+    base64_table = nullptr;
+    base64_group_next = 0;
+    base64_padding = base64_after_padding = 0;
+    errored = 0;
+    conn = arg_conn;
+    this->silent = silent;
+}
 
-int Base64Converter::Decode(int len, const char* data, int* pblen, char** pbuf)
-	{
-	int blen;
-	char* buf;
+Base64Converter::~Base64Converter() {
+    if ( base64_table != default_base64_table )
+        delete[] base64_table;
+}
 
-	// Initialization of table on first_time call of Decode.
-	if ( ! base64_table )
-		base64_table = InitBase64Table(alphabet);
+int Base64Converter::Decode(int len, const char* data, int* pblen, char** pbuf) {
+    int blen;
+    char* buf;
 
-	if ( ! pbuf )
-		reporter->InternalError("nil pointer to decoding result buffer");
+    // Initialization of table on first_time call of Decode.
+    if ( ! base64_table )
+        base64_table = InitBase64Table(alphabet);
 
-	if ( *pbuf )
-		{
-		buf = *pbuf;
-		blen = *pblen;
-		}
-	else
-		{
-		// Estimate the maximal number of 3-byte groups needed,
-		// plus 1 byte for the optional ending NUL.
-		blen = int((len + base64_group_next + 3) / 4) * 3 + 1;
-		*pbuf = buf = new char[blen];
-		}
+    if ( ! pbuf )
+        reporter->InternalError("nil pointer to decoding result buffer");
 
-	int dlen = 0;
+    if ( *pbuf ) {
+        buf = *pbuf;
+        blen = *pblen;
+    }
+    else {
+        // Estimate the maximal number of 3-byte groups needed,
+        // plus 1 byte for the optional ending NUL.
+        blen = static_cast<int>((len + base64_group_next + 3) / 4) * 3 + 1;
+        *pbuf = buf = new char[blen];
+    }
 
-	while ( true )
-		{
-		if ( base64_group_next == 4 )
-			{
-			// For every group of 4 6-bit numbers,
-			// write the decoded 3 bytes to the buffer.
-			if ( base64_after_padding )
-				{
-				if ( ++errored == 1 )
-					IllegalEncoding("extra base64 groups after '=' padding are ignored");
-				base64_group_next = 0;
-				continue;
-				}
+    int dlen = 0;
 
-			int num_octets = 3 - base64_padding;
+    while ( true ) {
+        if ( base64_group_next == 4 ) {
+            // For every group of 4 6-bit numbers,
+            // write the decoded 3 bytes to the buffer.
+            if ( base64_after_padding ) {
+                if ( ++errored == 1 )
+                    IllegalEncoding("extra base64 groups after '=' padding are ignored");
+                base64_group_next = 0;
+                continue;
+            }
 
-			if ( buf + num_octets > *pbuf + blen )
-				break;
+            int num_octets = 3 - base64_padding;
 
-			uint32_t bit32 = ((base64_group[0] & 0x3f) << 18) | ((base64_group[1] & 0x3f) << 12) |
-			                 ((base64_group[2] & 0x3f) << 6) | ((base64_group[3] & 0x3f));
+            if ( buf + num_octets > *pbuf + blen )
+                break;
 
-			if ( --num_octets >= 0 )
-				*buf++ = char((bit32 >> 16) & 0xff);
+            uint32_t bit32 = ((base64_group[0] & 0x3f) << 18) | ((base64_group[1] & 0x3f) << 12) |
+                             ((base64_group[2] & 0x3f) << 6) | ((base64_group[3] & 0x3f));
 
-			if ( --num_octets >= 0 )
-				*buf++ = char((bit32 >> 8) & 0xff);
+            if ( --num_octets >= 0 )
+                *buf++ = static_cast<char>((bit32 >> 16) & 0xff);
 
-			if ( --num_octets >= 0 )
-				*buf++ = char((bit32)&0xff);
+            if ( --num_octets >= 0 )
+                *buf++ = static_cast<char>((bit32 >> 8) & 0xff);
 
-			if ( base64_padding > 0 )
-				base64_after_padding = 1;
+            if ( --num_octets >= 0 )
+                *buf++ = static_cast<char>((bit32) & 0xff);
 
-			base64_group_next = 0;
-			base64_padding = 0;
-			}
+            if ( base64_padding > 0 )
+                base64_after_padding = 1;
 
-		if ( dlen >= len )
-			break;
+            base64_group_next = 0;
+            base64_padding = 0;
+        }
 
-		if ( data[dlen] == '=' )
-			++base64_padding;
+        if ( dlen >= len )
+            break;
 
-		int k = base64_table[(unsigned char)data[dlen]];
-		if ( k >= 0 )
-			base64_group[base64_group_next++] = k;
-		else
-			{
-			if ( ++errored == 1 )
-				IllegalEncoding(
-					util::fmt("character %d ignored by Base64 decoding", (int)(data[dlen])));
-			}
+        unsigned char c = static_cast<unsigned char>(data[dlen]);
+        if ( c == '=' )
+            ++base64_padding;
 
-		++dlen;
-		}
+        int k = base64_table[c];
+        if ( k >= 0 )
+            base64_group[base64_group_next++] = k;
+        else {
+            if ( ++errored == 1 )
+                IllegalEncoding(util::fmt("character %d ignored by Base64 decoding", static_cast<int>(c)));
+        }
 
-	*pblen = buf - *pbuf;
-	return dlen;
-	}
+        ++dlen;
+    }
 
-int Base64Converter::Done(int* pblen, char** pbuf)
-	{
-	const char* padding = "===";
+    *pblen = buf - *pbuf;
+    return dlen;
+}
 
-	if ( base64_group_next != 0 )
-		{
-		if ( base64_group_next < 4 )
-			IllegalEncoding(util::fmt("incomplete base64 group, padding with %d bits of 0",
-			                          (4 - base64_group_next) * 6));
-		Decode(4 - base64_group_next, padding, pblen, pbuf);
-		return -1;
-		}
+int Base64Converter::Done(int* pblen, char** pbuf) {
+    const char* padding = "===";
 
-	if ( pblen )
-		*pblen = 0;
+    if ( base64_group_next != 0 ) {
+        if ( base64_group_next < 4 )
+            IllegalEncoding(
+                util::fmt("incomplete base64 group, padding with %d bits of 0", (4 - base64_group_next) * 6));
+        Decode(4 - base64_group_next, padding, pblen, pbuf);
+        return -1;
+    }
 
-	return 0;
-	}
+    if ( pblen )
+        *pblen = 0;
 
-void Base64Converter::IllegalEncoding(const char* msg)
-	{
-	// strncpy(error_msg, msg, sizeof(error_msg));
-	if ( conn )
-		conn->Weird("base64_illegal_encoding", msg);
-	else
-		reporter->Error("%s", msg);
-	}
+    return 0;
+}
 
-String* decode_base64(const String* s, const String* a, Connection* conn)
-	{
-	if ( a && a->Len() != 0 && a->Len() != 64 )
-		{
-		reporter->Error("base64 decoding alphabet is not 64 characters: %s", a->CheckString());
-		return nullptr;
-		}
+void Base64Converter::IllegalEncoding(const char* msg) {
+    if ( silent )
+        return;
+    if ( conn )
+        conn->Weird("base64_illegal_encoding", msg);
+    else
+        reporter->Error("%s", msg);
+}
 
-	int buf_len = int((s->Len() + 3) / 4) * 3 + 1;
-	int rlen2, rlen = buf_len;
-	char *rbuf2, *rbuf = new char[rlen];
+String* decode_base64(const String* s, const String* a, Connection* conn) {
+    if ( a && a->Len() != 0 && a->Len() != 64 ) {
+        reporter->Error("base64 decoding alphabet is not 64 characters: %s", a->CheckString());
+        return nullptr;
+    }
 
-	Base64Converter dec(conn, a ? a->CheckString() : "");
-	dec.Decode(s->Len(), (const char*)s->Bytes(), &rlen, &rbuf);
+    int buf_len = static_cast<int>((s->Len() + 3) / 4) * 3 + 1;
+    int rlen = buf_len;
+    char* rbuf = new char[rlen];
 
-	if ( dec.Errored() )
-		goto err;
+    Base64Converter dec(conn, a ? a->CheckString() : "");
+    dec.Decode(s->Len(), reinterpret_cast<const char*>(s->Bytes()), &rlen, &rbuf);
 
-	rlen2 = buf_len - rlen;
-	rbuf2 = rbuf + rlen;
-	// Done() returns -1 if there isn't enough padding, but we just ignore
-	// it.
-	dec.Done(&rlen2, &rbuf2);
-	rlen += rlen2;
+    if ( dec.Errored() ) {
+        delete[] rbuf;
+        return nullptr;
+    }
 
-	rbuf[rlen] = '\0';
-	return new String(true, (u_char*)rbuf, rlen);
+    int rlen2 = buf_len - rlen;
+    char* rbuf2 = rbuf + rlen;
+    // Done() returns -1 if there isn't enough padding, but we just ignore
+    // it.
+    dec.Done(&rlen2, &rbuf2);
+    rlen += rlen2;
 
-err:
-	delete[] rbuf;
-	return nullptr;
-	}
+    rbuf[rlen] = '\0';
+    return new String(true, reinterpret_cast<u_char*>(rbuf), rlen);
+}
 
-String* encode_base64(const String* s, const String* a, Connection* conn)
-	{
-	if ( a && a->Len() != 0 && a->Len() != 64 )
-		{
-		reporter->Error("base64 alphabet is not 64 characters: %s", a->CheckString());
-		return nullptr;
-		}
+String* encode_base64(const String* s, const String* a, Connection* conn) {
+    if ( a && a->Len() != 0 && a->Len() != 64 ) {
+        reporter->Error("base64 alphabet is not 64 characters: %s", a->CheckString());
+        return nullptr;
+    }
 
-	char* outbuf = nullptr;
-	int outlen = 0;
-	Base64Converter enc(conn, a ? a->CheckString() : "");
-	enc.Encode(s->Len(), (const unsigned char*)s->Bytes(), &outlen, &outbuf);
+    char* outbuf = nullptr;
+    int outlen = 0;
+    Base64Converter enc(conn, a ? a->CheckString() : "");
+    enc.Encode(s->Len(), static_cast<const unsigned char*>(s->Bytes()), &outlen, &outbuf);
 
-	return new String(true, (u_char*)outbuf, outlen);
-	}
+    return new String(true, reinterpret_cast<u_char*>(outbuf), outlen);
+}
 
-	} // namespace zeek::detail
+bool is_valid_base64(const String* s, const String* a) {
+    if ( a && a->Len() != 0 && a->Len() != 64 )
+        return false;
+
+    int buf_len = static_cast<int>((s->Len() + 3) / 4) * 3 + 1;
+    char* rbuf = new char[buf_len];
+
+    Base64Converter dec(nullptr, a && a->Len() ? a->CheckString() : "", true);
+    dec.Decode(s->Len(), reinterpret_cast<const char*>(s->Bytes()), &buf_len, &rbuf);
+
+    bool ok = ! dec.Errored();
+    delete[] rbuf;
+    return ok;
+}
+
+} // namespace zeek::detail

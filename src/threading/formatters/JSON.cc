@@ -2,210 +2,247 @@
 
 #include "zeek/threading/formatters/JSON.h"
 
-#include "zeek/zeek-config.h"
+#include "zeek/util.h"
 
 #ifndef __STDC_LIMIT_MACROS
 #define __STDC_LIMIT_MACROS
 #endif
 
-#include <errno.h>
-#include <math.h>
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define RAPIDJSON_HAS_STDSTRING 1
+
 #include <rapidjson/internal/ieee754.h>
-#include <stdint.h>
-#include <sstream>
+#include <cerrno>
+#include <cmath>
+#include <cstdint>
+#include <ctime>
 
 #include "zeek/Desc.h"
 #include "zeek/threading/MsgThread.h"
+#include "zeek/threading/formatters/detail/json.h"
 
-namespace zeek::threading::formatter
-	{
+namespace {
 
-bool JSON::NullDoubleWriter::Double(double d)
-	{
-	if ( rapidjson::internal::Double(d).IsNanOrInf() )
-		return rapidjson::Writer<rapidjson::StringBuffer>::Null();
+// Windows gmtime_r (via gmtime_s) rejects negative time_t values.
+// Work around this by adding full 400-year Gregorian cycles to make
+// the value non-negative, converting, then adjusting the year back.
+// 400 Gregorian years = 146097 days (accounts for leap-year rules).
+bool safe_gmtime(time_t ts, struct tm* result) {
+    if ( gmtime_r(&ts, result) )
+        return true;
 
-	return rapidjson::Writer<rapidjson::StringBuffer>::Double(d);
-	}
+#ifdef _MSC_VER
+    if ( ts >= 0 )
+        return false;
 
-JSON::JSON(MsgThread* t, TimeFormat tf, bool arg_include_unset_fields)
-	: Formatter(t), surrounding_braces(true), include_unset_fields(arg_include_unset_fields)
-	{
-	timestamps = tf;
-	}
+    constexpr int64_t kCycleYears = 400;
+    constexpr int64_t kCycleSeconds = 146097LL * 86400LL;
 
-JSON::~JSON() { }
+    int cycles = 0;
+    auto adjusted = static_cast<int64_t>(ts);
+    while ( adjusted < 0 ) {
+        adjusted += kCycleSeconds;
+        ++cycles;
+    }
 
-bool JSON::Describe(ODesc* desc, int num_fields, const Field* const* fields, Value** vals) const
-	{
-	rapidjson::StringBuffer buffer;
-	NullDoubleWriter writer(buffer);
+    auto pos = static_cast<time_t>(adjusted);
+    if ( ! gmtime_r(&pos, result) )
+        return false;
 
-	writer.StartObject();
+    result->tm_year -= static_cast<int>(cycles * kCycleYears);
+    return true;
+#else
+    return false;
+#endif
+}
 
-	for ( int i = 0; i < num_fields; i++ )
-		{
-		if ( vals[i]->present || include_unset_fields )
-			BuildJSON(writer, vals[i], fields[i]->name);
-		}
+} // namespace
 
-	writer.EndObject();
-	desc->Add(buffer.GetString());
+namespace zeek::threading::formatter {
 
-	return true;
-	}
+JSON::JSON(MsgThread* t, TimeFormat tf, bool arg_include_unset_fields, StringEscapePolicy string_escape_policy)
+    : Formatter(t),
+      timestamps(tf),
+      include_unset_fields(arg_include_unset_fields),
+      string_escape_policy(string_escape_policy) {
+    // This is for the TSV escaping policy.
+    desc.EnableUTF8();
+    desc.EnableEscaping();
+}
 
-bool JSON::Describe(ODesc* desc, Value* val, const std::string& name) const
-	{
-	if ( desc->IsBinary() )
-		{
-		GetThread()->Error("json formatter: binary format not supported");
-		return false;
-		}
+bool JSON::Describe(ODesc* desc, int num_fields, const Field* const* fields, Value** vals) const {
+    rapidjson::StringBuffer buffer;
+    zeek::json::detail::NullDoubleWriter writer(buffer);
 
-	if ( (! val->present && ! include_unset_fields) || name.empty() )
-		return true;
+    writer.StartObject();
 
-	rapidjson::Document doc;
-	rapidjson::StringBuffer buffer;
-	NullDoubleWriter writer(buffer);
+    for ( int i = 0; i < num_fields; i++ ) {
+        if ( vals[i]->present || include_unset_fields )
+            BuildJSON(writer, vals[i], fields[i]->name);
+    }
 
-	writer.StartObject();
-	BuildJSON(writer, val, name);
-	writer.EndObject();
+    writer.EndObject();
+    desc->Add(buffer.GetString());
 
-	desc->Add(buffer.GetString());
-	return true;
-	}
+    return true;
+}
 
-Value* JSON::ParseValue(const std::string& s, const std::string& name, TypeTag type,
-                        TypeTag subtype) const
-	{
-	GetThread()->Error("JSON formatter does not support parsing yet.");
-	return nullptr;
-	}
+bool JSON::Describe(ODesc* desc, Value* val, const std::string& name) const {
+    if ( desc->IsBinary() ) {
+        GetThread()->Error("json formatter: binary format not supported");
+        return false;
+    }
 
-void JSON::BuildJSON(NullDoubleWriter& writer, Value* val, const std::string& name) const
-	{
-	if ( ! name.empty() )
-		writer.Key(name);
+    if ( (! val->present && ! include_unset_fields) || name.empty() )
+        return true;
 
-	if ( ! val->present )
-		{
-		writer.Null();
-		return;
-		}
+    rapidjson::Document doc;
+    rapidjson::StringBuffer buffer;
+    zeek::json::detail::NullDoubleWriter writer(buffer);
 
-	switch ( val->type )
-		{
-		case TYPE_BOOL:
-			writer.Bool(val->val.int_val != 0);
-			break;
+    writer.StartObject();
+    BuildJSON(writer, val, name);
+    writer.EndObject();
 
-		case TYPE_INT:
-			writer.Int64(val->val.int_val);
-			break;
+    desc->Add(buffer.GetString());
+    return true;
+}
 
-		case TYPE_COUNT:
-			writer.Uint64(val->val.uint_val);
-			break;
+Value* JSON::ParseValue(const std::string& s, const std::string& name, TypeTag type, TypeTag subtype) const {
+    GetThread()->Error("JSON formatter does not support parsing yet.");
+    return nullptr;
+}
 
-		case TYPE_PORT:
-			writer.Uint64(val->val.port_val.port);
-			break;
+void JSON::BuildJSON(zeek::json::detail::NullDoubleWriter& writer, Value* val, const std::string& name) const {
+    if ( ! name.empty() )
+        writer.Key(name);
 
-		case TYPE_SUBNET:
-			writer.String(Formatter::Render(val->val.subnet_val));
-			break;
+    if ( ! val->present ) {
+        writer.Null();
+        return;
+    }
 
-		case TYPE_ADDR:
-			writer.String(Formatter::Render(val->val.addr_val));
-			break;
+    switch ( val->type ) {
+        case TYPE_BOOL: writer.Bool(val->val.int_val != 0); break;
 
-		case TYPE_DOUBLE:
-		case TYPE_INTERVAL:
-			writer.Double(val->val.double_val);
-			break;
+        case TYPE_INT: writer.Int64(val->val.int_val); break;
 
-		case TYPE_TIME:
-			{
-			if ( timestamps == TS_ISO8601 )
-				{
-				char buffer[40];
-				char buffer2[48];
-				time_t the_time = time_t(floor(val->val.double_val));
-				struct tm t;
+        case TYPE_COUNT: writer.Uint64(val->val.uint_val); break;
 
-				if ( ! gmtime_r(&the_time, &t) ||
-				     ! strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &t) )
-					{
-					GetThread()->Error(GetThread()->Fmt(
-						"json formatter: failure getting time: (%lf)", val->val.double_val));
-					// This was a failure, doesn't really matter what gets put here
-					// but it should probably stand out...
-					writer.String("2000-01-01T00:00:00.000000");
-					}
-				else
-					{
-					double integ;
-					double frac = modf(val->val.double_val, &integ);
+        case TYPE_PORT: writer.Uint64(val->val.port_val.port); break;
 
-					if ( frac < 0 )
-						frac += 1;
+        case TYPE_SUBNET: writer.String(Formatter::Render(val->val.subnet_val)); break;
 
-					snprintf(buffer2, sizeof(buffer2), "%s.%06.0fZ", buffer, fabs(frac) * 1000000);
-					writer.String(buffer2, strlen(buffer2));
-					}
-				}
+        case TYPE_ADDR: writer.String(Formatter::Render(val->val.addr_val)); break;
 
-			else if ( timestamps == TS_EPOCH )
-				writer.Double(val->val.double_val);
+        case TYPE_DOUBLE:
+        case TYPE_INTERVAL: writer.Double(val->val.double_val); break;
 
-			else if ( timestamps == TS_MILLIS )
-				{
-				// ElasticSearch uses milliseconds for timestamps
-				writer.Uint64((uint64_t)(val->val.double_val * 1000));
-				}
+        case TYPE_TIME: {
+            if ( timestamps == TS_ISO8601 ) {
+                char buffer[40];
+                char buffer2[48];
+                time_t the_time = static_cast<time_t>(floor(val->val.double_val));
+                struct tm t;
 
-			break;
-			}
+                if ( ! safe_gmtime(the_time, &t) || ! strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &t) ) {
+                    GetThread()->Error(
+                        GetThread()->Fmt("json formatter: failure getting time: (%lf)", val->val.double_val));
+                    // This was a failure, doesn't really matter what gets put here
+                    // but it should probably stand out...
+                    writer.String("2000-01-01T00:00:00.000000");
+                }
+                else {
+                    double integ;
+                    double frac = modf(val->val.double_val, &integ);
 
-		case TYPE_ENUM:
-		case TYPE_STRING:
-		case TYPE_FILE:
-		case TYPE_FUNC:
-			{
-			writer.String(util::json_escape_utf8(
-				std::string(val->val.string_val.data, val->val.string_val.length)));
-			break;
-			}
+                    if ( frac < 0 )
+                        frac += 1;
 
-		case TYPE_TABLE:
-			{
-			writer.StartArray();
+                    snprintf(buffer2, sizeof(buffer2), "%s.%06.0fZ", buffer, fabs(frac) * 1000000);
+                    writer.String(buffer2, strlen(buffer2));
+                }
+            }
 
-			for ( bro_int_t idx = 0; idx < val->val.set_val.size; idx++ )
-				BuildJSON(writer, val->val.set_val.vals[idx]);
+            else if ( timestamps == TS_EPOCH )
+                writer.Double(val->val.double_val);
 
-			writer.EndArray();
-			break;
-			}
+            else if ( timestamps == TS_MILLIS ) {
+                // ElasticSearch uses milliseconds for timestamps
+                writer.Int64(static_cast<int64_t>(val->val.double_val * 1000));
+            }
+            else if ( timestamps == TS_MILLIS_UNSIGNED ) {
+                // Without the cast through int64_t the resulting
+                // uint64_t value is zero for negative timestamps
+                // on arm64. This is UB territory, a negative value
+                // cannot be represented in uint64_t and so the
+                // compiler is free to do whatever. Prevent this by
+                // casting through an int64_t.
+                //
+                // https://stackoverflow.com/a/55057221
+                uint64_t v = static_cast<uint64_t>(static_cast<int64_t>(val->val.double_val * 1000));
+                writer.Uint64(v);
+            }
 
-		case TYPE_VECTOR:
-			{
-			writer.StartArray();
+            break;
+        }
 
-			for ( bro_int_t idx = 0; idx < val->val.vector_val.size; idx++ )
-				BuildJSON(writer, val->val.vector_val.vals[idx]);
+        case TYPE_STRING: {
+            std::string_view sv = {val->val.string_val.data, static_cast<size_t>(val->val.string_val.length)};
 
-			writer.EndArray();
-			break;
-			}
+            switch ( string_escape_policy ) {
+                case STRING_ESCAPE_POLICY_HEX: {
+                    writer.String(util::escape_utf8(sv, util::ESCAPE_UNPRINTABLE_CONTROLS));
+                    break;
+                }
+                case STRING_ESCAPE_POLICY_PUA: {
+                    auto s = util::escape_string_for_json(sv, "\\udb80\\udc");
+                    writer.RawValue(s.data(), s.size(), rapidjson::kStringType);
+                    break;
+                }
+                case STRING_ESCAPE_POLICY_TSV: {
+                    desc.Clear();
+                    desc.Add(sv);
 
-		default:
-			reporter->Warning("Unhandled type in JSON::BuildJSON");
-			break;
-		}
-	}
+                    writer.String(desc.Description(), desc.Size());
+                    break;
+                }
+                default: reporter->Warning("Unhandled string escape policy in JSON::BuildJSON"); break;
+            }
 
-	} // namespace zeek::threading::formatter
+            break;
+        }
+
+        case TYPE_ENUM:
+        case TYPE_FILE:
+        case TYPE_FUNC: {
+            writer.String(util::escape_utf8({val->val.string_val.data, static_cast<size_t>(val->val.string_val.length)},
+                                            util::ESCAPE_UNPRINTABLE_CONTROLS));
+            break;
+        }
+
+        case TYPE_TABLE: {
+            writer.StartArray();
+
+            for ( zeek_int_t idx = 0; idx < val->val.set_val.size; idx++ )
+                BuildJSON(writer, val->val.set_val.vals[idx]);
+
+            writer.EndArray();
+            break;
+        }
+
+        case TYPE_VECTOR: {
+            writer.StartArray();
+
+            for ( zeek_int_t idx = 0; idx < val->val.vector_val.size; idx++ )
+                BuildJSON(writer, val->val.vector_val.vals[idx]);
+
+            writer.EndArray();
+            break;
+        }
+
+        default: reporter->Warning("Unhandled type in JSON::BuildJSON"); break;
+    }
+}
+
+} // namespace zeek::threading::formatter

@@ -6,6 +6,7 @@
 ##! the destination port being the ICMP message code.
 
 @load base/utils/site
+@load base/utils/strings
 
 module Conn;
 
@@ -26,11 +27,21 @@ export {
 		id:           conn_id         &log;
 		## The transport layer protocol of the connection.
 		proto:        transport_proto &log;
-		## An identification of an application protocol being sent over
-		## the connection.
+		## A comma-separated list of confirmed protocol(s).
+		## With :zeek:see:DPD::`track_removed_services_in_connection`, the list
+		## includes the same protocols prefixed with "-" to record that Zeek
+		## dropped them due to parsing violations."
 		service:      string          &log &optional;
-		## How long the connection lasted.  For 3-way or 4-way connection
-		## tear-downs, this will not include the final ACK.
+		## How long the connection lasted.
+		##
+		## .. note:: The duration doesn't cover trailing "non-productive"
+		##    TCP packets (i.e., ones not contributing new stream payload)
+		##    once a direction is closed.  For example, for regular
+		##    3-way/4-way connection tear-downs it doesn't include the
+		##    final ACK.  The reason is largely historic: this approach
+		##    allows more accurate computation of connection data rates.
+		##    Zeek does however reflect such trailing packets in the
+		##    connection history.
 		duration:     interval        &log &optional;
 		## The number of payload bytes the originator sent. For TCP
 		## this is taken from sequence numbers and might be inaccurate
@@ -116,6 +127,7 @@ export {
 		## i       inconsistent packet (e.g. FIN+RST bits set)
 		## q       multi-flag packet (SYN+FIN or SYN+RST bits set)
 		## ^       connection direction was flipped by Zeek's heuristic
+		## x       connection analysis partial (e.g. limits exceeded)
 		## ======  ====================================================
 		##
 		## If the event comes from the originator, the letter is in
@@ -148,6 +160,11 @@ export {
 		## *uid* values for any encapsulating parent connections
 		## used over the lifetime of this inner connection.
 		tunnel_parents: set[string] &log &optional;
+		## For IP-based connections, this contains the protocol
+		## identifier passed in the IP header. This is different
+		## from the *proto* field in that this value comes
+		## directly from the header.
+		ip_proto:   count      &log &optional;
 	};
 
 	## Event that can be handled to access the :zeek:type:`Conn::Info`
@@ -161,7 +178,7 @@ redef record connection += {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Conn::LOG, [$columns=Info, $ev=log_conn, $path="conn", $policy=log_policy]);
+	Log::create_stream(Conn::LOG, Log::Stream($columns=Info, $ev=log_conn, $path="conn", $policy=log_policy));
 	}
 
 function conn_state(c: connection, trans: transport_proto): string
@@ -223,41 +240,34 @@ function conn_state(c: connection, trans: transport_proto): string
 		return "OTH";
 	}
 
-function determine_service(c: connection): string
-	{
-	local service = "";
-	for ( s in c$service )
-		{
-		if ( sub_bytes(s, 0, 1) != "-" )
-			service = service == "" ? s : cat(service, ",", s);
-		}
-
-	return to_lower(service);
-	}
-
 ## Fill out the c$conn record for logging
 function set_conn(c: connection, eoc: bool)
 	{
-	if ( ! c?$conn )
-		c$conn = Info();
+	if ( ! eoc ) {
+		if ( ! c?$conn )
+			{
+			local p = get_port_transport_proto(c$id$resp_p);
+			c$conn = Info($ts=c$start_time, $uid=c$uid, $proto=p);
+			}
 
-	c$conn$ts=c$start_time;
-	c$conn$uid=c$uid;
-	c$conn$id=c$id;
-	if ( c?$tunnel && |c$tunnel| > 0 )
-		{
-		if ( ! c$conn?$tunnel_parents )
-			c$conn$tunnel_parents = set();
-		add c$conn$tunnel_parents[c$tunnel[|c$tunnel|-1]$uid];
-		}
-	c$conn$proto=get_port_transport_proto(c$id$resp_p);
-	if( |Site::local_nets| > 0 )
-		{
-		c$conn$local_orig=Site::is_local_addr(c$id$orig_h);
-		c$conn$local_resp=Site::is_local_addr(c$id$resp_h);
-		}
+		c$conn$id=c$id;
+		if ( c?$tunnel && |c$tunnel| > 0 )
+			{
+			if ( ! c$conn?$tunnel_parents )
+				c$conn$tunnel_parents = set();
+			add c$conn$tunnel_parents[c$tunnel[|c$tunnel|-1]$uid];
+			}
 
-	if ( eoc )
+		if ( c$id$proto != 65535 )
+			c$conn$ip_proto = c$id$proto;
+
+		if( |Site::local_nets| > 0 )
+			{
+			c$conn$local_orig = Site::is_local_addr(c$id$orig_h);
+			c$conn$local_resp = Site::is_local_addr(c$id$resp_h);
+			}
+		}
+	else
 		{
 		if ( c$duration > 0secs )
 			{
@@ -274,9 +284,10 @@ function set_conn(c: connection, eoc: bool)
 			c$conn$resp_pkts = c$resp$num_pkts;
 			c$conn$resp_ip_bytes = c$resp$num_bytes_ip;
 			}
-		local service = determine_service(c);
-		if ( service != "" )
-			c$conn$service=service;
+
+		if ( |c$service| > 0 )
+			c$conn$service=to_lower(join_string_set(c$service, ","));
+
 		c$conn$conn_state=conn_state(c, get_port_transport_proto(c$id$resp_p));
 
 		if ( c$history != "" )
@@ -286,14 +297,11 @@ function set_conn(c: connection, eoc: bool)
 
 event content_gap(c: connection, is_orig: bool, seq: count, length: count) &priority=5
 	{
-	set_conn(c, F);
-
 	c$conn$missed_bytes = c$conn$missed_bytes + length;
 	}
 
 event tunnel_changed(c: connection, e: EncapsulatingConnVector) &priority=5
 	{
-	set_conn(c, F);
 	if ( |e| > 0 )
 		{
 		if ( ! c$conn?$tunnel_parents )
@@ -301,6 +309,21 @@ event tunnel_changed(c: connection, e: EncapsulatingConnVector) &priority=5
 		add c$conn$tunnel_parents[e[|e|-1]$uid];
 		}
 	c$tunnel = e;
+	}
+
+event new_connection(c: connection) &priority=100
+	{
+	set_conn(c, F);
+	}
+
+event connection_flipped(c: connection) &priority=5
+	{
+	# otherwise, set-conn has not been called yet. In that case we don't have to do anything
+	if ( c?$conn )
+		{
+		c$conn$local_orig = Site::is_local_addr(c$id$orig_h);
+		c$conn$local_resp = Site::is_local_addr(c$id$resp_h);
+		}
 	}
 
 event connection_state_remove(c: connection) &priority=5

@@ -10,6 +10,12 @@ export {
 
 	global log_policy: Log::PolicyHook;
 
+	## Well-known ports for RDP.
+	const rdp_ports = { 3389/tcp } &redef;
+
+	## Well-known ports for RDP over UDP.
+	const rdpeudp_ports = { 3389/udp } &redef;
+
 	type Info: record {
 		## Timestamp for when the event happened.
 		ts:                    time    &log;
@@ -18,10 +24,11 @@ export {
 		## The connection's 4-tuple of endpoint addresses/ports.
 		id:                    conn_id &log;
 		## Cookie value used by the client machine.
-		## This is typically a username.
+		## This is typically a username, but note that it will often
+		## be truncated on the wire, to a maximum of 9 characters.
 		cookie:                string  &log &optional;
 		## Status result for the connection.  It's a mix between
-		## RDP negotation failure messages and GCC server create
+		## RDP negotiation failure messages and GCC server create
 		## response messages.
 		result:                string  &log &optional;
 		## Security protocol chosen by the server.
@@ -91,13 +98,10 @@ redef record connection += {
 	rdp: Info &optional;
 };
 
-const rdp_ports = { 3389/tcp };
-const rdpeudp_ports = { 3389/udp };
-redef likely_server_ports += { rdp_ports, rdpeudp_ports };
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(RDP::LOG, [$columns=RDP::Info, $ev=log_rdp, $path="rdp", $policy=log_policy]);
+	Log::create_stream(RDP::LOG, Log::Stream($columns=RDP::Info, $ev=log_rdp, $path="rdp", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_RDP, rdp_ports);
 	Analyzer::register_for_ports(Analyzer::ANALYZER_RDPEUDP, rdpeudp_ports);
 	}
@@ -154,7 +158,7 @@ function set_session(c: connection)
 	{
 	if ( ! c?$rdp )
 		{
-		c$rdp = [$ts=network_time(),$id=c$id,$uid=c$uid];
+		c$rdp = Info($ts=network_time(),$id=c$id,$uid=c$uid);
 		Conn::register_removal_hook(c, finalize_rdp);
 		# The RDP session is scheduled to be logged from
 		# the time it is first initiated.
@@ -187,7 +191,18 @@ event rdp_client_core_data(c: connection, data: RDP::ClientCoreData) &priority=5
 	{
 	set_session(c);
 
-	c$rdp$keyboard_layout       = RDP::languages[data$keyboard_layout];
+	if (data$keyboard_layout in RDP::languages)
+		{
+		c$rdp$keyboard_layout = RDP::languages[data$keyboard_layout];
+		}
+	else
+		{
+		if (data$keyboard_layout & 0xffff in RDP::languages)
+			c$rdp$keyboard_layout = fmt("%s (Best Guess for %d)", RDP::languages[data$keyboard_layout & 0xffff], data$keyboard_layout);
+		else
+			c$rdp$keyboard_layout = fmt("keyboard-%d", data$keyboard_layout);
+		}
+
 	c$rdp$client_build          = RDP::builds[data$client_build];
 	c$rdp$client_name           = data$client_name;
 	c$rdp$client_dig_product_id = data$dig_product_id;
@@ -210,9 +225,6 @@ event rdp_client_network_data(c: connection, channels: ClientChannelList)
 	for ( i in channels )
 		# Remove the NULs at the end
 		c$rdp$client_channels[i] = gsub(channels[i]$name, /\x00+$/, "");
-
-	if ( |channels| > 31 )
-		Reporter::conn_weird("RDP_channels_requested_exceeds_max", c, fmt("%s", |channels|));
 	}
 
 event rdp_gcc_server_create_response(c: connection, result: count) &priority=5
@@ -265,20 +277,20 @@ event file_over_new_connection(f: fa_file, c: connection, is_orig: bool) &priori
 		}
 	}
 
-event analyzer_confirmation(c: connection, atype: AllAnalyzers::Tag, aid: count) &priority=5
+event analyzer_confirmation_info(atype: AllAnalyzers::Tag, info: AnalyzerConfirmationInfo) &priority=5
 	{
 	if ( atype == Analyzer::ANALYZER_RDP )
 		{
-		set_session(c);
-		c$rdp$analyzer_id = aid;
+		set_session(info$c);
+		info$c$rdp$analyzer_id = info$aid;
 		}
 	}
 
-event analyzer_violation(c: connection, atype: AllAnalyzers::Tag, aid: count, reason: string) &priority=5
+event analyzer_violation_info(atype: AllAnalyzers::Tag, info: AnalyzerViolationInfo) &priority=5
 	{
 	# If a protocol violation occurs, then log the record immediately.
-	if ( c?$rdp )
-		write_log(c);
+	if ( atype == Analyzer::ANALYZER_RDP && info$c?$rdp )
+		write_log(info$c);
 	}
 
 hook finalize_rdp(c: connection)

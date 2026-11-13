@@ -7,7 +7,11 @@ module Site;
 export {
 	## A list of subnets that are considered private address space.
 	##
-	## By default, it has address blocks defined by IANA as not being routable over the Internet.
+	## By default, it has address blocks defined by IANA as not being
+	## routable over the Internet. Some address blocks are reserved for
+	## purposes inconsistent with the address architecture (such as
+	## 5f00::/16), making them neither clearly private nor routable. We do
+	## not include such blocks in this list.
 	##
 	## See the `IPv4 Special-Purpose Address Registry <https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml>`_
 	## and the `IPv6 Special-Purpose Address Registry <https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xhtml>`_
@@ -72,6 +76,16 @@ export {
 		# 203.0.113.0/24 as a 6to4 address, see :rfc:`5737` and :rfc:`3056`
 		[2002:cb00:7100::]/40,
 
+		# Multicast Local Network Control Block, see :rfc:`5771`
+		224.0.0.0/24,
+		# 224.0.0.0/24 as a 6to4 address, see :rfc:`5771` and :rfc:`3056`
+		[2002:e000::]/40,
+
+		# Administratively Scoped IP Multicast, see :rfc:`2365`
+		239.0.0.0/8,
+		# 239.0.0.0/8 as a 6to4 address, see :rfc:`2365` and :rfc:`3056`
+		[2002:ef00::]/24,
+
 		# Reserved, see :rfc:`1112`
 		240.0.0.0/4,
 		# 240.0.0.0/4 as a 6to4 address, see :rfc:`1112` and :rfc:`3056`
@@ -101,11 +115,19 @@ export {
 		[fc00::]/7,
 		# Link-Local Unicast, see :rfc:`4291`
 		[fe80::]/10,
+		# Deprecated Site Local Addresses, see :rfc:`3879`
+		[fec0::]/10,
 	};
 
 	## Networks that are considered "local".  Note that ZeekControl sets
 	## this automatically.
 	option local_nets: set[subnet] = {};
+
+	## Whether Zeek should automatically consider private address ranges
+	## "local". On by default, this setting ensures that the initial value
+	## of :zeek:id:`Site::private_address_space` as well as any later
+	## updates to it get copied over into :zeek:id:`Site::local_nets`.
+	const private_address_space_is_local = T &redef;
 
 	## This is used for retrieving the subnet when using multiple entries in
 	## :zeek:id:`Site::local_nets`.  It's populated automatically from there.
@@ -161,10 +183,13 @@ export {
 	global get_emails: function(a: addr): string;
 }
 
-# Please ignore, this is an interally used variable.
+# Please ignore, this is an internally used variable.
 global local_dns_suffix_regex: pattern = /MATCH_NOTHING/;
 global local_dns_neighbor_suffix_regex: pattern = /MATCH_NOTHING/;
 
+# A state bit to indicate to the Site::local_nets change handler whether it
+# still needs to take into account Site::private_address_space.
+global local_nets_needs_private_address_space = T;
 
 function is_local_addr(a: addr): bool
 	{
@@ -234,14 +259,95 @@ function get_emails(a: addr): string
 	return fmt_email_string(find_all_emails(a));
 	}
 
-event zeek_init() &priority=10
+function update_local_nets_table(id: string, new_value: set[subnet]): set[subnet]
 	{
-	# Double backslashes are needed due to string parsing.
-	local_dns_suffix_regex = set_to_regex(local_zones, "(^\\.?|\\.)(~~)$");
-	local_dns_neighbor_suffix_regex = set_to_regex(neighbor_zones, "(^\\.?|\\.)(~~)$");
+	local result = new_value;
 
-	# Create the local_nets mapping table.
-	for ( cidr in Site::local_nets )
+	# If private address ranges are to be local, ensure they remain
+	# in Site::local_nets during this update. If we just got here
+	# because Site::private_address_space got updated, use the pending
+	# state its change handler created.
+	if ( private_address_space_is_local )
+		{
+		if ( local_nets_needs_private_address_space )
+			result = new_value | Site::private_address_space;
+		local_nets_needs_private_address_space = T;
+		}
+
+	# Refresh the local_nets mapping table.
+	local_nets_table = {};
+
+	for ( cidr in result )
 		local_nets_table[cidr] = cidr;
 
+	return result;
+	}
+
+function update_local_zones_regex(id: string, new_value: set[string]): set[string]
+	{
+	# Double backslashes are needed due to string parsing.
+	local_dns_suffix_regex = set_to_regex(new_value, "(^\\.?|\\.)(~~)$");
+	return new_value;
+	}
+
+function update_neighbor_zones_regex(id: string, new_value: set[string]): set[string]
+	{
+	local_dns_neighbor_suffix_regex = set_to_regex(new_value, "(^\\.?|\\.)(~~)$");
+	return new_value;
+	}
+
+function update_private_address_space(id: string, new_value: set[subnet]): set[subnet]
+	{
+	# This change handler mirrors the changes to private ranges into
+	# Site::local_nets. It does not use clusterization: the update to the
+	# private address space already propagates, so we just apply the change
+	# locally.
+	local new_privates = new_value - private_address_space;
+	local old_privates = private_address_space - new_value;
+
+	# Compute the update to local nets here. Note that local_nets may not
+	# yet have the private-space additions, if this is running at startup,
+	# so we merge it explicitly, and then apply the deltas:
+	local new_local_nets = (local_nets | private_address_space) - old_privates;
+	new_local_nets += new_privates; # Can't currently chain +/- set ops.
+
+	# Subtle: calling Option::set() on Site::local_nets will cause its
+	# change handler update_local_nets_table() to trigger directly. It
+	# normally adds Site::private_address_space to Site::local_nets, but the
+	# former will still have its old value since this change handler hasn't
+	# returned yet. Since we just computed the new local_nets value above,
+	# we can signal to the change handler that adding
+	# Site::private_address_space is not required:
+	local_nets_needs_private_address_space = F;
+
+	# The special location value "<skip-config-log"> signals to the config
+	# framework's own catch-all change handler that this update is internal
+	# and need not be logged.
+	Option::set("Site::local_nets", new_local_nets, "<skip-config-log>");
+
+	return new_value;
+	}
+
+event zeek_init() &priority=10
+	{
+	# Have these run with a lower priority so we account for additions/removals
+	# from user created change handlers.
+	Option::set_change_handler("Site::local_nets", update_local_nets_table, -5);
+	Option::set_change_handler("Site::local_zones", update_local_zones_regex, -5);
+	Option::set_change_handler("Site::neighbor_zones", update_neighbor_zones_regex, -5);
+
+	# If private address ranges are to be local, add a change handler to sync
+	# these over in the future, and trigger it once to bring local_nets up
+	# to speed immediately.
+	if ( private_address_space_is_local )
+		{
+		Option::set_change_handler("Site::private_address_space", update_private_address_space, -5);
+		update_private_address_space("Site::private_address_space", Site::private_address_space);
+		}
+
+	# Use change handler to initialize local_nets mapping table and zones
+	# regexes.
+	update_local_nets_table("Site::local_nets", Site::local_nets);
+	update_local_zones_regex("Site::local_zones", Site::local_zones);
+	update_neighbor_zones_regex("Site::neighbor_zones", Site::neighbor_zones);
 	}

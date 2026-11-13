@@ -1,5 +1,5 @@
 # @TEST-EXEC-FAIL: zeek -b %INPUT >out 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff out
+# @TEST-EXEC: btest-diff-remove-abspath out
 
 # @TEST-DOC: Test for type-checking of function call arguments.
 
@@ -19,4 +19,3 @@ function sort_set(s: set[string]): vector of string
 add s["hi", "there"];
 # This sort_set call should warn about mismatched table/set types.
 sort_set(s);
-

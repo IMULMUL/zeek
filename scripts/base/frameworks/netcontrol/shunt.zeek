@@ -40,19 +40,19 @@ export {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(NetControl::SHUNT, [$columns=ShuntInfo, $ev=log_netcontrol_shunt, $path="netcontrol_shunt", $policy=log_policy_shunt]);
+	Log::create_stream(NetControl::SHUNT, Log::Stream($columns=ShuntInfo, $ev=log_netcontrol_shunt, $path="netcontrol_shunt", $policy=log_policy_shunt));
 	}
 
 function shunt_flow(f: flow_id, t: interval, location: string &default="") : string
 	{
 	local flow = NetControl::Flow(
-		$src_h=addr_to_subnet(f$src_h),
+		$src_h=f$src_h as subnet,
 		$src_p=f$src_p,
-		$dst_h=addr_to_subnet(f$dst_h),
+		$dst_h=f$dst_h as subnet,
 		$dst_p=f$dst_p
 	);
-	local e: Entity = [$ty=FLOW, $flow=flow];
-	local r: Rule = [$ty=DROP, $target=MONITOR, $entity=e, $expire=t, $location=location];
+	local e = Entity($ty=FLOW, $flow=flow);
+	local r = Rule($ty=DROP, $target=MONITOR, $entity=e, $expire=t, $location=location);
 
 	local id = add_rule(r);
 
@@ -68,4 +68,3 @@ function shunt_flow(f: flow_id, t: interval, location: string &default="") : str
 
 	return id;
 	}
-

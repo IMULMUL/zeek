@@ -1,6 +1,6 @@
 # Just a very basic test to check if ANALYZER_DATA_EVENT works.
 # Also check if "in" works with binary data.
-# @TEST-EXEC: zeek -b -r $TRACES/pe/pe.trace %INPUT
+# @TEST-EXEC: zeek -b -r $TRACES/pe/pe.pcap %INPUT
 # @TEST-EXEC: btest-diff .stdout
 # @TEST-EXEC: btest-diff .stderr
 
@@ -19,4 +19,3 @@ event file_new (f: fa_file)
 	Files::add_analyzer(f, Files::ANALYZER_DATA_EVENT,
 		[$stream_event=stream_data]);
 	}
-

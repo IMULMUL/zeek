@@ -20,7 +20,7 @@ hook notice(n: Notice::Info) &priority=-1
 		return;
 
 	# This should only be done for notices that are being sent to email.
-	if ( ! n?$email_dest )
+	if ( |n$email_dest| == 0 )
 		return;
 
 	# I'm not recovering gracefully from the when statements because I want
@@ -33,7 +33,7 @@ hook notice(n: Notice::Info) &priority=-1
 	if ( n?$src )
 		{
 		add n$email_delay_tokens["hostnames-src"];
-		when ( local src_name = lookup_addr(n$src) )
+		when [n, uid, output] ( local src_name = lookup_addr(n$src) )
 			{
 			output = string_cat("orig/src hostname: ", src_name, "\n");
 			tmp_notice_storage[uid]$email_body_sections += output;
@@ -43,7 +43,7 @@ hook notice(n: Notice::Info) &priority=-1
 	if ( n?$dst )
 		{
 		add n$email_delay_tokens["hostnames-dst"];
-		when ( local dst_name = lookup_addr(n$dst) )
+		when [n, uid, output] ( local dst_name = lookup_addr(n$dst) )
 			{
 			output = string_cat("resp/dst hostname: ", dst_name, "\n");
 			tmp_notice_storage[uid]$email_body_sections += output;

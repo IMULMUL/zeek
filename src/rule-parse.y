@@ -1,6 +1,6 @@
 %{
 #include "zeek/zeek-config.h"
-#include <stdio.h>
+#include <cstdio>
 #include <netinet/in.h>
 #include <vector>
 
@@ -19,17 +19,17 @@ extern void end_PS();
 zeek::detail::Rule* current_rule = nullptr;
 const char* current_rule_file = nullptr;
 
-static uint8_t ip4_mask_to_len(uint32_t mask)
-	{
-	if ( mask == 0xffffffff )
-	    return 32;
+static uint8_t ip4_mask_to_len(uint32_t mask) {
+    if ( mask == 0xffffffff )
+        return 32;
 
-	uint32_t x = ~mask + 1;
-	uint8_t len;
-	for ( len = 0; len < 32 && (! (x & (1 << len))); ++len );
+    uint32_t x = ~mask + 1;
+    uint8_t len;
+    for ( len = 0; len < 32 && (! (x & (1 << len))); ++len )
+        ;
 
-	return 32 - len;
-	}
+    return 32 - len;
+}
 %}
 
 %token TOK_COMP
@@ -108,7 +108,7 @@ rule_list:
 rule:
 		TOK_SIGNATURE TOK_IDENT
 			{
-			zeek::detail::Location l(current_rule_file, rules_line_number+1, 0, 0, 0);
+			zeek::detail::Location l(current_rule_file, rules_line_number+1, 0);
 			current_rule = new zeek::detail::Rule(yylval.str, l);
 			}
 		'{' rule_attr_list '}'
@@ -153,20 +153,19 @@ rule_attr:
 			{
 			int proto = 0;
 			switch ( $3 ) {
-			case zeek::detail::RuleHdrTest::ICMP: proto = IPPROTO_ICMP; break;
-			case zeek::detail::RuleHdrTest::ICMPv6: proto = IPPROTO_ICMPV6; break;
-			// signature matching against outer packet headers of IP-in-IP
-			// tunneling not supported, so do a no-op there
-			case zeek::detail::RuleHdrTest::IP: proto = 0; break;
-			case zeek::detail::RuleHdrTest::IPv6: proto = 0; break;
-			case zeek::detail::RuleHdrTest::TCP: proto = IPPROTO_TCP; break;
-			case zeek::detail::RuleHdrTest::UDP: proto = IPPROTO_UDP; break;
-			default:
-				rules_error("internal_error: unknown protocol");
+				case zeek::detail::RuleHdrTest::ICMP: proto = IPPROTO_ICMP; break;
+				case zeek::detail::RuleHdrTest::ICMPv6: proto = IPPROTO_ICMPV6; break;
+				// signature matching against outer packet headers of IP-in-IP
+				// tunneling not supported, so do a no-op there
+				case zeek::detail::RuleHdrTest::IP: proto = 0; break;
+				case zeek::detail::RuleHdrTest::IPv6: proto = 0; break;
+				case zeek::detail::RuleHdrTest::TCP: proto = IPPROTO_TCP; break;
+				case zeek::detail::RuleHdrTest::UDP: proto = IPPROTO_UDP; break;
+				default:
+					rules_error("internal_error: unknown protocol");
 			}
 
-			if ( proto )
-				{
+			if ( proto ) {
 				auto* vallist = new zeek::detail::maskedvalue_list;
 				auto* val = new zeek::detail::MaskedValue();
 
@@ -179,7 +178,7 @@ rule_attr:
 				current_rule->AddHdrTest(new zeek::detail::RuleHdrTest(
 					zeek::detail::RuleHdrTest::NEXT, 0, 0,
 					(zeek::detail::RuleHdrTest::Comp) $2, vallist));
-				}
+			}
 			}
 
 	|	TOK_IP_PROTO TOK_COMP value_list
@@ -191,7 +190,18 @@ rule_attr:
 				(zeek::detail::RuleHdrTest::Comp) $2, $3));
 			}
 
-	|	TOK_EVENT string
+	|	TOK_EVENT TOK_IDENT
+			{
+			if ( is_event($2) )
+				current_rule->AddAction(new zeek::detail::RuleActionEvent(nullptr, $2));
+			else
+				rules_error("identifier is not an event", $2);
+			}
+
+	|	TOK_EVENT TOK_IDENT TOK_STRING
+			{ current_rule->AddAction(new zeek::detail::RuleActionEvent($3, $2)); }
+
+	|	TOK_EVENT TOK_STRING
 			{ current_rule->AddAction(new zeek::detail::RuleActionEvent($2)); }
 
 	|	TOK_MIME string opt_strength
@@ -220,16 +230,16 @@ rule_attr:
 			}
 
 	|	TOK_REQUIRES_SIGNATURE TOK_IDENT
-			{ current_rule->AddRequires($2, 0, 0); }
+			{ current_rule->AddRequires($2, false, false); }
 
 	|	TOK_REQUIRES_SIGNATURE '!' TOK_IDENT
-			{ current_rule->AddRequires($3, 0, 1); }
+			{ current_rule->AddRequires($3, false, true); }
 
 	|	TOK_REQUIRES_REVERSE_SIGNATURE TOK_IDENT
-			{ current_rule->AddRequires($2, 1, 0); }
+			{ current_rule->AddRequires($2, true, false); }
 
 	|	TOK_REQUIRES_REVERSE_SIGNATURE '!' TOK_IDENT
-			{ current_rule->AddRequires($3, 1, 1); }
+			{ current_rule->AddRequires($3, true, true); }
 
 	|	TOK_SAME_IP
 			{ current_rule->AddCondition(new zeek::detail::RuleConditionSameIP()); }
@@ -292,11 +302,10 @@ value_list:
 	|	value_list ',' ranged_value
 			{
 			int numVals = $3->length();
-			for ( int idx = 0; idx < numVals; idx++ )
-				{
+			for ( int idx = 0; idx < numVals; idx++ ) {
 				zeek::detail::MaskedValue* val = (*$3)[idx];
 				$1->push_back(val);
-				}
+			}
 			$$ = $1;
 			}
 	|	value_list ',' TOK_IDENT
@@ -353,13 +362,12 @@ ranged_value:
 		TOK_INT '-' TOK_INT
 			{
 			$$ = new zeek::detail::maskedvalue_list();
-			for ( int val = $1; val <= $3; val++ )
-				{
+			for ( int val = $1; val <= $3; val++ ) {
 				auto* masked = new zeek::detail::MaskedValue();
 				masked->val = val;
 				masked->mask = 0xffffffff;
 				$$->push_back(masked);
-				}
+			}
 			}
 		;
 
@@ -436,29 +444,20 @@ pattern:
 
 %%
 
-void rules_error(const char* msg)
-	{
-	zeek::reporter->Error("Error in signature (%s:%d): %s\n",
-	                      current_rule_file, rules_line_number+1, msg);
-	zeek::detail::rule_matcher->SetParseError();
-	}
+void rules_error(const char* msg) {
+    zeek::reporter->Error("Error in signature (%s:%d): %s", current_rule_file, rules_line_number + 1, msg);
+    zeek::detail::rule_matcher->SetParseError();
+}
 
-void rules_error(const char* msg, const char* addl)
-	{
-	zeek::reporter->Error("Error in signature (%s:%d): %s (%s)\n",
-	                      current_rule_file, rules_line_number+1, msg, addl);
-	zeek::detail::rule_matcher->SetParseError();
-	}
+void rules_error(const char* msg, const char* addl) {
+    zeek::reporter->Error("Error in signature (%s:%d): %s (%s)", current_rule_file, rules_line_number + 1, msg, addl);
+    zeek::detail::rule_matcher->SetParseError();
+}
 
-void rules_error(zeek::detail::Rule* r, const char* msg)
-	{
-	const zeek::detail::Location& l = r->GetLocation();
-	zeek::reporter->Error("Error in signature %s (%s:%d): %s\n",
-	                      r->ID(), l.filename, l.first_line, msg);
-	zeek::detail::rule_matcher->SetParseError();
-	}
+void rules_error(zeek::detail::Rule* r, const char* msg) {
+    const zeek::detail::Location& l = r->GetLocation();
+    zeek::reporter->Error("Error in signature %s (%s:%d): %s", r->ID(), l.FileName(), l.FirstLine(), msg);
+    zeek::detail::rule_matcher->SetParseError();
+}
 
-int rules_wrap(void)
-	{
-	return 1;
-	}
+int rules_wrap(void) { return 1; }

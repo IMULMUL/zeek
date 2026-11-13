@@ -1,12 +1,11 @@
-# @TEST-EXEC: zeek -b -r $TRACES/ftp/ipv4.trace %INPUT
+# @TEST-EXEC: zeek -b -r $TRACES/ftp/ipv4.pcap %INPUT
 # @TEST-EXEC: btest-diff conn.log
 
 @load base/protocols/conn
 @load base/protocols/ftp
-@load base/frameworks/dpd
 @load-sigs blah.sig
 
-@TEST-START-FILE blah.sig
+# @TEST-START-FILE blah.sig
 signature blah
 	{
 	ip-proto == tcp
@@ -14,7 +13,7 @@ signature blah
 	payload /.*/
 	eval mark_conn
 	}
-@TEST-END-FILE
+# @TEST-END-FILE
 
 function mark_conn(state: signature_state, data: string): bool
 	{

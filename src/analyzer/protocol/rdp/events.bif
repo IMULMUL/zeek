@@ -39,7 +39,7 @@ event rdp_native_encrypted_data%(c: connection, orig: bool, len: count%);
 ##
 ## c: The connection record for the underlying transport-layer session/flow.
 ##
-## cookie: The cookie included in the request.
+## cookie: The cookie included in the request; empty if no cookie was provided.
 ##
 ## flags: The flags set by the client.
 event rdp_connect_request%(c: connection, cookie: string, flags: count%);
@@ -109,7 +109,7 @@ event rdp_gcc_server_create_response%(c: connection, result: count%);
 ## encryption_level: The 32-bit integer representing the encryption level used in the connection.
 event rdp_server_security%(c: connection, encryption_method: count, encryption_level: count%);
 
-## Generated for a server certificate section.  If multiple X.509 
+## Generated for a server certificate section.  If multiple X.509
 ## certificates are included in chain, this event will still
 ## only be generated a single time.
 ##

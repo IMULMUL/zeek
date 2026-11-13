@@ -26,6 +26,14 @@ export {
 	## Default writer to use if a filter does not specify anything else.
 	const default_writer = WRITER_ASCII &redef;
 
+	## Default logging directory. An empty string implies using the
+	## current working directory.
+	##
+	## This directory is also used for rotated logs in cases where
+	## :zeek:see:`Log::rotation_format_func` returns a record with
+	## an empty or unset ``dir`` field.
+	const default_logdir = "" &redef;
+
 	## Default separator to use between fields.
 	## Individual writers can use a different value.
 	const separator = "\t" &redef;
@@ -101,7 +109,7 @@ export {
 		path: string;		##< Original path value.
 		open: time;		##< Time when opened.
 		close: time;		##< Time when closed.
-		terminating: bool;	##< True if rotation occured due to Zeek shutting down.
+		terminating: bool;	##< True if rotation occurred due to Zeek shutting down.
 	};
 
 	## The function type for log rotation post processors.
@@ -143,7 +151,7 @@ export {
 		## will generally fail.
 		dir: string &default = default_rotation_dir;
 
-		## A base name to use for the the rotated log.  Log writers may later
+		## A base name to use for the rotated log.  Log writers may later
 		## append a file extension of their choosing to this user-chosen
 		## base (e.g. if using the default ASCII writer and you want
 		## rotated files of the format "foo-<date>.log", then this basename
@@ -155,9 +163,6 @@ export {
 	};
 
 	## A function that one may use to customize log file rotation paths.
-	## Note that the "fname" field of the *ri* argument is always an
-	## empty string for the purpose of this function call (i.e. the full
-	## file name is not determined yet).
 	const rotation_format_func: function(ri: RotationFmtInfo): RotationPath &redef;
 
 	## Default naming format for timestamps embedded into filenames.
@@ -166,6 +171,14 @@ export {
 
 	## Default shell command to run on rotated files. Empty for none.
 	const default_rotation_postprocessor_cmd = "" &redef;
+
+	## This table contains environment variables to be used for the
+	## :zeek:see:`Log::default_rotation_postprocessor_cmd` command
+	## when executed via :zeek:see:`Log::run_rotation_postprocessor_cmd`.
+	##
+	## The entries in this table will be prepended with ``ZEEK_ARG_``
+	## as done by :zeek:see:`system_env`.
+	option default_rotation_postprocessor_cmd_env: table[string] of string = {};
 
 	## Specifies the default postprocessor function per writer type.
 	## Entries in this table are initialized by each writer type.
@@ -185,12 +198,12 @@ export {
 
 	## Default separator for log field scopes when logs are unrolled and
 	## flattened.  This will be the string between field name components.
-	## For example, setting this to "_" will cause the typical field
-	## "id.orig_h" to turn into "id_orig_h".
+	## For example, setting this to ``_`` will cause the typical field
+	## ``id.orig_h`` to turn into ``id_orig_h``.
 	const default_scope_sep = "." &redef;
 
 	## A prefix for extension fields which can be optionally prefixed
-	## on all log lines by setting the `ext_func` field in the
+	## on all log lines by setting the ``ext_func`` field in the
 	## log filter.
 	const Log::default_ext_prefix: string = "_" &redef;
 
@@ -201,6 +214,19 @@ export {
 	## that no extensions are added.
 	const Log::default_ext_func: function(path: string): any =
 		function(path: string) { } &redef;
+
+	## Maximum default log write delay for a stream. A :zeek:see:`Log::write`
+	## operation is delayed by at most this interval if :zeek:see:`Log::delay`
+	## is called within :zeek:see:`Log::log_stream_policy`.
+	const default_max_delay_interval = 200msec &redef;
+
+	## The maximum length of the write delay queue per stream. If exceeded,
+	## an attempt is made to evict the oldest writes from the queue. If
+	## post delay callbacks re-delay a write operation, the maximum queue
+	## size may be exceeded.
+	## A value of 0 disables the queue-size limit. Delayed records still
+	## complete or expire normally.
+	const default_max_delay_queue_size = 1000 &redef;
 
 	## A filter type describes how to customize logging streams.
 	type Filter: record {
@@ -365,10 +391,65 @@ export {
 		## New Filters created for this stream will inherit
 		## this policy hook, unless they provide their own.
 		policy: PolicyHook &optional;
+
+		## Event groups associated with this stream that are disabled
+		## when :zeek:see:`Log::disable_stream` is invoked and
+		## re-enabled during :zeek:see:`Log::enable_stream`.
+		##
+		## This field can be used to short-circuit event handlers that
+		## are solely responsible for logging functionality at runtime
+		## when a log stream is disabled.
+		##
+		## This field allows for both, attribute event groups and module
+		## event groups. If the given group names exists as attribute
+		## or module or either event group, they are disabled when the
+		## log stream is disabled and enabled when the stream is
+		## enabled again.
+		event_groups: set[string] &default=set();
+
+		## Maximum delay interval for this stream.
+		##
+		## This value can be increased using :zeek:see:`Log::set_max_delay_interval`
+		## after the stream has been created.
+		##
+		## .. :zeek:see:`Log::default_max_delay_interval`
+		## .. :zeek:see:`Log::set_max_delay_interval`
+		max_delay_interval: interval &default=default_max_delay_interval;
+
+		## Maximum delay queue size of this stream.
+		## A value of 0 disables the queue-size limit. Delayed records still
+		## complete or expire normally.
+		##
+		## This value can be changed using :zeek:see:`Log::set_max_delay_queue_size`
+		## after the stream has been created.
+		##
+		## .. :zeek:see:`Log::default_max_delay_queue_size`
+		## .. :zeek:see:`Log::set_max_delay_queue_size`
+		max_delay_queue_size: count &default=default_max_delay_queue_size;
+
+		## Maximum string size for field in a log record from this stream.
+		##
+		## .. :zeek:see:`Log::default_max_field_string_bytes`
+		max_field_string_bytes: count &default=Log::default_max_field_string_bytes;
+
+		## Maximum total string size in a log record from this stream.
+		##
+		## .. :zeek:see:`Log::default_max_total_string_bytes`
+		max_total_string_bytes: count &default=Log::default_max_total_string_bytes;
+
+		## Maximum container elements for field in a log record from this stream.
+		##
+		## .. :zeek:see:`Log::default_max_field_container_elements`
+		max_field_container_elements: count &default=Log::default_max_field_container_elements;
+
+		## Maximum total container elements in a log record from this stream.
+		##
+		## .. :zeek:see:`Log::default_max_total_container_elements`
+		max_total_container_elements: count &default=Log::default_max_total_container_elements;
 	};
 
 	## Sentinel value for indicating that a filter was not found when looked up.
-	const no_filter: Filter = [$name="<not found>"];
+	const no_filter = Filter($name="<not found>");
 
 	## Creates a new logging stream with the default filter.
 	##
@@ -452,8 +533,8 @@ export {
 	##
 	## Returns: The set of filter names associated with the stream.
 	##
-	## ..zeek:see:: Log::remove_filter Log::add_default_filter
-	##   Log::remove_default_filter Log::get_filter
+	## .. zeek:see:: Log::remove_filter Log::add_default_filter
+	##               Log::remove_default_filter Log::get_filter
 	global get_filter_names: function(id: ID) : set[string];
 
 	## Gets a filter associated with an existing logging stream.
@@ -558,6 +639,7 @@ export {
 	##          to postprocess a rotated log file.
 	##
 	## .. zeek:see:: Log::default_rotation_date_format
+	##    Log::default_rotation_postprocessor_cmd_env
 	##    Log::default_rotation_postprocessor_cmd
 	##    Log::default_rotation_postprocessors
 	global run_rotation_postprocessor_cmd: function(info: RotationInfo, npath: string) : bool;
@@ -571,8 +653,113 @@ export {
 	## log write, prior to iterating over the stream's associated filters.
 	## As with filter-specific hooks, breaking from the hook vetoes writing
 	## of the given log record. Note that filter-level policy hooks still get
-	## invoked after the global hook vetos, but they cannot "un-veto" the write.
+	## invoked after the global hook vetoes, but they cannot "un-veto" the write.
 	global log_stream_policy: Log::StreamPolicyHook;
+
+	## Type of function to invoke when delaying a log write has completed.
+	##
+	## Functions of this type take the same arguments as :zeek:see:`Log::StreamPolicyHook`
+	## and act as a callback passed to :zeek:see:`Log::delay`. They execute
+	## just before the record is forwarded to the individual log filters.
+	##
+	## Returning ``F`` from a post delay callback discards the log write.
+	type PostDelayCallback: function(rec: any, id: ID): bool;
+
+	## Type of the opaque value returned by :zeek:see:`Log::delay`. These
+	## values can be passed to :zeek:see:`Log::delay_finish` to release a
+	## delayed write operation.
+	type DelayToken: opaque of LogDelayToken;
+
+	## Represents a post delay callback that simply returns T. This is used
+	## as a default value for :zeek:see:`Log::delay` and ignored internally.
+	global empty_post_delay_cb: PostDelayCallback;
+
+	## Delay a log write.
+	##
+	## Calling this function is currently only allowed within the execution
+	## of a :zeek:see:`Log::log_stream_policy` hook and requires the caller
+	## to provide the stream ID and log record of the active write operation
+	## as parameters.
+	##
+	## Conceptually, the delay is inserted between the execution of the
+	## :zeek:see:`Log::log_stream_policy` hook and the policy hooks of filters.
+	##
+	## Calling this function increments a reference count that can subsequently
+	## be decremented using :zeek:see:`Log::delay_finish`.
+	## The delay completes when either the reference count reaches zero, or
+	## the configured maximum delay interval for the stream expires. The
+	## optional *post_delay_cb* is invoked when the delay completed.
+	##
+	## The *post_delay_cb* function can extend the delay by invoking
+	## :zeek:see:`Log::delay` again. There's no limit to how often a write
+	## can be re-delayed. Further, it can discard the log record altogether
+	## by returning ``F``. If *post_delay_cb* is not provided, the behavior
+	## is equivalent to a no-op callback solely returning ``T``.
+	##
+	## id: The ID associated with a logging stream.
+	##
+	## rec: The log record.
+	##
+	## post_delay_cb: A callback to invoke when the delay completed.
+	##
+	## Returns: An opaque token of type :zeek:see:`Log::DelayToken`
+	##          to be passed to :zeek:see:`Log::delay_finish`.
+	global delay: function(id: ID, rec: any, post_delay_cb: PostDelayCallback &default=empty_post_delay_cb): DelayToken;
+
+	## Release a delay reference taken with :zeek:see:`Log::delay`.
+	##
+	## When the last reference is released, :zeek:see:`Log::delay_finish`
+	## synchronously resumes the delayed :zeek:see:`Log::write` operation.
+	##
+	## id: The ID associated with a logging stream.
+	##
+	## rec: The log record.
+	##
+	## token: The opaque token as returned by :zeek:see:`Log::delay`.
+	##
+	## Returns: ``T`` on success, ``F`` if an inconsistent combination of
+	##          *id*, *rec* and *token* was provided.
+	global delay_finish: function(id: ID, rec: any, token: DelayToken): bool;
+
+	## Set the maximum delay for a stream.
+	##
+	## Multiple calls to this function will only ever increase the maximum
+	## delay, the delay cannot be lowered. The default maximum delay for a
+	## stream is :zeek:see:`Log::default_max_delay_interval`.
+	##
+	## When a stream is removed and re-created via :zeek:see:`Log::create_stream`,
+	## the new stream is re-configured with the previously used maximum delay.
+	##
+	## id: The ID associated with a logging stream.
+	##
+	## max_delay: The maximum delay interval for this stream.
+	##
+	## Returns: ``T`` on success, else ``F``.
+	global set_max_delay_interval: function(id: Log::ID, max_delay: interval): bool;
+
+	## Set the given stream's delay queue size.
+	##
+	## If *queue_size* is positive and the queue holds more records than
+	## this limit, these are attempted to be evicted at the time of the call.
+	## A value of 0 disables the queue-size limit. Delayed records still
+	## complete or expire normally.
+	##
+	## When a stream is removed and re-created via :zeek:see:`Log::create_stream`,
+	## the new stream is re-configured with the most recently used queue size.
+	##
+	## id: The ID associated with a logging stream.
+	##
+	## queue_size: The maximum delay queue size of this stream.
+	##
+	## Returns: ``T`` on success, else ``F``.
+	global set_max_delay_queue_size: function(id: Log::ID, queue_size: count): bool;
+
+	## Get the current size of the delay queue for a stream.
+	##
+	## id: The ID associated with a logging stream.
+	##
+	## Returns: The current size of the delay queue, or -1 on error.
+	global get_delay_queue_size: function(id: Log::ID): int;
 }
 
 global all_streams: table[ID] of Stream = table();
@@ -587,7 +774,7 @@ global filters: table[ID, string] of Filter;
 module Log;
 
 # Used internally by the log manager.
-function __default_rotation_postprocessor(info: RotationInfo) : bool
+function __default_rotation_postprocessor(info: RotationInfo) : bool &is_used
 	{
 	if ( info$writer in default_rotation_postprocessors )
 		return default_rotation_postprocessors[info$writer](info);
@@ -634,8 +821,7 @@ function default_path_func(id: ID, path: string, rec: any) : string
 		return to_lower(id_str);
 	}
 
-# Run post-processor on file. If there isn't any postprocessor defined,
-# we move the file to a nicer name.
+# Run post-processor on file.
 function run_rotation_postprocessor_cmd(info: RotationInfo, npath: string) : bool
 	{
 	local pp_cmd = default_rotation_postprocessor_cmd;
@@ -648,11 +834,15 @@ function run_rotation_postprocessor_cmd(info: RotationInfo, npath: string) : boo
 
 	# The date format is hard-coded here to provide a standardized
 	# script interface.
-	system(fmt("%s %s %s %s %s %d %s",
-               pp_cmd, safe_shell_quote(npath), safe_shell_quote(info$path),
-               strftime("%y-%m-%d_%H.%M.%S", info$open),
-               strftime("%y-%m-%d_%H.%M.%S", info$close),
-               info$terminating, writer));
+	#
+	# Note that system_env() does not clear the environment, it only
+	# adds entries from the given table. Unusual, but useful here.
+	system_env(fmt("%s %s %s %s %s %d %s",
+	               pp_cmd, safe_shell_quote(npath), safe_shell_quote(info$path),
+	               strftime("%y-%m-%d_%H.%M.%S", info$open),
+	               strftime("%y-%m-%d_%H.%M.%S", info$close),
+	               info$terminating, writer),
+	           Log::default_rotation_postprocessor_cmd_env);
 
 	return T;
 	}
@@ -677,7 +867,7 @@ function Log::rotation_format_func(ri: Log::RotationFmtInfo): Log::RotationPath
 	# The reason for branching here is historical:
 	# the default format path before the intro of Log::rotation_format_func
 	# always separated the path from open-time using a '-', but ASCII's
-	# default postprocessor chose to rename using a '.' separaor.  It also
+	# default postprocessor chose to rename using a '.' separator.  It also
 	# chose a different date format.
 	if ( ri$postprocessor == __default_rotation_postprocessor &&
 	    ri$writer == WRITER_ASCII &&
@@ -725,6 +915,19 @@ function remove_stream(id: ID) : bool
 function disable_stream(id: ID) : bool
 	{
 	delete active_streams[id];
+
+	if ( id in all_streams )
+		{
+		for ( group in all_streams[id]$event_groups )
+			{
+			if ( has_module_events(group) )
+				disable_module_events(group);
+
+			if ( has_event_group(group) )
+				disable_event_group(group);
+			}
+		}
+
 	return __disable_stream(id);
 	}
 
@@ -734,7 +937,17 @@ function enable_stream(id: ID) : bool
 		return F;
 
 	if ( id in all_streams )
+		{
 		active_streams[id] = all_streams[id];
+		for ( group in all_streams[id]$event_groups )
+			{
+			if ( has_module_events(group) )
+				enable_module_events(group);
+
+			if ( has_event_group(group) )
+				enable_event_group(group);
+			}
+		}
 
 	return T;
 	}
@@ -810,7 +1023,7 @@ function flush(id: ID): bool
 
 function add_default_filter(id: ID) : bool
 	{
-	return add_filter(id, [$name="default"]);
+	return add_filter(id, Filter($name="default"));
 	}
 
 function remove_default_filter(id: ID) : bool
@@ -821,5 +1034,55 @@ function remove_default_filter(id: ID) : bool
 event zeek_init() &priority=5
 	{
 	if ( print_to_log != REDIRECT_NONE )
-		Log::create_stream(PRINTLOG, [$columns=PrintLogInfo, $ev=log_print, $path=print_log_path]);
+		Log::create_stream(PRINTLOG, Log::Stream($columns=PrintLogInfo, $ev=log_print, $path=print_log_path));
+	}
+
+function empty_post_delay_cb(rec: any, id: ID): bool {
+	return T;
+}
+
+function delay(id: ID, rec: any, post_delay_cb: PostDelayCallback &default=empty_post_delay_cb): DelayToken
+	{
+	return Log::__delay(id, rec, post_delay_cb);
+	}
+
+function delay_finish(id: ID, rec: any, token: DelayToken): bool
+	{
+	return Log::__delay_finish(id, rec, token);
+	}
+
+function set_max_delay_interval(id: Log::ID, max_delay: interval): bool
+	{
+	# Only allow setting larger values on created streams.
+	if ( id !in all_streams )
+		return F;
+
+	# Already larger interval.
+	if ( all_streams[id]$max_delay_interval >= max_delay )
+		return T;
+
+	if ( ! Log::__set_max_delay_interval(id, max_delay) )
+		return F;
+
+	all_streams[id]$max_delay_interval = max_delay;
+
+	return T;
+	}
+
+function set_max_delay_queue_size(id: Log::ID, max_size: count): bool
+	{
+	if ( id !in all_streams )
+		return F;
+
+	if ( ! Log::__set_max_delay_queue_size(id, max_size) )
+		return F;
+
+	all_streams[id]$max_delay_queue_size = max_size;
+
+	return T;
+	}
+
+function get_delay_queue_size(id: Log::ID): int
+	{
+	return Log::__get_delay_queue_size(id);
 	}

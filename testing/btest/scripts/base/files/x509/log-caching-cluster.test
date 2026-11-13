@@ -1,25 +1,24 @@
-# Test that certificate log deduplication works in clustered mode.
+# @TEST-DOC: Test that certificate log deduplication works in clustered mode.
 #
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
-# @TEST-PORT: BROKER_PORT3
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
+# @TEST-PORT: BROKER_WORKER2_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager-1 zeek -b %INPUT"
+# @TEST-REQUIRES: ! is-windows-ci
+#
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# Clean up directories in case of btest retry.
+# @TEST-EXEC: rm -rf manager worker-1 worker-2
+#
+# @TEST-EXEC: btest-bg-run manager   "cp ../cluster-layout.zeek . && CLUSTER_NODE=manager  zeek -b %INPUT"
 # @TEST-EXEC: btest-bg-run worker-1  "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-1 zeek -b --pseudo-realtime -C -r $TRACES/tls/ecdhe.pcap %INPUT"
 
-# @TEST-EXEC: $SCRIPTS/wait-for-file manager-1/lost 15 || (btest-bg-wait -k 1 && false)
+# @TEST-EXEC: $SCRIPTS/wait-for-file manager/lost 15 || (btest-bg-wait -k 1 && false)
 
 # @TEST-EXEC: btest-bg-run worker-2  "cp ../cluster-layout.zeek . && CLUSTER_NODE=worker-2 zeek -b --pseudo-realtime -C -r $TRACES/tls/ecdhe.pcap %INPUT"
 # @TEST-EXEC: btest-bg-wait 30
-# @TEST-EXEC: btest-diff manager-1/x509.log
-
-@TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1", $interface="eth0"],
-	["worker-2"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT3")), $manager="manager-1", $interface="eth0"],
-};
-@TEST-END-FILE
+# @TEST-EXEC: btest-diff manager/x509.log
 
 @load base/protocols/ssl
 @load base/frameworks/cluster
@@ -41,14 +40,27 @@ event zeek_init()
 
 event Broker::peer_added(endpoint: Broker::EndpointInfo, msg: string)
 	{
-	continue_processing();
+	if ( /worker-2/ in Cluster::node )
+	       {
+	       when ( |X509::known_log_certs| >= 3 )
+			{
+			continue_processing();
+			}
+		timeout 3sec
+			{
+			Reporter::error("Timeout waiting for X509::known_log_certs to be populated!");
+			terminate();
+			}
+	       }
+	else
+	       continue_processing();
 	}
 @endif
 
 event SSL::log_ssl(i: SSL::Info)
 	{
 	print "log_line";
-	schedule 2secs { terminate_me() };
+	schedule 0.1sec { terminate_me() };
 	}
 
 global peers_lost = 0;
@@ -59,5 +71,5 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 	system("touch lost");
 
 	if ( peers_lost == 2 )
-		schedule 2sec { terminate_me() };
+		event terminate_me();
 	}

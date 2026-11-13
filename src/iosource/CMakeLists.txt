@@ -1,21 +1,17 @@
-
-include(ZeekSubdir)
-
-include_directories(BEFORE
-                    ${CMAKE_CURRENT_SOURCE_DIR}
-                    ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_subdirectory(pcap)
-
-set(iosource_SRCS
+zeek_add_subdir_library(
+    iosource
+    INCLUDE_DIRS
+    ${LIBKQUEUE_INCLUDE_DIRS}
+    DEPENDENCIES
+    ${LIBKQUEUE_LIBRARIES}
+    SOURCES
     BPF_Program.cc
     Component.cc
     Manager.cc
     Packet.cc
     PktDumper.cc
-    PktSrc.cc
-    )
+    PktSrc.cc)
 
-bro_add_subdir_library(iosource ${iosource_SRCS})
-add_dependencies(bro_iosource generate_outputs)
+add_subdirectory(pcap)
+add_subdirectory(pcapng)
+add_subdirectory(af_packet)

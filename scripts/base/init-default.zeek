@@ -17,6 +17,7 @@
 @load base/utils/geoip-distance
 @load base/utils/hash_hrw
 @load base/utils/numbers
+@load base/utils/packages
 @load base/utils/paths
 @load base/utils/patterns
 @load base/utils/queue
@@ -30,7 +31,6 @@
 #@load base/frameworks/logging
 @load base/frameworks/notice
 @load base/frameworks/analyzer
-@load base/frameworks/dpd
 @load base/frameworks/signatures
 @load base/frameworks/packet-filter
 @load base/frameworks/software
@@ -43,25 +43,37 @@
 @load base/frameworks/tunnels
 @load base/frameworks/openflow
 @load base/frameworks/netcontrol
+@load base/frameworks/telemetry
+@load base/frameworks/storage
+
+@if ( have_spicy() )
+@load base/frameworks/spicy
+@endif
 
 @load base/protocols/conn
 @load base/protocols/dce-rpc
 @load base/protocols/dhcp
+@load base/protocols/dhcpv6
 @load base/protocols/dnp3
 @load base/protocols/dns
+@load base/protocols/finger
 @load base/protocols/ftp
 @load base/protocols/http
 @load base/protocols/imap
 @load base/protocols/irc
 @load base/protocols/krb
+@load base/protocols/ldap
 @load base/protocols/modbus
 @load base/protocols/mqtt
 @load base/protocols/mysql
 @load base/protocols/ntlm
 @load base/protocols/ntp
 @load base/protocols/pop3
+@load base/protocols/postgresql
+@load base/protocols/quic
 @load base/protocols/radius
 @load base/protocols/rdp
+@load base/protocols/redis
 @load base/protocols/rfb
 @load base/protocols/sip
 @load base/protocols/snmp
@@ -71,6 +83,7 @@
 @load base/protocols/ssh
 @load base/protocols/ssl
 @load base/protocols/syslog
+@load base/protocols/websocket
 @load base/protocols/tunnels
 @load base/protocols/xmpp
 
@@ -78,7 +91,10 @@
 @load base/files/hash
 @load base/files/extract
 @load base/files/x509
+@load base/files/zip
 
 @load base/misc/find-checksum-offloading
 @load base/misc/find-filtered-trace
+@load base/misc/installation
 @load base/misc/version
+@load base/misc/zip-analyzer-limit

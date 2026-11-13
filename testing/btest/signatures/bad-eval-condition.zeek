@@ -1,9 +1,9 @@
-# @TEST-EXEC-FAIL: zeek -b -r $TRACES/ftp/ipv4.trace %INPUT
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath  btest-diff .stderr
+# @TEST-EXEC-FAIL: zeek -b -r $TRACES/ftp/ipv4.pcap %INPUT
+# @TEST-EXEC: btest-diff-remove-abspath .stderr
 
 @load-sigs blah.sig
 
-@TEST-START-FILE blah.sig
+# @TEST-START-FILE blah.sig
 signature blah
 	{
 	ip-proto == tcp
@@ -11,7 +11,7 @@ signature blah
 	payload /.*/
 	eval mark_conn
 	}
-@TEST-END-FILE
+# @TEST-END-FILE
 
 # wrong function signature for use with signature 'eval' conditions
 # needs to be reported

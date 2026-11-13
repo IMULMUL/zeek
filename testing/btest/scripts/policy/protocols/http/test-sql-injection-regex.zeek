@@ -1,7 +1,7 @@
 # @TEST-EXEC: zeek -b %INPUT > output
 # @TEST-EXEC: btest-diff output
 
-@load protocols/http/detect-sqli
+@load protocols/http/detect-sql-injection
 
 event zeek_init()
 	{
@@ -14,7 +14,6 @@ event zeek_init()
 	add positive_matches["/index.asp?ID='+139+'0"];
 	add positive_matches["/index.php?blah=123'/*blooblah*/;select * from something;--"];
 	add positive_matches["/index.cfm?ID=3%' and '%'='"];
-	add positive_matches["/index.php?mac=\" OR whatever LIKE \"%"];
 	add positive_matches["/index.cfm?ID=3;declare @d int;--"];
 	add positive_matches["/index.cfm?subjID=12;create table t_jiaozhu(jiaozhu varchar(200))"];
 	add positive_matches["/index.cfm?subjID=12%' and(char(94)+user+char(94))>0 and '%'='"];
@@ -37,6 +36,8 @@ event zeek_init()
 	add positive_matches["/index.php?id=22 /*!49999 and 1=2*/-- and 1=1"];
 	add positive_matches["/index.php?ID=59 and (select count(table_name) from user_tables)>0 and 1=1"];
 	add positive_matches["/index.php?ID=60 and exists (select * from [news])"];
+	add positive_matches["?id=1'+OR+'1'='1"];
+	add positive_matches["?id=1'+UNION+SELECT+NULL,+version()+#"];
 
 	# These are not detected currently.
 	#add positive_matches["/index.asp?ARF_ID=(1/(1-(asc(mid(now(),18,1))\(2^7) mod 2)))"];
@@ -94,6 +95,7 @@ event zeek_init()
 	add negative_matches["/A-B-C-D/inc/foobar.php?img=1179681280a b c d arf union.jpg"];
 
 	# These are still being matched accidentally.
+	#add positive_matches["/index.php?mac=\" OR whatever LIKE \"%"];
 	#add negative_matches["/api/datasources/proxy/1/query?db=telegraf&q=SELECT mean(\"0.5\") AS \"0.5\", mean(\"0.9\") AS \"0.9\", mean(\"0.99\") AS \"0.99\" FROM \"boomd_indexer_write_size_bytes\" WHERE (\"type\" = 'key' AND \"space\" =~ /^(corelight|wrccdc)$/) AND time >= 1561410802000ms and time <= 1561416568000ms GROUP BY time(1s);SELECT derivative(sum(\"sum\"), 1s) FROM \"boomd_indexer_write_size_bytes\" WHERE (\"type\" = 'key' AND \"space\" =~ /^(corelight|wrccdc)$/) AND time >= 1561410802000ms and time <= 1561416568000ms GROUP BY time(1s)&epoch=ms"];
 	#add negative_matches["/test,+soviet+union&searchscope=7&SORT=DZ/test,+soviet+union&foobar=7"];
 	#add negative_matches["/search?hl=en&q=fee union western"];

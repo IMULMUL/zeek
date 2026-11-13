@@ -29,11 +29,16 @@ export {
 	## IRC DCC data finalization hook.  Remaining expected IRC DCC state may be
 	## purged when it's called.
 	global finalize_irc_data: Conn::RemovalHook;
+
+	## The maximum number of expected DCC transfers to track. If this limit is
+	## exceeded, a ``irc_max_dcc_expected_transfers_exceeded`` weird will be
+	## reported. Set this to zero to disable the check.
+	const max_dcc_expected_transfers: count = 5000 &redef;
 }
 
 global dcc_expected_transfers: table[addr, port] of Info &read_expire=5mins;
 
-function dcc_relay_topic(): string
+function dcc_relay_topic(): string &is_used
 	{
 	local rval = Cluster::rr_topic(Cluster::proxy_pool, "dcc_transfer_rr_key");
 
@@ -44,11 +49,11 @@ function dcc_relay_topic(): string
 	return rval;
 	}
 
-event dcc_transfer_add(host: addr, p: port, info: Info)
+event dcc_transfer_add(host: addr, p: port, info: Info) &is_used
 	{
 @if ( Cluster::local_node_type() == Cluster::PROXY ||
       Cluster::local_node_type() == Cluster::MANAGER )
-    Broker::publish(Cluster::worker_topic, dcc_transfer_add, host, p, info);
+	Cluster::publish(Cluster::worker_topic, dcc_transfer_add, host, p, info);
 @else
 	dcc_expected_transfers[host, p] = info;
 	Analyzer::schedule_analyzer(0.0.0.0, host, p,
@@ -56,11 +61,11 @@ event dcc_transfer_add(host: addr, p: port, info: Info)
 @endif
 	}
 
-event dcc_transfer_remove(host: addr, p: port)
+event dcc_transfer_remove(host: addr, p: port) &is_used
 	{
 @if ( Cluster::local_node_type() == Cluster::PROXY ||
       Cluster::local_node_type() == Cluster::MANAGER )
-    Broker::publish(Cluster::worker_topic, dcc_transfer_remove, host, p);
+	Cluster::publish(Cluster::worker_topic, dcc_transfer_remove, host, p);
 @else
 	delete dcc_expected_transfers[host, p];
 @endif
@@ -76,10 +81,15 @@ function log_dcc(f: fa_file)
 
 		local irc = dcc_expected_transfers[cid$resp_h, cid$resp_p];
 
-		local tmp = irc$command;
+		local tmp_cmd: string = "";
+		if ( irc?$command )
+			tmp_cmd = irc$command;
+
 		irc$command = "DCC";
 		Log::write(IRC::LOG, irc);
-		irc$command = tmp;
+
+		if ( |tmp_cmd| != 0 )
+			irc$command = tmp_cmd;
 
 		# Delete these values in case another DCC transfer
 		# happens during the IRC session.
@@ -90,14 +100,14 @@ function log_dcc(f: fa_file)
 		delete dcc_expected_transfers[cid$resp_h, cid$resp_p];
 
 @if ( Cluster::is_enabled() )
-		Broker::publish(dcc_relay_topic(), dcc_transfer_remove,
-		                cid$resp_h, cid$resp_p);
+		Cluster::publish(dcc_relay_topic(), dcc_transfer_remove,
+		                 cid$resp_h, cid$resp_p);
 @endif
 		return;
 		}
 	}
 
-event file_new(f: fa_file) &priority=-5
+event file_sniff(f: fa_file, meta: fa_metadata) &priority=-5
 	{
 	if ( f$source == "IRC_DATA" )
 		log_dcc(f);
@@ -111,14 +121,24 @@ event irc_dcc_message(c: connection, is_orig: bool,
 	set_session(c);
 	if ( dcc_type != "SEND" )
 		return;
+
+
+	if ( max_dcc_expected_transfers > 0 &&
+	     |dcc_expected_transfers| >= max_dcc_expected_transfers )
+		{
+		Reporter::conn_weird("irc_max_dcc_expected_transfers_exceeded", c);
+		return;
+		}
+
 	c$irc$dcc_file_name = argument;
 	c$irc$dcc_file_size = size;
 	local p = count_to_port(dest_port, tcp);
 	Analyzer::schedule_analyzer(0.0.0.0, address, p, Analyzer::ANALYZER_IRC_DATA, 5 min);
+
 	dcc_expected_transfers[address, p] = c$irc;
 
 @if ( Cluster::is_enabled() )
-	Broker::publish(dcc_relay_topic(), dcc_transfer_add, address, p, c$irc);
+	Cluster::publish(dcc_relay_topic(), dcc_transfer_add, address, p, c$irc);
 @endif
 	}
 
@@ -139,8 +159,8 @@ hook finalize_irc_data(c: connection)
 		delete dcc_expected_transfers[c$id$resp_h, c$id$resp_p];
 
 @if ( Cluster::is_enabled() )
-		Broker::publish(dcc_relay_topic(), dcc_transfer_remove,
-		                c$id$resp_h, c$id$resp_p);
+		Cluster::publish(dcc_relay_topic(), dcc_transfer_remove,
+		                 c$id$resp_h, c$id$resp_p);
 @endif
 		}
 	}

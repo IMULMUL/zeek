@@ -90,7 +90,7 @@ and also any compiled-to-C++ bodies present in the `zeek` binary that
 The above workflows require the subsequent `zeek` execution to include
 the `target.zeek` script.  You can avoid this by replacing the first step with:
 
-1. `./src/zeek -O gen-standalone-C++ target.zeek >target-stand-in.zeek`
+1. `./src/zeek -O gen-standalone-C++ --optimize-files=target.zeek target.zeek >target-stand-in.zeek`
 
 (and then building as in the 2nd step above).
 This option prints to _stdout_ a 
@@ -100,48 +100,12 @@ without needing to include `target.zeek` in the invocation (nor
 the `-O use-C++` option).  After loading the stand-in script,
 you can still access types and functions declared in `target.zeek`.
 
-Note: the implementation differences between `gen-C++` and `gen-standalone-C++`
-wound up being modest enough that it might make sense to just always provide
-the latter functionality, which it turns out does not introduce any
-additional constraints compared to the current `gen-C++` functionality.
-On the other hand, it's possible (not yet established) that code created
-using `gen-C++` can be made to compile significantly faster than
-standalone code.
+Note: `gen-standalone-C++` _must_ be used with `--optimize-files`, as the
+compiler needs the latter to determine which global declarations the
+standalone code needs to initialize.
 
-Another option, `-O add-C++`, instead _appends_ the generated code to existing C++ in `CPP-gen.cc`.
-You can use this option repeatedly for different scripts and then
-compile the collection _en masse_.
-
-There are additional workflows relating to running the test suite, which
-we document only briefly here as they're likely going to change or go away
-, as it's not clear they're actually needed.
-
-* `non-embedded-build`  
-Builds `zeek` without any embedded compiled-to-C++ scripts.
-* `bare-embedded-build`  
-Builds `zeek` with the `-b` "bare-mode" scripts compiled in.
-* `full-embedded-build`  
-Builds `zeek` with the default scripts compiled in.
-
-<br>
-
-* `eval-test-suite`  
-Runs the test suite using the `cpp` alternative over the given set of tests.
-* `test-suite-build`  
-Incrementally compiles to `CPP-gen-addl.h` code for the given test suite elements.
-
-<br>
-
-* `single-test.sh`  
-Builds the given btest test as a single `add-C++` add-on and then runs it.
-* `single-full-test.sh`  
-Builds the given btest test from scratch as a self-contained `zeek`, and runs it.
-* `update-single-test.sh`  
-Given an already-compiled `zeek` for the given test, updates its `cpp` test suite alternative.
-
-Some of these scripts could be made less messy if `btest` supported
-a "dry run" option that reported the executions it would do for a given
-test without actually undertaking them.
+There are additional workflows relating to running the test suite: see
+`src/script_opt/CPP/maint/README`.
 
 <br>
 
@@ -162,7 +126,7 @@ about associated expressions/statements, making them hard to puzzle out.
 This could be fixed, but would add execution overhead in passing around
 the necessary strings / `Location` objects.
 
-* To avoid subtle bugs, the compiler will refrain from compiling script elements (functions, hooks, event handlers) that include conditional code.  In addition, when using `--optimize-files` it will not compile any functions appearing in a source file that includes conditional code (even if it's not in a function body).
+* To avoid subtle bugs, the compiler will refrain from compiling script elements (functions, hooks, event handlers) that include conditional code.  In addition, when using `--optimize-files` it will not compile any functions appearing in a source file that includes conditional code (even if it's not in a function body).  You can override this refusal with `-O allow-cond`.
 
 * Code compiled with `-O gen-standalone-C++` will not execute any global
 statements when invoked using the "stand-in" script.  The right fix for
@@ -170,14 +134,8 @@ this is to shift from encapsulating global statements in a pseudo-function,
 as currently done, to instead be in a pseudo-event handler.
 
 * Code compiled with `-O gen-standalone-C++` likely has bugs if that
-code requires initializing a global variable that specifies extend fields in
+code requires initializing a global variable that specifies extending fields in
 an extensible record (i.e., fields added using `redef`).
-
-* The compiler will not compile bodies that include "when" statements
-This is fairly involved to fix.
-
-* The compiler will not compile bodies that include "type" switches.
-This is not hard to fix.
 
 * If a lambda generates an event that is not otherwise referred to, that
 event will not be registered upon instantiating the lambda.  This is not

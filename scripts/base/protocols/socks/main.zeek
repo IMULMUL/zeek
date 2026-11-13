@@ -7,6 +7,9 @@ module SOCKS;
 export {
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for SOCKS.
+	const ports = { 1080/tcp } &redef;
+
 	global log_policy: Log::PolicyHook;
 
 	## Whether passwords are captured or not.
@@ -17,7 +20,7 @@ export {
 		## Time when the proxy connection was first detected.
 		ts:               time            &log;
 		## Unique ID for the tunnel - may correspond to connection uid
-		## or be non-existent.
+		## or be nonexistent.
 		uid:              string          &log;
 		## The connection's 4-tuple of endpoint addresses/ports.
 		id:               conn_id         &log;
@@ -50,12 +53,9 @@ export {
 	global finalize_socks: Conn::RemovalHook;
 }
 
-const ports = { 1080/tcp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(SOCKS::LOG, [$columns=Info, $ev=log_socks, $path="socks", $policy=log_policy]);
+	Log::create_stream(SOCKS::LOG, Log::Stream($columns=Info, $ev=log_socks, $path="socks", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_SOCKS, ports);
 	}
 
@@ -67,7 +67,7 @@ function set_session(c: connection, version: count)
 	{
 	if ( ! c?$socks )
 		{
-		c$socks = [$ts=network_time(), $id=c$id, $uid=c$uid, $version=version];
+		c$socks = Info($ts=network_time(), $id=c$id, $uid=c$uid, $version=version);
 		Conn::register_removal_hook(c, finalize_socks);
 		}
 	}
@@ -85,7 +85,7 @@ event socks_request(c: connection, version: count, request_type: count,
 	# proxied connection.  We treat this as a singular "tunnel".
 	local cid = copy(c$id);
 	cid$orig_p = 0/tcp;
-	Tunnel::register([$cid=cid, $tunnel_type=Tunnel::SOCKS]);
+	Tunnel::register(Tunnel::EncapsulatingConn($cid=cid, $tunnel_type=Tunnel::SOCKS));
 	}
 
 event socks_reply(c: connection, version: count, reply: count, sa: SOCKS::Address, p: port) &priority=5

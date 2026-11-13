@@ -61,7 +61,9 @@ type UnknownHandshake(hs: HandshakeRecord, is_orig: bool) = record {
 ######################################################################
 
 # Hello Request is empty
-type HelloRequest(rec: HandshakeRecord) = empty;
+type HelloRequest(rec: HandshakeRecord) = record {
+	direction_check : DirectionCheck(false, rec); # should be sent by responder
+};
 
 
 ######################################################################
@@ -69,6 +71,7 @@ type HelloRequest(rec: HandshakeRecord) = empty;
 ######################################################################
 
 type ClientHello(rec: HandshakeRecord) = record {
+	direction_check : DirectionCheck(true, rec); # should be sent by originator
 	client_version : uint16;
 	gmt_unix_time : uint32;
 	random_bytes : bytestring &length = 28;
@@ -85,7 +88,8 @@ type ClientHello(rec: HandshakeRecord) = record {
 	# This weirdness is to deal with the possible existence or absence
 	# of the following fields.
 	ext_len: uint16[] &until($element == 0 || $element != 0);
-	extensions : SSLExtension(rec)[] &until($input.length() == 0);
+	extensions : SSLExtension(rec)[] &length=(sizeof(ext_len) > 0 ? ext_len[0] : 0);
+	trailing: bytestring &restofdata &transient;
 };
 
 type ClientHelloCookie(rec: HandshakeRecord) = record {
@@ -100,6 +104,7 @@ type ClientHelloCookie(rec: HandshakeRecord) = record {
 # TLS 1.3 server hello is different from earlier versions. Trick around a
 # bit, route 1.3 requests to a different record than earlier.
 type ServerHelloChoice(rec: HandshakeRecord) = record {
+	direction_check : DirectionCheck(false, rec); # should be sent by responder
 	server_version0 : uint8;
 	server_version1 : uint8;
 	hello: case parsed_version of {
@@ -124,7 +129,8 @@ type ServerHello(rec: HandshakeRecord, server_version: uint16) = record {
 	# This weirdness is to deal with the possible existence or absence
 	# of the following fields.
 	ext_len: uint16[] &until($element == 0 || $element != 0);
-	extensions : SSLExtension(rec)[] &until($input.length() == 0);
+	extensions : SSLExtension(rec)[] &length=(sizeof(ext_len) > 0 ? ext_len[0] : 0);
+	trailing: bytestring &restofdata &transient;
 } &let {
 	cipher_set : bool =
 		$context.connection.set_cipher(cipher_suite[0]);
@@ -134,10 +140,18 @@ type ServerHello13(rec: HandshakeRecord, server_version: uint16) = record {
 	random : bytestring &length = 32;
 	cipher_suite : uint16[1];
 	ext_len: uint16[] &until($element == 0 || $element != 0);
-	extensions : SSLExtension(rec)[] &until($input.length() == 0);
+	extensions : SSLExtension(rec)[] &length=(sizeof(ext_len) > 0 ? ext_len[0] : 0);
+	trailing: bytestring &restofdata &transient;
 } &let {
 	cipher_set : bool =
 		$context.connection.set_cipher(cipher_suite[0]);
+};
+
+# Used to check if originator/responder are reversed for this connection
+
+type DirectionCheck(desired: bool, rec: HandshakeRecord) = record {
+} &let {
+	proc : bool = $context.connection.check_flipped(desired, rec.is_orig);
 };
 
 ######################################################################
@@ -161,7 +175,13 @@ type X509Certificate = record {
 
 type Certificate(rec: HandshakeRecord) = record {
 	length : uint24;
-	certificates : X509Certificate[] &until($input.length() == 0);
+	# First &until happens before each certificate is parsed, used so we do not parse the first
+	# if we are at the limit.
+	#
+	# Second &until happens after each certificate.
+	certificates : X509Certificate[] &until($context.connection.certificate_limit_reached())
+	                              &until($element == nullptr || $context.connection.record_certificate());
+	trailing : bytestring &restofdata &transient;
 } &length = to_int()(length)+3;
 
 # OCSP Stapling
@@ -233,8 +253,14 @@ type ServerKeyExchange(rec: HandshakeRecord) = case $context.connection.chosen_c
 	TLS_ECDHE_ECDSA_WITH_AES_256_CCM,
 	TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8,
 	TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8,
+	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD,
+	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256_OLD,
 	TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+	TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+	TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256,
+	TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384,
+	TLS_ECDHE_PSK_WITH_AES_128_CCM_8_SHA256,
+	TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256
 		-> ecdhe_server_key_exchange : EcdheServerKeyExchange(rec);
 
 	# ECDH-anon suites
@@ -322,7 +348,9 @@ type ServerKeyExchange(rec: HandshakeRecord) = case $context.connection.chosen_c
 	TLS_DHE_PSK_WITH_AES_256_CCM,
 	TLS_PSK_DHE_WITH_AES_128_CCM_8,
 	TLS_PSK_DHE_WITH_AES_256_CCM_8,
-	TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+	TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD,
+	TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+	TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256
 		-> dhe_server_key_exchange : DheServerKeyExchange(rec);
 
 	# DH-anon suites
@@ -428,9 +456,30 @@ type DhAnonServerKeyExchange(rec: HandshakeRecord) = record {
 # V3 Certificate Request (7.4.4.)
 ######################################################################
 
+type CertificateAuthorities = record {
+	certificate_authority_len: uint16;
+	certificate_authority: bytestring &length=certificate_authority_len;
+};
+
+type CertificateAuthoritiesContainer = record {
+	certificate_authorities: CertificateAuthorities[] &until($input.length() == 0);
+};
+
 # For now, ignore Certificate Request Details; just eat up message.
 type CertificateRequest(rec: HandshakeRecord) = record {
+	certificate_types_len: uint8;
+	certificate_types: uint8[certificate_types_len];
+	alg: case uses_signature_and_hashalgorithm of {
+		true -> supported_signature_algorithms: SignatureAlgorithm(rec, 0);
+		false -> nothing: bytestring &length=0;
+	} &requires(uses_signature_and_hashalgorithm);
+	certificate_authorities_len: uint16;
+	certificate_authorities: CertificateAuthoritiesContainer &length=certificate_authorities_len;
 	cont : bytestring &restofdata &transient;
+} &let {
+	uses_signature_and_hashalgorithm : bool =
+		($context.connection.chosen_version() > TLSv11) &&
+		($context.connection.chosen_version() != DTLSv10);
 };
 
 
@@ -753,7 +802,8 @@ type Finished(rec: HandshakeRecord) = record {
 
 type SessionTicketHandshake(rec: HandshakeRecord) = record {
 	ticket_lifetime_hint: uint32;
-	data:                 bytestring &restofdata;
+	length: uint16;
+	data: bytestring &length=length;
 };
 
 ######################################################################
@@ -767,25 +817,54 @@ type SSLExtension(rec: HandshakeRecord) = record {
 	# Pretty code ahead. Deal with the fact that perhaps extensions are
 	# not really present and we do not want to fail because of that.
 	ext: case type of {
-		EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION -> apnl: ApplicationLayerProtocolNegotiationExtension(rec)[] &until($element == 0 || $element != 0);
-		EXT_ELLIPTIC_CURVES -> elliptic_curves: EllipticCurves(rec)[] &until($element == 0 || $element != 0);
-		EXT_EC_POINT_FORMATS -> ec_point_formats: EcPointFormats(rec)[] &until($element == 0 || $element != 0);
-#		EXT_STATUS_REQUEST -> status_request: StatusRequest(rec)[] &until($element == 0 || $element != 0);
-		EXT_SERVER_NAME -> server_name: ServerNameExt(rec)[] &until($element == 0 || $element != 0);
-		EXT_SIGNATURE_ALGORITHMS -> signature_algorithm: SignatureAlgorithm(rec)[] &until($element == 0 || $element != 0);
-		EXT_SIGNED_CERTIFICATE_TIMESTAMP -> certificate_timestamp: SignedCertificateTimestampList(rec)[] &until($element == 0 || $element != 0);
-		EXT_KEY_SHARE -> key_share: KeyShare(rec, this)[] &until($element == 0 || $element != 0);
-		EXT_KEY_SHARE_OLD -> key_share_old: KeyShare(rec, this)[] &until($element == 0 || $element != 0);
-		EXT_SUPPORTED_VERSIONS -> supported_versions_selector: SupportedVersionsSelector(rec, data_len)[] &until($element == 0 || $element != 0);
-		EXT_PSK_KEY_EXCHANGE_MODES -> psk_key_exchange_modes: PSKKeyExchangeModes(rec)[] &until($element == 0 || $element != 0);
-		EXT_PRE_SHARED_KEY -> pre_shared_key: PreSharedKey(rec)[] &until($element == 0 || $element != 0);
+		EXT_APPLICATION_LAYER_PROTOCOL_NEGOTIATION -> apnl: ApplicationLayerProtocolNegotiationExtension(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_ELLIPTIC_CURVES -> elliptic_curves: EllipticCurves(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_EC_POINT_FORMATS -> ec_point_formats: EcPointFormats(rec)[] &until($element == nullptr || $element != nullptr);
+#		EXT_STATUS_REQUEST -> status_request: StatusRequest(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_SERVER_NAME -> server_name: ServerNameExt(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_SIGNATURE_ALGORITHMS, EXT_SIGNATURE_ALGORITHMS_CERT -> signature_algorithm: SignatureAlgorithm(rec, type)[] &until($element == nullptr || $element != nullptr);
+		EXT_SIGNED_CERTIFICATE_TIMESTAMP -> certificate_timestamp: SignedCertificateTimestampList(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_KEY_SHARE -> key_share: KeyShare(rec, this)[] &until($element == nullptr || $element != nullptr);
+		EXT_KEY_SHARE_OLD -> key_share_old: KeyShare(rec, this)[] &until($element == nullptr || $element != nullptr);
+		EXT_SUPPORTED_VERSIONS -> supported_versions_selector: SupportedVersionsSelector(rec, data_len)[] &until($element == nullptr || $element != nullptr);
+		EXT_PSK_KEY_EXCHANGE_MODES -> psk_key_exchange_modes: PSKKeyExchangeModes(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_PRE_SHARED_KEY -> pre_shared_key: PreSharedKey(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_CONNECTION_ID -> connection_id: ConnectionId(rec)[] &until($element == nullptr || $element != nullptr);
+		EXT_ENCRYPTED_CLIENT_HELLO -> encrypted_client_hello: EncryptedClientHelloSwitch(rec)[] &until($element == nullptr || $element != nullptr);
 		default -> data: bytestring &restofdata;
 	};
 } &length=data_len+4 &exportsourcedata;
 
 %include tls-handshake-signed_certificate_timestamp.pac
 
-type SupportedVersionsSelector(rec: HandshakeRecord, data_len: uint16) = case rec.is_orig of {
+type ConnectionId(rec: HandshakeRecord) = record {
+	length: uint8;
+	cid: bytestring &length=length;
+};
+
+# The encrypted_client_hello extension carries a type; only
+# the outer form (0) carries further data. The inner variant
+# should not occur in unencrypted packets; we raise a weird if
+# we see it.
+type EncryptedClientHelloSwitch(rec: HandshakeRecord) = record {
+	tpe: uint8;
+	ech: case tpe of {
+		0 -> outer: EncryptedClientHello(rec);
+		default -> inner: bytestring &restofdata &transient;
+	};
+};
+
+type EncryptedClientHello(rec: HandshakeRecord) = record {
+	kdf_id: uint16;
+	aead_id: uint16;
+	config_id: uint8;
+	enc_length: uint16;
+	enc: bytestring &length=enc_length;
+	payload_length: uint16;
+	payload: bytestring &length=payload_length &transient;
+};
+
+type SupportedVersionsSelector(rec: HandshakeRecord, data_len: uint16) = case ( rec.is_orig ^ $context.connection.flipped() ) of {
 	true -> a: SupportedVersions(rec);
 	false -> b: OneSupportedVersion(rec);
 }
@@ -795,7 +874,7 @@ type SupportedVersions(rec: HandshakeRecord) = record {
 	versions: uint16[] &until($input.length() == 0);
 } &length=length+1;
 
-# If the server sends it, this is the authorative version. Set it.
+# If the server sends it, this is the authoritative version. Set it.
 type OneSupportedVersion(rec: HandshakeRecord) = record {
 	version: uint16;
 } &let {
@@ -917,10 +996,10 @@ type PreSharedKey(rec: HandshakeRecord) = case rec.msg_type of {
 	default -> other : bytestring &restofdata &transient;
 };
 
-type SignatureAlgorithm(rec: HandshakeRecord) = record {
+type SignatureAlgorithm(rec: HandshakeRecord, type: uint16) = record {
 	length: uint16;
-	supported_signature_algorithms: SignatureAndHashAlgorithm[] &until($input.length() == 0);
-}
+	supported_signature_algorithms: uint16[] &until($input.length() == 0);
+} &length=length+2;
 
 type EllipticCurves(rec: HandshakeRecord) = record {
 	length: uint16;
@@ -943,13 +1022,30 @@ refine connection Handshake_Conn += {
 		uint32 chosen_cipher_;
 		uint16 chosen_version_;
 		uint16 record_version_;
+		bytestring client_random_;
+		bytestring server_random_;
+		uint64 certificates_seen_;
+		uint32 gmt_unix_time_;
+		bool flipped_;
+		bool already_alerted_;
+		bool certificate_limit_reported_;
 	%}
 
 	%init{
+		flipped_ = false;
+		already_alerted_ = false;
 		chosen_cipher_ = NO_CHOSEN_CIPHER;
 		chosen_version_ = UNKNOWN_VERSION;
 
 		record_version_ = 0;
+		gmt_unix_time_ = 0;
+		certificates_seen_ = 0;
+		certificate_limit_reported_ = false;
+	%}
+
+	%cleanup{
+		client_random_.free();
+		server_random_.free();
 	%}
 
 	function chosen_cipher() : int %{ return chosen_cipher_; %}
@@ -976,6 +1072,39 @@ refine connection Handshake_Conn += {
 		return true;
 		%}
 
+	function check_flipped(desired: bool, is_orig: bool) : bool
+		%{
+		if ( flipped_ )
+			{
+			if ( desired == is_orig )
+				{
+				// well, I guess we get to flip it back - and alert on this
+				flipped_ = false;
+				zeek::BifEvent::enqueue_ssl_connection_flipped(zeek_analyzer(), zeek_analyzer()->Conn());
+				if ( ! already_alerted_ )
+					{
+					already_alerted_ = true;
+					zeek_analyzer()->Weird("SSL_unclear_connection_direction");
+					}
+				}
+			}
+			else
+			{
+			if ( desired != is_orig )
+				{
+				flipped_ = true;
+				zeek::BifEvent::enqueue_ssl_connection_flipped(zeek_analyzer(), zeek_analyzer()->Conn());
+				}
+			}
+
+		return true;
+		%}
+
+	function flipped() : bool
+		%{
+		return flipped_;
+		%}
+
 	function record_version() : uint16 %{ return record_version_; %}
 
 	function set_record_version(version: uint16) : bool
@@ -983,5 +1112,59 @@ refine connection Handshake_Conn += {
 		record_version_ = version;
 		return true;
 		%}
-};
 
+	function client_random() : bytestring %{ return client_random_; %}
+
+	function set_client_random(client_random: bytestring) : bool
+		%{
+		client_random_.free();
+		client_random_.init(client_random.data(), client_random.length());
+		return true;
+		%}
+
+	function server_random() : bytestring %{ return server_random_; %}
+
+	function set_server_random(server_random: bytestring) : bool
+		%{
+		server_random_.free();
+		server_random_.init(server_random.data(), server_random.length());
+		return true;
+		%}
+
+	function gmt_unix_time() : uint32 %{ return gmt_unix_time_; %}
+
+	function set_gmt_unix_time(ts: uint32) : bool
+		%{
+		gmt_unix_time_ = ts;
+		return true;
+		%}
+
+	function certificate_limit_reached() : bool
+		%{
+		uint64_t max = zeek::BifConst::SSL::max_certificates;
+		return max > 0 && certificates_seen_ >= max;
+		%}
+
+	function record_certificate() : bool
+		%{
+		uint64_t max = zeek::BifConst::SSL::max_certificates;
+
+		if ( max > 0 && certificates_seen_ < max )
+			++certificates_seen_;
+
+		return certificate_limit_reached();
+		%}
+
+	function report_certificate_limit_exceeded() : bool
+		%{
+		uint64_t max = zeek::BifConst::SSL::max_certificates;
+
+		if ( ! certificate_limit_reported_ )
+			{
+			certificate_limit_reported_ = true;
+			zeek_analyzer()->LimitReachedWeird("SSL_max_certificates_exceeded", max);
+			}
+
+		return true;
+		%}
+};

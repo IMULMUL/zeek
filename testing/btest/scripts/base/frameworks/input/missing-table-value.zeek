@@ -3,15 +3,18 @@
 # @TEST-EXEC: btest-diff zeek/.stderr
 # @TEST-EXEC: btest-diff zeek/.stdout
 
-@TEST-START-FILE denylist.txt
+# @TEST-START-FILE denylist.txt
 #separator \x09
 #fields	ip	colors
 192.168.17.1	Red,White
 192.168.27.2	White,asdf
 192.168.250.3	Blue
-@TEST-END-FILE
+# @TEST-END-FILE
 
 # test.zeek
+
+redef exit_only_after_terminate=T;
+
 type Idx: record {
     ip: addr;
 };
@@ -32,4 +35,5 @@ event zeek_init() {
 
 event Input::end_of_data(name: string, source: string) {
     print denylist;
+    terminate();
 }

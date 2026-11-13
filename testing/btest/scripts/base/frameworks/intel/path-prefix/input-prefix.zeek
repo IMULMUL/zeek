@@ -4,15 +4,15 @@
 # Input::REREAD ingestion mode.)
 #
 # @TEST-EXEC: mkdir -p alternative
-# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$TEST_BASE/scripts/base/frameworks/intel/path-prefix zeek -b %INPUT >output
+# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$(cd "$TEST_BASE/scripts/base/frameworks/intel/path-prefix" && pwd) zeek -b %INPUT >output
 # @TEST-EXEC: btest-diff output
 
-@TEST-START-FILE alternative/test.data
+# @TEST-START-FILE alternative/test.data
 #fields	indicator	indicator_type	meta.source
 127.0.0.1	Intel::ADDR	this btest
 127.0.0.2	Intel::ADDR	this btest
 127.0.0.3	Intel::ADDR	this btest 
-@TEST-END-FILE
+# @TEST-END-FILE
 
 @load path-prefix-common.zeek
 

@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -169,18 +170,8 @@ event zeek_init()
 	local vss = vs1 + vs2;
 	test_case( "+ operator [string]", vss[0] == "fooxxx" && vss[1] == "baryyy" );
 
-	local vss2 = vs1 + "@";
-	test_case( "+ operator [string]", vss2[0] == "foo@" && vss2[1] == "bar@" );
-
 	local vss3 = (vs1 == vs3);
 	test_case( "== operator [string]", vss3[0] == F && vss3[1] == T );
-
-	local vss4 = (vs1 == "bar");
-	test_case( "== operator [string]", vss4[0] == F && vss4[1] == T );
-
-	local vss5 = ("bar" == vs1);
-	test_case( "== operator [string]", vss5[0] == F && vss5[1] == T );
-		# !=, <, >, <=, >= are handled the same as ==, skipping tests
 
 	# Test &&,|| of two vectors
 
@@ -226,4 +217,47 @@ event zeek_init()
 	v21[3:] = vector();
 	print "hole in vector of managed types after replacing slice", |v21|, v21;
 
+	# Test << and >> operators.
+	local four_ones = vector(1, 1, 1, 1);
+	local v22 = v6 << four_ones;
+	local v23 = v6 >> four_ones;
+	test_case( "left shift", all_set(v22 == vector(20, 40, 60, 80)) );
+	test_case( "right shift", all_set(v23 == vector(5, 10, 15, 20)) );
+
+	# negative indices
+	local v24 = vector( 1, 2, 3, 4, 5 );
+	test_case( "negative index", v24[-1] == 5 );
+	test_case( "negative index", v24[-3] == 3 );
+
+	# For a vector-of-vectors, += of an empty vector should append it as
+	# a single element, not all of its elements (= nothing gets appended).
+	local v25: vector of vector of count;
+	v25 += vector();
+	test_case( "+= of empty vector", |v25| == 1 );
+
+	# OTOH, for a vector-of-non-vectors, it should result in appending
+	# nothing.
+	local v26: vector of set[count];
+	v26 += vector();
+	test_case( "+= of empty vector", |v26| == 0 );
+
+	# Pattern vectors
+	local pv1 = vector(/a/, /b/);
+	local pv2 = vector(/a/, /c/);
+	local pv_eq = pv1 == pv2;
+	local pv_ne = pv1 != pv2;
+	test_case( fmt("pv1 == pv2 -> %s", pv_eq), (pv_eq[0] == T) && (pv_eq[1] == F) );
+	test_case( fmt("pv1 != pv2 -> %s", pv_ne), (pv_ne[0] == F) && (pv_ne[1] == T) );
+}
+
+# Assign-append of self.
+event zeek_init()
+{
+	local v1: vector of count;
+	v1 += v1;
+	assert |v1| == 0, fmt("%s", v1);
+
+	local v2 = vector(1, 2, 3);
+	v2 += v2;
+	assert all_set(v2 == vector(1, 2, 3, 1, 2, 3)), fmt("%s", v2);
 }

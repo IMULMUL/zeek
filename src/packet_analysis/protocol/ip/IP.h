@@ -6,34 +6,35 @@
 #include "zeek/packet_analysis/Analyzer.h"
 #include "zeek/packet_analysis/Component.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 class Discarder;
-	}
+}
 
-namespace zeek::packet_analysis::IP
-	{
+namespace zeek::packet_analysis::IP {
 
-class IPAnalyzer : public Analyzer
-	{
+class IPAnalyzer : public Analyzer {
 public:
-	IPAnalyzer();
-	~IPAnalyzer() override;
+    IPAnalyzer();
+    ~IPAnalyzer() override;
 
-	bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
+    bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
 
-	static zeek::packet_analysis::AnalyzerPtr Instantiate()
-		{
-		return std::make_shared<IPAnalyzer>();
-		}
+    static zeek::packet_analysis::AnalyzerPtr Instantiate() { return std::make_shared<IPAnalyzer>(); }
 
 private:
-	// Returns a reassembled packet, or nil if there are still
-	// some missing fragments.
-	zeek::detail::FragReassembler* NextFragment(double t, const IP_Hdr* ip, const u_char* pkt);
+    // Returns a reassembled packet, or nil if there are still
+    // some missing fragments.
+    zeek::detail::FragReassembler* NextFragment(double t, const IP_Hdr* ip, const u_char* pkt);
 
-	zeek::detail::Discarder* discarder = nullptr;
-	};
+    zeek::detail::Discarder* discarder = nullptr;
+};
+
+enum class ParseResult : int8_t {
+    CAPLEN_TOO_SMALL = -1,
+    BAD_PROTOCOL = -2,
+    OK = 0,
+    CAPLEN_TOO_LARGE = 1,
+};
 
 /**
  * Returns a wrapper IP_Hdr object if \a pkt appears to be a valid IPv4
@@ -49,13 +50,16 @@ private:
  * @param inner The inner IP packet wrapper pointer to be allocated/assigned
  *        if \a pkt looks like a valid IP packet or at least long enough
  *        to hold an IP header.
- * @return 0 If the inner IP packet appeared valid, else -1 if \a caplen
- *         is greater than the supposed IP packet's payload length field, -2
- *         if the version of the inner header does not match proto or
- *         1 if \a caplen is less than the supposed packet's payload length.
- *         In the -1 case, \a inner may still be non-null if \a caplen was
- *         long enough to be an IP header, and \a inner is always non-null
- *         for other return values.
+ * @return ParseResult::Ok if the inner IP packet appeared valid.
+ *         ParseResult::CaplenTooSmall if \a caplen is greater than the
+ *         supposed packet's payload length field. \a inner may still be
+ *         non-null if \a caplen is too small but still large enough to
+ *         be an IP header. ParseResult::CaplenTooLarge if \a caplen is
+ *         larger than the supposed packet's payload length field.
+ *         ParseResult::BadProtocol if either \a proto isn't IPPROTO_IPV4
+ *         or IPPROTO_IPV6 or if \a proto does not match the protocol
+ *         in the header's version field.
  */
-int ParsePacket(int caplen, const u_char* const pkt, int proto, std::shared_ptr<IP_Hdr>& inner);
-	}
+ParseResult ParsePacket(int caplen, const u_char* const pkt, int proto, std::shared_ptr<IP_Hdr>& inner);
+
+} // namespace zeek::packet_analysis::IP

@@ -15,44 +15,50 @@
 #endif
 
 #include <libgen.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <array>
-#include <cinttypes>
+#include <unistd.h>
+#include <concepts>
+#include <cstdarg>
 #include <cstdint>
-#include <memory> // std::unique_ptr
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #ifdef TIME_WITH_SYS_TIME
 #include <sys/time.h>
-#include <time.h>
-#else
-#ifdef HAVE_SYS_TIME_H
+#include <ctime>
+#elif defined(HAVE_SYS_TIME_H)
 #include <sys/time.h>
 #else
-#include <time.h>
-#endif
+#include <ctime>
 #endif
 
 #ifdef DEBUG
 
-#include <assert.h>
+#include <cassert>
 
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+#ifdef ASSERT
+#undef ASSERT
+#endif
 #define ASSERT(x) assert(x)
-#define DEBUG_MSG(x...) fprintf(stderr, x)
+#define DEBUG_MSG(...) fprintf(stderr, __VA_ARGS__)
 #define DEBUG_fputs fputs
 
 #else
+#ifdef MSTCPIP_ASSERT_UNDEFINED
+#undef ASSERT
+#endif
 
 #define ASSERT(x)
-#define DEBUG_MSG(x...)
-#define DEBUG_fputs(x...)
+#define DEBUG_MSG(...)
+#define DEBUG_fputs(...)
 
 #endif
+// NOLINTEND(cppcoreguidelines-macro-usage)
 
 #ifdef USE_PERFTOOLS_DEBUG
 #include <gperftools/heap-checker.h>
@@ -60,41 +66,47 @@
 extern HeapLeakChecker* heap_checker;
 #endif
 
-#include <pthread.h>
+extern "C" {
+#include "zeek/3rdparty/modp_numtoa.h"
+}
 
 #ifdef HAVE_LINUX
+#include <pthread.h>
 #include <sys/prctl.h>
+#endif
+
+#ifdef __APPLE__
+#include <pthread.h>
 #endif
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
 
-extern "C"
-	{
-#include "zeek/3rdparty/modp_numtoa.h"
-	}
+#ifdef _MSC_VER
+#include <pthread.h>
+inline constexpr std::string_view path_list_separator = ";";
+#else
+inline constexpr std::string_view path_list_separator = ":";
+#endif
 
-using bro_int_t = int64_t;
-using bro_uint_t = uint64_t;
+#include "zeek/UID.h"
+#include "zeek/util-types.h"
 
 #ifndef HAVE_STRCASESTR
 extern char* strcasestr(const char* s, const char* find);
 #endif
 
-// This is used by the patricia code and so it remains outside of hte namespace.
+// This is used by the patricia code and so it remains outside of the namespace.
 extern "C" void out_of_memory(const char* where);
 
-namespace zeek
-	{
+namespace zeek {
 
 class ODesc;
 class RecordVal;
 
-namespace util
-	{
-namespace detail
-	{
+namespace util {
+namespace detail {
 
 std::string extract_ip(const std::string& i);
 std::string extract_ip_and_len(const std::string& i, int* len);
@@ -109,14 +121,18 @@ extern const char* fmt_access_time(double time);
 extern bool ensure_intermediate_dirs(const char* dirname);
 extern bool ensure_dir(const char* dirname);
 
-extern void hmac_md5(size_t size, const unsigned char* bytes, unsigned char digest[16]);
+// The digest length here is equivalent to ZEEK_SHA256_DIGEST_LENGTH.
+extern void hmac_sha256(size_t size, const unsigned char* bytes, unsigned char digest[32]);
 
-// Initializes RNGs for zeek::random_number() and MD5 usage.  If load_file is given,
-// the seeds (both random & MD5) are loaded from that file.  This takes
-// precedence over the "use_empty_seeds" argument, which just
-// zero-initializes all seed values.  If write_file is given, the seeds are
+// Initializes RNGs for zeek::random_number() and hmac-md5/siphash/highwayhash usage.
+// If load_file is given, the seeds (both random & hashes) are loaded from that file.  This
+// takes precedence over the "seed_string and "use_empty_seeds" arguments. The content of
+// "seed_string" is used as seeds if not empty next. Otherwise, when "use_empty_seeds" is
+// set it zero-initializes all seed values. If neither of these provides initial seed values,
+// platform specific random data is used as seeds. If write_file is given, the seeds are
 // written to that file.
-extern void init_random_seed(const char* load_file, const char* write_file, bool use_empty_seeds);
+extern void init_random_seed(const char* load_file, const char* write_file, bool use_empty_seeds,
+                             const std::string& seed_string = {});
 
 // Retrieves the initial seed computed after the very first call to
 // init_random_seed(). Repeated calls to init_random_seed() will not affect
@@ -125,8 +141,6 @@ unsigned int initial_seed();
 
 // Returns true if the user explicitly set a seed via init_random_seed();
 extern bool have_random_seed();
-
-extern uint64_t rand64bit();
 
 /**
  * A platform-independent PRNG implementation.  Note that this is not
@@ -169,7 +183,7 @@ void seed_random(unsigned int seed);
 void set_thread_name(const char* name, pthread_t tid = pthread_self());
 
 // Each event source that may generate events gets an internally unique ID.
-// This is always LOCAL for a local Bro. For remote event sources, it gets
+// This is always LOCAL for a local Zeek. For remote event sources, it gets
 // assigned by the RemoteSerializer.
 //
 // FIXME: Find a nicer place for this type definition.
@@ -180,7 +194,7 @@ using SourceID = std::uintptr_t;
 constexpr SourceID SOURCE_LOCAL = 0;
 
 // TODO: This is a temporary marker to flag events coming in via Broker.
-// Those are remote events but we don't have any further peer informationa
+// Those are remote events but we don't have any further peer information
 // available for them (as the old communication code would have). Once we
 // remove RemoteSerializer, we can turn the SourceID into a simple boolean
 // indicating whether it's a local or remote event.
@@ -189,22 +203,6 @@ constexpr SourceID SOURCE_BROKER = 0xffffffff;
 bool is_package_loader(const std::string& path);
 
 extern void add_to_zeek_path(const std::string& dir);
-
-/**
- * Wrapper class for functions like dirname(3) or basename(3) that won't
- * modify the path argument and may optionally abort execution on error.
- */
-class SafePathOp
-	{
-public:
-	std::string result;
-	bool error;
-
-protected:
-	SafePathOp() : result(), error() { }
-
-	void CheckValid(const char* result, const char* path, bool error_aborts);
-	};
 
 /**
  * Flatten a script name by replacing '/' path separators with '.'.
@@ -255,7 +253,7 @@ void terminate_processing();
 
 // Sets the current status of the Zeek process to the given string.
 // If the option --status-file has been set, this is written into
-// the the corresponding file.  Otherwise, the function is a no-op.
+// the corresponding file.  Otherwise, the function is a no-op.
 void set_processing_status(const char* status, const char* reason);
 
 // Renames the given file to a new temporary name, and opens a new file with
@@ -280,39 +278,40 @@ double parse_rotate_base_time(const char* rotate_base_time);
 // This function is thread-safe.
 double calc_next_rotate(double current, double rotate_interval, double base);
 
-	} // namespace detail
+int setvbuf(FILE* stream, char* buf, int type, size_t size);
 
-template <class T> void delete_each(T* t)
-	{
-	using iterator = typename T::iterator;
-	for ( iterator it = t->begin(); it != t->end(); ++it )
-		delete *it;
-	}
+} // namespace detail
 
-inline void bytetohex(unsigned char byte, char* hex_out)
-	{
-	static constexpr char hex_chars[] = "0123456789abcdef";
-	hex_out[0] = hex_chars[(byte & 0xf0) >> 4];
-	hex_out[1] = hex_chars[byte & 0x0f];
-	}
+template<class T>
+void delete_each(T* t) {
+    using iterator = typename T::iterator;
+    for ( iterator it = t->begin(); it != t->end(); ++it )
+        delete *it;
+}
+
+inline void bytetohex(unsigned char byte, char* hex_out) {
+    static constexpr char hex_chars[] = "0123456789abcdef";
+    hex_out[0] = hex_chars[(byte & 0xf0) >> 4];
+    hex_out[1] = hex_chars[byte & 0x0f];
+}
 
 std::string get_unescaped_string(const std::string& str);
 
 ODesc* get_escaped_string(ODesc* d, const char* str, size_t len, bool escape_all);
 std::string get_escaped_string(const char* str, size_t len, bool escape_all);
 
-inline std::string get_escaped_string(const std::string& str, bool escape_all)
-	{
-	return get_escaped_string(str.data(), str.length(), escape_all);
-	}
+inline std::string get_escaped_string(const std::string& str, bool escape_all) {
+    return get_escaped_string(str.data(), str.length(), escape_all);
+}
 
 std::vector<std::string>* tokenize_string(std::string_view input, std::string_view delim,
                                           std::vector<std::string>* rval = nullptr, int limit = 0);
 
-std::vector<std::string_view> tokenize_string(std::string_view input, const char delim) noexcept;
+std::vector<std::string_view> tokenize_string(std::string_view input, const char delim);
 
+extern char* copy_string(const char* str, size_t len);
 extern char* copy_string(const char* s);
-extern int streq(const char* s1, const char* s2);
+extern bool streq(const char* s1, const char* s2);
 extern bool starts_with(std::string_view s, std::string_view beginning);
 extern bool ends_with(std::string_view s, std::string_view ending);
 
@@ -327,13 +326,13 @@ extern void to_upper(char* s);
 extern std::string to_upper(const std::string& s);
 extern int decode_hex(char ch);
 extern unsigned char encode_hex(int h);
-template <class T> int atoi_n(int len, const char* s, const char** end, int base, T& result);
+template<std::integral T>
+int atoi_n(int len, const char* s, const char** end, int base, T& result);
 extern char* uitoa_n(uint64_t value, char* str, int n, int base, const char* prefix = nullptr);
 extern const char* strpbrk_n(size_t len, const char* s, const char* charset);
-int strstr_n(const int big_len, const unsigned char* big, const int little_len,
-             const unsigned char* little);
+int strstr_n(const int big_len, const unsigned char* big, const int little_len, const unsigned char* little);
 
-// Replaces all occurences of *o* in *s* with *n*.
+// Replaces all occurrences of *o* in *s* with *n*.
 extern std::string strreplace(const std::string& s, const std::string& o, const std::string& n);
 
 // Remove all leading and trailing white space from string.
@@ -350,9 +349,11 @@ extern bool is_printable(const char* s, int len);
 
 extern const char* fmt_bytes(const char* data, int len);
 
-// Note: returns a pointer into a shared buffer.
+// Note: vfmt and fmt share the same global buffer and return a pointer to it.
+// - not thread-safe; call only from main thread or use threading::BasicThread::Fmt()
+// - returned buffer and potentially pointer invalidated by next fmt()/vfmt() call;
+//   consume or copy before next call
 extern const char* vfmt(const char* format, va_list args);
-// Note: returns a pointer into a shared buffer.
 extern const char* fmt(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
 // Returns true if path exists and is a directory.
@@ -368,28 +369,7 @@ extern const char* zeek_plugin_path();
 extern const char* zeek_plugin_activate();
 extern std::string zeek_prefixes();
 
-class SafeDirname : public detail::SafePathOp
-	{
-public:
-	explicit SafeDirname(const char* path, bool error_aborts = true);
-	explicit SafeDirname(const std::string& path, bool error_aborts = true);
-
-private:
-	void DoFunc(const std::string& path, bool error_aborts = true);
-	};
-
-class SafeBasename : public detail::SafePathOp
-	{
-public:
-	explicit SafeBasename(const char* path, bool error_aborts = true);
-	explicit SafeBasename(const std::string& path, bool error_aborts = true);
-
-private:
-	void DoFunc(const std::string& path, bool error_aborts = true);
-	};
-
-std::string implode_string_vector(const std::vector<std::string>& v,
-                                  const std::string& delim = "\n");
+std::string implode_string_vector(const std::vector<std::string>& v, const std::string& delim = "\n");
 
 /**
  * Locate a file within a given search path.
@@ -398,8 +378,7 @@ std::string implode_string_vector(const std::vector<std::string>& v,
  * @param opt_ext A filename extension/suffix to allow.
  * @return Path to the found file, or an empty string if not found.
  */
-std::string find_file(const std::string& filename, const std::string& path_set,
-                      const std::string& opt_ext = "");
+std::string find_file(const std::string& filename, const std::string& path_set, const std::string& opt_ext = "");
 
 /**
  * Locate a script file within a given search path.
@@ -424,37 +403,50 @@ extern struct timeval double_to_timeval(double t);
 // Return > 0 if tv_a > tv_b, 0 if equal, < 0 if tv_a < tv_b.
 extern int time_compare(struct timeval* tv_a, struct timeval* tv_b);
 
+// Returns the CPU time consumed to date.
+extern double curr_CPU_time();
+
+namespace this_thread {
+// Returns the thread CPU time consumed to date.
+inline double get_cpu_time() {
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9;
+}
+} // namespace this_thread
+
+
 // Returns an integer that's very likely to be unique, even across Zeek
 // instances. The integer can be drawn from different pools, which is helpful
 // when the random number generator is seeded to be deterministic. In that
 // case, the same sequence of integers is generated per pool.
-#define UID_POOL_DEFAULT_INTERNAL 1
-#define UID_POOL_DEFAULT_SCRIPT 2
-#define UID_POOL_CUSTOM_SCRIPT 10 // First available custom script level pool.
-extern uint64_t calculate_unique_id();
-extern uint64_t calculate_unique_id(const size_t pool);
+extern uint64_t calculate_unique_id(const size_t pool = zeek::UID_POOL_DEFAULT_INTERNAL);
 
 // Use for map's string keys.
-struct ltstr
-	{
-	bool operator()(const char* s1, const char* s2) const { return strcmp(s1, s2) < 0; }
-	};
+struct ltstr {
+    bool operator()(const char* s1, const char* s2) const { return strcmp(s1, s2) < 0; }
+};
 
-constexpr size_t pad_size(size_t size)
-	{
-	// We emulate glibc here (values measured on Linux i386).
-	// FIXME: We should better copy the portable value definitions from glibc.
-	if ( size == 0 )
-		return 0; // glibc allocated 16 bytes anyway.
+constexpr size_t pad_size(size_t size) {
+    // We emulate glibc here (values measured on Linux i386).
+    // FIXME: We should better copy the portable value definitions from glibc.
+    if ( size == 0 )
+        return 0; // glibc allocated 16 bytes anyway.
 
-	const int pad = 8;
-	if ( size < 12 )
-		return 2 * pad;
+    const size_t pad = 8;
+    if ( size < 12 )
+        return 2 * pad;
 
-	return ((size + 3) / pad + 1) * pad;
-	}
+    return ((size + 3) / pad + 1) * pad;
+}
 
-#define padded_sizeof(x) (zeek::util::pad_size(sizeof(x)))
+template<typename T>
+constexpr size_t padded_size_of() {
+    return zeek::util::pad_size(sizeof(T));
+}
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define padded_sizeof(x) (zeek::util::padded_size_of<decltype((x))>())
 
 // Like write() but handles interrupted system calls by restarting. Returns
 // true if the write was successful, otherwise sets errno. This function is
@@ -475,37 +467,31 @@ extern void safe_close(int fd);
 
 // Versions of realloc/malloc which abort() on out of memory
 
-inline void* safe_realloc(void* ptr, size_t size)
-	{
-	ptr = realloc(ptr, size);
-	if ( size && ! ptr )
-		out_of_memory("realloc");
+inline void* safe_realloc(void* ptr, size_t size) {
+    void* new_ptr = realloc(ptr, size);
+    if ( size && ! new_ptr )
+        out_of_memory("realloc");
 
-	return ptr;
-	}
+    return new_ptr;
+}
 
-inline void* safe_malloc(size_t size)
-	{
-	void* ptr = malloc(size);
-	if ( ! ptr )
-		out_of_memory("malloc");
+inline void* safe_malloc(size_t size) {
+    void* ptr = malloc(size);
+    if ( ! ptr )
+        out_of_memory("malloc");
 
-	return ptr;
-	}
+    return ptr;
+}
 
-inline char* safe_strncpy(char* dest, const char* src, size_t n)
-	{
-	char* result = strncpy(dest, src, n - 1);
-	dest[n - 1] = '\0';
-	return result;
-	}
+inline char* safe_strncpy(char* dest, const char* src, size_t n) {
+    char* result = strncpy(dest, src, n - 1);
+    dest[n - 1] = '\0';
+    return result;
+}
 
 // Memory alignment helpers.
 
-inline bool is_power_of_2(bro_uint_t x)
-	{
-	return ((x - 1) & x) == 0;
-	}
+inline bool is_power_of_2(zeek_uint_t x) { return ((x - 1) & x) == 0; }
 
 // Rounds the given pointer up to the nearest multiple of the
 // given size, if not already a multiple.
@@ -525,10 +511,9 @@ extern void get_memory_usage(uint64_t* total, uint64_t* malloced);
 // Class to be used as a third argument for STL maps to be able to use
 // char*'s as keys. Otherwise the pointer values will be compared instead of
 // the actual string values.
-struct CompareString
-	{
-	bool operator()(char const* a, char const* b) const { return strcmp(a, b) < 0; }
-	};
+struct CompareString {
+    bool operator()(char const* a, char const* b) const { return strcmp(a, b) < 0; }
+};
 
 /**
  * Canonicalizes a name by converting it to uppercase letters and replacing
@@ -544,29 +529,129 @@ std::string canonify_name(const std::string& name);
  */
 void zeek_strerror_r(int zeek_errno, char* buf, size_t buflen);
 
-/**
- * A wrapper function for getenv().  Helps check for existence of
- * legacy environment variable names that map to the latest \a name.
- */
-[[deprecated("Remove in v5.1.  Use getenv() directly.")]] char* zeekenv(const char* name);
+enum UTF8EscapingFlags : uint8_t {
+    ESCAPE_NONE = 0x00,
+    // Escape printable ASCII control characters (e.g. `\n` is converted to `\x0a`)
+    // This affects \b \f \n \r \t as these can be represented in JSON without
+    // extra escaping. Use this flag if you'd like them \xXX escaped.
+    ESCAPE_PRINTABLE_CONTROLS = 0x01,
+    // Escape unprintable ASCII control characters
+    ESCAPE_UNPRINTABLE_CONTROLS = 0x02,
+};
 
 /**
  * Escapes bytes in a string that are not valid UTF8 characters with \xYY format. Used
  * by the JSON writer and BIF methods.
- * @param val the input string to be escaped
+ * @param val the character data to be escaped. this is a string_view, but it can hold
+ * null characters in the middle of the data.
+ * @param flags a combination of the values from UTF8EscapingFlags to control special
+ * casing. Set to ESCAPE_NONE to disable all special cases.
  * @return the escaped string
  */
-std::string json_escape_utf8(const std::string& val, bool escape_printable_controls = true);
+std::string escape_utf8(std::string_view val, int flags);
 
 /**
- * Escapes bytes in a string that are not valid UTF8 characters with \xYY format. Used
- * by the JSON writer and BIF methods.
- * @param val the character data to be escaped
- * @param val_size the length of the character data
- * @return the escaped string
- */
-std::string json_escape_utf8(const char* val, size_t val_size,
-                             bool escape_printable_controls = true);
+ * Escape a raw string (just some bytes) to a quoted string that may be safely
+ * included in JSON.
+ *
+ * All non-printable characters not part of a valid UTF-8 sequence will be rendered
+ * as lower-case hex digits with the hex_prefix string prepended.
+ *
+ * This further acts differently from escape_utf8() in that it'll pass through valid
+ * UTF-8 sequences even if elsewhere in the string invalid UTF-8 sequences exist.
+ * This keeps more UTF-8 intact when, e.g., there's garbage at the end of a string.
 
-	} // namespace util
-	} // namespace zeek
+ * @param raw The raw bytes to escape
+ * @param escape_prefix The prefix to place before hex digits for escaping ("\\u00" or "\udb80\udc")
+ * @return escaped string with quotes around
+ */
+std::string escape_string_for_json(std::string_view raw, std::string_view escape_prefix);
+
+/**
+ * Checks for values that are approximately equal.
+ * @param a first value to compare
+ * @param b second value to compare
+ * @param tolerance how close they need to be to deem them "approximately equal"
+ * @return true if `a` is within the given tolerance of `b`, false otherwise
+ */
+bool approx_equal(double a, double b, double tolerance = std::numeric_limits<double>::epsilon());
+
+/**
+ * Splits a string at all occurrences of a delimiter. Successive occurrences
+ * of the delimiter will be split into multiple pieces.
+ *
+ * \note This function is not UTF8-aware.
+ */
+template<typename T>
+std::vector<T> split(T s, const T& delim) {
+    // If there's no delimiter, return a copy of the existing string.
+    if ( delim.empty() )
+        return {std::move(s)};
+
+    // If the delimiter won't fit in the string, just return a copy as well.
+    if ( s.size() < delim.size() )
+        return {std::move(s)};
+
+    std::vector<T> l;
+
+    const bool ends_in_delim = (s.substr(s.size() - delim.size()) == delim);
+
+    do {
+        size_t p = s.find(delim);
+        l.push_back(s.substr(0, p));
+        if ( p == std::string::npos )
+            break;
+
+        s = s.substr(p + delim.size());
+    } while ( ! s.empty() );
+
+    if ( ends_in_delim )
+        l.emplace_back(T{});
+
+    return l;
+}
+
+/**
+ * Specialized version of util::split that allows for differing string and delimiter types,
+ * with the requirement that the delimiter must be of the same type as what is stored in the
+ * string type. For example, this allows passing a std::string as the string to split with
+ * a const char* delimiter.
+ *
+ * @param s the string to split
+ * @param delim the delimiter to split the string on
+ * @return a vector of containing the separate parts of the string.
+ */
+template<typename T, typename U = typename T::value_type*>
+std::vector<T> split(T s, U delim) {
+    return split(std::move(s), std::move(T{delim}));
+}
+
+/**
+ * Specialized version of util::split that takes a const char* string and delimiter.
+ *
+ * @param s the string to split
+ * @param delim the delimiter to split the string on
+ * @return a vector of string_view objects containing the separate parts of the string.
+ */
+inline std::vector<std::string_view> split(const char* s, const char* delim) {
+    return split(std::string_view(s), std::string_view(delim));
+}
+
+/**
+ * Specialized version of util::split that takes a const wchar_t* string and delimiter.
+ *
+ * @param s the string to split
+ * @param delim the delimiter to split the string on
+ * @return a vector of wstring_view objects containing the separate parts of the string.
+ */
+inline std::vector<std::wstring_view> split(const wchar_t* s, const wchar_t* delim) {
+    return split(std::wstring_view(s), std::wstring_view(delim));
+}
+
+/**
+ * Returns a string version of a double value following all of the rules from the modp_dtoa methods.
+ */
+size_t double_to_str(double v, char* buf, size_t buf_size, int precision, bool no_exp);
+
+} // namespace util
+} // namespace zeek

@@ -1,6 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out 2>err
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff out
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff err
+# @TEST-EXEC: btest-diff-remove-abspath out
+# @TEST-EXEC: btest-diff-remove-abspath err
 
 # Note that while modifying container membership during for-loop iteration is
 # supposed to be undefined-behavior, it should be practically ok to have this
@@ -35,7 +35,7 @@ for ( i in t )
 print t;
 
 for ( i in t )
-	# Trying to delete a non-existent element within in a loop does not
+	# Trying to delete a nonexistent element within in a loop does not
 	# actually modify membership, so does not trigger a warning.
 	delete t[0];
 
@@ -67,7 +67,7 @@ for ( n in s )
 print s;
 
 for ( n in s )
-	# Trying to delete a non-existent element within in a loop does not
+	# Trying to delete a nonexistent element within in a loop does not
 	# actually modify membership, so does not trigger a warning.
 	delete s[0];
 

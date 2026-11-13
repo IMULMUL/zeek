@@ -10,7 +10,7 @@
 %header{
 zeek::AddrValPtr network_address_to_val(const ASN1Encoding* na);
 zeek::AddrValPtr network_address_to_val(const NetworkAddress* na);
-zeek::ValPtr     asn1_obj_to_val(const ASN1Encoding* obj);
+zeek::RecordValPtr asn1_obj_to_val(const ASN1Encoding* obj);
 
 zeek::RecordValPtr build_hdr(const Header* header);
 zeek::RecordValPtr build_hdrV3(const Header* header);
@@ -42,7 +42,7 @@ zeek::AddrValPtr network_address_to_val(const ASN1Encoding* na)
 	return zeek::make_intrusive<zeek::AddrVal>(ntohl(network_order));
 	}
 
-zeek::ValPtr asn1_obj_to_val(const ASN1Encoding* obj)
+zeek::RecordValPtr asn1_obj_to_val(const ASN1Encoding* obj)
 	{
 	zeek::RecordValPtr rval = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::SNMP::ObjectValue);
 	uint8 tag = obj->meta()->tag();
@@ -129,6 +129,7 @@ zeek::RecordValPtr build_hdrV3(const Header* header)
 	const v3HeaderData* global_data = v3hdr->global_data();
 	bytestring const& flags = global_data->flags()->encoding()->content();
 	uint8 flags_byte = flags.length() > 0 ? flags[0] : 0;
+	auto security_model = binary_to_int64(global_data->security_model()->encoding()->content());
 
 	v3->Assign(0, asn1_integer_to_val(global_data->id(), zeek::TYPE_COUNT));
 	v3->Assign(1, asn1_integer_to_val(global_data->max_size(), zeek::TYPE_COUNT));
@@ -146,6 +147,19 @@ zeek::RecordValPtr build_hdrV3(const Header* header)
 		rv->Assign(0, asn1_octet_string_to_val(spdu->context_engine_id()));
 		rv->Assign(1, asn1_octet_string_to_val(spdu->context_name()));
 		v3->Assign(8, std::move(rv));
+		}
+
+	if ( security_model == 3 && v3hdr->has_usm_security_parameters() ) // user security model
+		{
+		auto usm = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::SNMP::UserSecurityParameters);
+		const v3UsmSecurityParameters* usp = v3hdr->usm_security_parameters();
+		usm->Assign(0, asn1_octet_string_to_val(usp->msgAuthoritativeEngineID()));
+		usm->Assign(1, asn1_integer_to_val(usp->msgAuthoritativeEngineBoots(), zeek::TYPE_INT));
+		usm->Assign(2, asn1_integer_to_val(usp->msgAuthoritativeEngineTime(), zeek::TYPE_INT));
+		usm->Assign(3, asn1_octet_string_to_val(usp->msgUserName()));
+		usm->Assign(4, asn1_octet_string_to_val(usp->msgAuthenticationParameters()));
+		usm->Assign(5, asn1_octet_string_to_val(usp->msgPrivacyParameters()));
+		v3->Assign(9, std::move(usm));
 		}
 
 	return v3;
@@ -194,7 +208,7 @@ zeek::RecordValPtr build_bulk_pdu(const GetBulkRequestPDU* pdu)
 	auto rv = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::SNMP::BulkPDU);
 	rv->Assign(0, asn1_integer_to_val(pdu->request_id(), zeek::TYPE_INT));
 	rv->Assign(1, asn1_integer_to_val(pdu->non_repeaters(), zeek::TYPE_COUNT));
-	rv->Assign(2, asn1_integer_to_val(pdu->max_repititions(), zeek::TYPE_COUNT));
+	rv->Assign(2, asn1_integer_to_val(pdu->max_repetitions(), zeek::TYPE_COUNT));
 	rv->Assign(3, build_bindings(pdu->var_bindings()));
 	return rv;
 	}

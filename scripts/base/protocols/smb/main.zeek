@@ -6,10 +6,12 @@ module SMB;
 
 export {
 	redef enum Log::ID += {
-		AUTH_LOG,
 		MAPPING_LOG,
 		FILES_LOG
 	};
+
+	## Well-known ports for SMB.
+	const ports = { 139/tcp, 445/tcp } &redef;
 
 	global log_policy_files: Log::PolicyHook;
 	global log_policy_mapping: Log::PolicyHook;
@@ -44,6 +46,13 @@ export {
 		PRINT_OPEN,
 		PRINT_CLOSE,
 	};
+
+	## Whether to reset a connection's SMB script state whenever a
+	## :zeek:see:`smb2_discarded_messages_state` event is raised.
+	##
+	## This setting protects from unbounded script state growth in
+	## environments with high capture loss or traffic anomalies.
+	option enable_clear_script_state = T;
 
 	## This record is for the smb_files.log
 	type FileInfo: record {
@@ -145,15 +154,11 @@ export {
 		fid_map      : table[count] of FileInfo  &optional;
 		## Tree map to retrieve tree information based on the tree ID.
 		tid_map      : table[count] of TreeInfo  &optional;
-		## User map to retrieve user name based on the user ID.
-		uid_map      : table[count] of string    &optional;
-		## Pipe map to retrieve UUID based on the file ID of a pipe.
-		pipe_map     : table[count] of string    &optional;
 
 		## A set of recent files to avoid logging the same
 		## files over and over in the smb files log.
 		## This only applies to files seen in a single connection.
-		recent_files : set[string] &default=string_set() &read_expire=3min;
+		recent_files : set[string] &default=set() &read_expire=3min;
 	};
 
 	## Everything below here is used internally in the SMB scripts.
@@ -163,41 +168,69 @@ export {
 	};
 
 	## This is an internally used function.
-	const set_current_file: function(smb_state: State, file_id: count) &redef;
+	global set_current_file: function(c: connection, file_id: count);
+
+	# Internal function to insert a new TreeInfo into c$smb_state$tid_map
+	# with a size check to prevent unbounded tid_map growth.
+	global insert_new_tree_info: function(c: connection, tid: count): TreeInfo;
 
 	## This is an internally used function.
 	const write_file_log: function(state: State) &redef;
+
+	## Maximum size of the fid_map in SMB::State.
+	const max_fid_map_size = 10000 &redef;
+
+	## Maximum size of the tid_map in SMB::State.
+	const max_tid_map_size = 10000 &redef;
 }
 
 redef record FileInfo += {
 	## ID referencing this file.
 	fid  : count   &optional;
-
-	## UUID referencing this file if DCE/RPC.
-	uuid : string &optional;
 };
-
-const ports = { 139/tcp, 445/tcp };
-redef likely_server_ports += { ports };
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(SMB::FILES_LOG, [$columns=SMB::FileInfo, $path="smb_files", $policy=log_policy_files]);
-	Log::create_stream(SMB::MAPPING_LOG, [$columns=SMB::TreeInfo, $path="smb_mapping", $policy=log_policy_mapping]);
+	Log::create_stream(SMB::FILES_LOG, Log::Stream($columns=SMB::FileInfo, $path="smb_files", $policy=log_policy_files));
+	Log::create_stream(SMB::MAPPING_LOG, Log::Stream($columns=SMB::TreeInfo, $path="smb_mapping", $policy=log_policy_mapping));
 
 	Analyzer::register_for_ports(Analyzer::ANALYZER_SMB, ports);
 	}
 
-function set_current_file(smb_state: State, file_id: count)
+function set_current_file(c: connection, file_id: count)
 	{
+	local smb_state = c$smb_state;
+
 	if ( file_id !in smb_state$fid_map )
 		{
+		# If fid_map grew unbounded to max_fid_map_size, reset it outright.
+		if ( max_fid_map_size > 0 && |smb_state$fid_map| >= max_fid_map_size )
+			{
+			Reporter::limit_reached_weird("SMB_max_fid_map_size_reached", c, |smb_state$fid_map|, 0, "SMB");
+			smb_state$fid_map = table();
+			}
+
 		smb_state$fid_map[file_id] = smb_state$current_cmd$referenced_file;
 		smb_state$fid_map[file_id]$fid = file_id;
 		}
 
 	smb_state$current_cmd$referenced_file = smb_state$fid_map[file_id];
 	smb_state$current_file = smb_state$current_cmd$referenced_file;
+	}
+
+function insert_new_tree_info(c: connection, tid: count): TreeInfo
+	{
+	local smb_state = c$smb_state;
+
+	if ( max_tid_map_size > 0 && |smb_state$tid_map| >= max_tid_map_size )
+		{
+		Reporter::limit_reached_weird("SMB_max_tid_map_size_reached", c, |smb_state$tid_map|, 0, "SMB");
+		smb_state$tid_map = table();
+		}
+
+	local tmp_tree = SMB::TreeInfo($uid=c$uid, $id=c$id);
+	smb_state$tid_map[tid] = tmp_tree;
+	return tmp_tree;
 	}
 
 function write_file_log(state: State)
@@ -211,12 +244,18 @@ function write_file_log(state: State)
 		# seen files in the SMB::State $recent_files field.
 		if ( f?$times )
 			{
+			# For repeated reads of the same file, the access
+			# time can change, so make a copy of the various times
+			# and zero that one out.
+			local times = copy(f$times);
+			times$accessed_raw = 0;
+			times$accessed = double_to_time(0.0);
 			local file_ident = cat(f$action,
 			                       f?$fuid ? f$fuid : "",
 			                       f?$name ? f$name : "",
 			                       f?$path ? f$path : "",
 			                       f$size,
-			                       f$times);
+			                       times);
 			if ( file_ident in state$recent_files )
 				{
 				# We've already seen this file and don't want to log it again.
@@ -236,12 +275,17 @@ event smb_pipe_connect_heuristic(c: connection) &priority=5
 	c$smb_state$current_tree$share_type = "PIPE";
 	}
 
+event smb_discarded_tree_is_pipe_map(c: connection, size: count)
+	{
+	Reporter::limit_reached_weird("SMB_discarded_tree_is_pipe_map", c, size, 0, "SMB");
+	}
+
 event file_state_remove(f: fa_file) &priority=-5
 	{
 	if ( f$source != "SMB" )
 		return;
 
-	for ( id, c in f$conns )
+	for ( _, c in f$conns )
 		{
 		if ( c?$smb_state && c$smb_state?$current_file)
 			{

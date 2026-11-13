@@ -12,7 +12,7 @@ refine flow SIP_Flow += {
 
 	%init{
 		content_length = 0;
-		build_headers = bool(sip_all_headers);
+		build_headers = static_cast<bool>(sip_all_headers);
 	%}
 
 	function get_content_length(): int
@@ -20,16 +20,8 @@ refine flow SIP_Flow += {
 		return content_length;
 		%}
 
-	function proc_sip_request(junk: bytestring, method: bytestring, uri: bytestring, vers: SIP_Version): bool
+	function proc_sip_request(method: bytestring, uri: bytestring, vers: SIP_Version): bool
 		%{
-		if ( junk.length() )
-			{
-			zeek::String zs{junk.begin(), junk.length(), false};
-			auto addl = zs.Render();
-			connection()->zeek_analyzer()->Weird("sip_junk_before_request", addl);
-			delete [] addl;
-			}
-
 		if ( sip_request )
 			{
 			zeek::BifEvent::enqueue_sip_request(connection()->zeek_analyzer(), connection()->zeek_analyzer()->Conn(),
@@ -71,7 +63,7 @@ refine flow SIP_Flow += {
 
 		if ( build_headers )
 			{
-			headers.push_back({zeek::AdoptRef{}, build_sip_header_val(name, value)});
+			headers.emplace_back(zeek::AdoptRef{}, build_sip_header_val(name, value));
 			}
 
 		return true;
@@ -121,7 +113,7 @@ refine flow SIP_Flow += {
 		if ( name.length() > 0 )
 			{
 			// Make it all uppercase.
-			name_val = zeek::make_intrusive<zeek::StringVal>(name.length(), (const char*) name.begin());
+			name_val = zeek::make_intrusive<zeek::StringVal>(name.length(), reinterpret_cast<const char*>(name.begin()));
 			name_val->ToUpper();
 			}
 		else
@@ -156,7 +148,7 @@ refine flow SIP_Flow += {
 };
 
 refine typeattr SIP_RequestLine += &let {
-       proc: bool = $context.flow.proc_sip_request(junk, method, uri, version);
+       proc: bool = $context.flow.proc_sip_request(method, uri, version);
 };
 
 refine typeattr SIP_ReplyLine += &let {

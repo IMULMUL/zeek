@@ -1,495 +1,644 @@
 // See the file "COPYING" in the main distribution directory for copyright.
 
-#include <errno.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#include <cerrno>
+#include <filesystem>
 
 #include "zeek/script_opt/CPP/Compile.h"
+#include "zeek/script_opt/IDOptInfo.h"
 
 extern std::unordered_set<std::string> files_with_conditionals;
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 using namespace std;
 
-CPPCompile::CPPCompile(vector<FuncInfo>& _funcs, ProfileFuncs& _pfs, const string& gen_name,
-                       bool add, bool _standalone, bool report_uncompilable)
-	: funcs(_funcs), pfs(_pfs), standalone(_standalone)
-	{
-	auto target_name = gen_name.c_str();
-	auto mode = add ? "a" : "w";
+CPPCompile::CPPCompile(vector<FuncInfo>& _funcs, std::shared_ptr<ProfileFuncs> _pfs, const string& gen_name,
+                       bool _standalone, bool report_uncompilable)
+    : funcs(_funcs), pfs(std::move(_pfs)), standalone(_standalone) {
+    auto target_name = gen_name.c_str();
 
-	write_file = fopen(target_name, mode);
-	if ( ! write_file )
-		{
-		reporter->Error("can't open C++ target file %s", target_name);
-		exit(1);
-		}
+    write_file = fopen(target_name, "w");
+    if ( ! write_file ) {
+        reporter->Error("can't open C++ target file %s", target_name);
+        exit(1);
+    }
 
-	if ( add )
-		{
-		// We need a unique number to associate with the name
-		// space for the code we're adding.  A convenient way to
-		// generate this safely is to use the present size of the
-		// file we're appending to.  That guarantees that every
-		// incremental compilation will wind up with a different
-		// number.
-		struct stat st;
-		if ( fstat(fileno(write_file), &st) != 0 )
-			{
-			char buf[256];
-			util::zeek_strerror_r(errno, buf, sizeof(buf));
-			reporter->Error("fstat failed on %s: %s", target_name, buf);
-			exit(1);
-			}
+    Compile(report_uncompilable);
 
-		// We use a value of "0" to mean "we're not appending,
-		// we're generating from scratch", so make sure we're
-		// distinct from that.
-		addl_tag = st.st_size + 1;
-		}
+    if ( standalone && skipped_uncompilable_func && ! analysis_options.allow_cond ) {
+        reporter->Error(
+            "standalone C++ compilation incomplete due to having to skip some functions; use \"-O allow-cond\" to "
+            "override");
+        exit(1);
+    }
+}
 
-	else
-		addl_tag = 0;
+CPPCompile::~CPPCompile() { fclose(write_file); }
 
-	Compile(report_uncompilable);
-	}
+void CPPCompile::Compile(bool report_uncompilable) {
+    unordered_set<const Type*> rep_types;
+    unordered_set<string> filenames_reported_as_skipped;
+    unordered_set<const Attr*> attrs;
+    bool had_to_skip = false;
 
-CPPCompile::~CPPCompile()
-	{
-	fclose(write_file);
-	}
+    for ( auto& func : funcs )
+        if ( AnalyzeFuncBody(func, filenames_reported_as_skipped, rep_types, report_uncompilable) )
+            body_profiles[func.Body()] = func.ProfilePtr();
+        else
+            had_to_skip = true;
 
-void CPPCompile::Compile(bool report_uncompilable)
-	{
-	// Get the working directory so we can use it in diagnostic messages
-	// as a way to identify this compilation.  Only germane when doing
-	// incremental compilation (particularly of the test suite).
-	char buf[8192];
-	if ( ! getcwd(buf, sizeof buf) )
-		reporter->FatalError("getcwd failed: %s", strerror(errno));
+    if ( standalone ) {
+        if ( had_to_skip )
+            reporter->FatalError("aborting standalone compilation to C++ due to having to skip some functions");
 
-	working_dir = buf;
+        // Used to find modules only present in the analyzed code.
+        unordered_set<string> analyzed_modules;
+        unordered_set<string> non_analyzed_modules;
 
-	GenProlog();
+        for ( auto& g : global_scope()->OrderedVars() ) {
+            bool compiled_global = obj_matches_opt_files(g) == AnalyzeDecision::SHOULD;
 
-	unordered_set<string> filenames_reported_as_skipped;
+            if ( ! compiled_global )
+                for ( const auto& i_e : g->GetOptInfo()->GetInitExprs() )
+                    if ( obj_matches_opt_files(i_e) == AnalyzeDecision::SHOULD ) {
+                        compiled_global = true;
+                        break;
+                    }
 
-	// Determine which functions we can call directly, and reuse
-	// previously compiled instances of those if present.
-	for ( auto& func : funcs )
-		{
-		const auto& f = func.Func();
+            if ( ! compiled_global ) {
+                if ( g->GetLocationInfo()->FirstLine() != 0 )
+                    // Make sure we're dealing with a global actually used
+                    // elsewhere (for example, weed out some spicy events
+                    // that don't have matching Zeek script).
+                    non_analyzed_modules.insert(g->ModuleName());
+                continue;
+            }
 
-		auto& ofiles = analysis_options.only_files;
-		string fn = func.Body()->GetLocationInfo()->filename;
+            analyzed_modules.insert(g->ModuleName());
 
-		if ( ! func.ShouldSkip() && ! ofiles.empty() && files_with_conditionals.count(fn) > 0 )
-			{
-			if ( filenames_reported_as_skipped.count(fn) == 0 )
-				{
-				reporter->Warning(
-					"skipping compilation of files in %s due to presence of conditional code",
-					fn.c_str());
-				filenames_reported_as_skipped.insert(fn);
-				}
+            // We will need to generate this global's definition, including
+            // its initialization. Make sure we're tracking it and its
+            // associated types, including those required for initializing.
+            auto& t = g->GetType();
+            (void)pfs->HashType(t);
+            rep_types.insert(TypeRep(t));
 
-			func.SetSkip(true);
-			}
+            all_accessed_globals.insert(g);
+            accessed_globals.insert(g);
 
-		if ( func.ShouldSkip() )
-			{
-			not_fully_compilable.insert(f->Name());
-			continue;
-			}
+            for ( const auto& i_e : g->GetOptInfo()->GetInitExprs() ) {
+                auto pf = std::make_shared<ProfileFunc>(i_e.get());
+                for ( auto& t : pf->OrderedTypes() ) {
+                    (void)pfs->HashType(t);
+                    rep_types.insert(TypeRep(t));
+                }
+                for ( auto& g : pf->Globals() )
+                    accessed_globals.insert(g);
+                for ( auto& ag : pf->AllGlobals() )
+                    all_accessed_globals.insert(ag);
+                for ( auto& l : pf->Lambdas() )
+                    // We might not have profiled this previously if none
+                    // of the functions refer to the global. This can
+                    // happen for example for a global "const" table that's
+                    // made available for external lookup use.
+                    pfs->ProfileLambda(l);
+            }
+        }
 
-		const char* reason;
-		if ( IsCompilable(func, &reason) )
-			{
-			if ( f->Flavor() == FUNC_FLAVOR_FUNCTION )
-				// Note this as a callable compiled function.
-				compilable_funcs.insert(BodyName(func));
-			}
-		else
-			{
-			if ( reason && report_uncompilable )
-				fprintf(stderr, "%s cannot be compiled to C++ due to %s\n", f->Name(), reason);
-			not_fully_compilable.insert(f->Name());
-			}
-		}
+        for ( auto& m : analyzed_modules )
+            if ( ! non_analyzed_modules.contains(m) )
+                standalone_modules.insert(m);
 
-	// Track all of the types we'll be using.
-	for ( const auto& t : pfs.RepTypes() )
-		{
-		TypePtr tp{NewRef{}, (Type*)(t)};
-		types.AddKey(tp, pfs.HashType(t));
-		}
+        for ( auto& g : pfs->CalledBiFGlobals() )
+            all_accessed_globals.insert(g);
 
-	Emit("TypePtr types__CPP[%s];", Fmt(static_cast<int>(types.DistinctKeys().size())));
+        for ( auto& t : pfs->MainTypes() )
+            if ( obj_matches_opt_files(t) == AnalyzeDecision::SHOULD )
+                rep_types.insert(TypeRep(t));
 
-	NL();
+        for ( auto& l : pfs->Lambdas() )
+            if ( obj_matches_opt_files(l) == AnalyzeDecision::SHOULD )
+                accessed_lambdas.insert(l);
 
-	for ( auto& g : pfs.AllGlobals() )
-		CreateGlobal(g);
+        for ( auto& ea : pfs->ExprAttrs() )
+            if ( obj_matches_opt_files(ea.first) == AnalyzeDecision::SHOULD ) {
+                auto& attr = ea.first;
+                attrs.insert(attr);
+                auto& t = attr->GetExpr()->GetType();
+                rep_types.insert(TypeRep(t));
+            }
+    }
 
-	for ( const auto& e : pfs.Events() )
-		if ( AddGlobal(e, "gl") )
-			Emit("EventHandlerPtr %s_ev;", globals[string(e)]);
+    auto t = util::current_time();
+    total_hash = merge_p_hashes(total_hash, hash<double>{}(t));
 
-	for ( const auto& t : pfs.RepTypes() )
-		{
-		ASSERT(types.HasKey(t));
-		TypePtr tp{NewRef{}, (Type*)(t)};
-		RegisterType(tp);
-		}
+    GenProlog();
 
-	// The scaffolding is now in place to go ahead and generate
-	// the functions & lambdas.  First declare them ...
-	for ( const auto& func : funcs )
-		if ( ! func.ShouldSkip() )
-			DeclareFunc(func);
+    // Track all of the types we'll be using.
+    for ( const auto& t : rep_types ) {
+        TypePtr tp{NewRef{}, const_cast<Type*>(t)};
+        types.AddKey(tp, pfs->HashType(t));
+    }
 
-	// We track lambdas by their internal names, because two different
-	// LambdaExpr's can wind up referring to the same underlying lambda
-	// if the bodies happen to be identical.  In that case, we don't
-	// want to generate the lambda twice.
-	unordered_set<string> lambda_names;
-	for ( const auto& l : pfs.Lambdas() )
-		{
-		const auto& n = l->Name();
-		if ( lambda_names.count(n) > 0 )
-			// Skip it.
-			continue;
+    NL();
 
-		DeclareLambda(l, pfs.ExprProf(l).get());
-		lambda_names.insert(n);
-		}
+    IDSet globals_to_initialize;
+    for ( auto& g : all_accessed_globals )
+        if ( CreateGlobal(g) )
+            globals_to_initialize.insert(g);
 
-	NL();
+    for ( auto& g : globals_to_initialize ) {
+        auto gi = GenerateGlobalInit(g);
+        global_id_info->AddInstance(gi);
+        global_gis[g] = std::move(gi);
+    }
 
-	// ... and now generate their bodies.
-	for ( const auto& func : funcs )
-		if ( ! func.ShouldSkip() )
-			CompileFunc(func);
+    for ( const auto& e : accessed_events )
+        if ( AddGlobal(e, "gl") )
+            Emit("EventHandlerPtr %s_ev;", globals[string(e)]);
 
-	lambda_names.clear();
-	for ( const auto& l : pfs.Lambdas() )
-		{
-		const auto& n = l->Name();
-		if ( lambda_names.count(n) > 0 )
-			continue;
+    for ( const auto& t : rep_types ) {
+        ASSERT(types.HasKey(t));
+        TypePtr tp{NewRef{}, const_cast<Type*>(t)};
+        RegisterType(tp);
+    }
 
-		CompileLambda(l, pfs.ExprProf(l).get());
-		lambda_names.insert(n);
-		}
+    for ( const auto& attr : attrs ) {
+        AttrPtr attr_p = {NewRef{}, const_cast<Attr*>(attr)};
+        (void)RegisterAttr(attr_p);
+    }
 
-	NL();
-	Emit("std::vector<CPP_RegisterBody> CPP__bodies_to_register = {");
+    // The scaffolding is now in place to go ahead and generate
+    // the functions & lambdas.  First declare them ...
+    for ( const auto& func : funcs )
+        if ( ! func.ShouldSkip() )
+            DeclareFunc(func);
 
-	for ( const auto& f : compiled_funcs )
-		RegisterCompiledBody(f);
+    // We track lambdas by their internal names, and associate those
+    // with their AST bodies.  Two different LambdaExpr's can wind up
+    // referring to the same underlying lambda if the bodies happen to
+    // be identical.  In that case, we don't want to generate the lambda
+    // twice, but we do want to map the second one to the same body name.
+    unordered_map<string, const Stmt*> lambda_ASTs;
+    for ( const auto& l : accessed_lambdas ) {
+        const auto& n = l->Name();
+        const auto body = l->Ingredients()->Body().get();
+        if ( lambda_ASTs.contains(n) )
+            // Reuse previous body.
+            body_names[body] = body_names[lambda_ASTs[n]];
+        else {
+            DeclareLambda(l, pfs->ExprProf(l).get());
+            lambda_ASTs[n] = body;
+        }
+    }
 
-	Emit("};");
+    NL();
 
-	GenEpilog();
-	}
+    // ... and now generate their bodies.
+    for ( const auto& func : funcs )
+        if ( ! func.ShouldSkip() )
+            CompileFunc(func);
 
-void CPPCompile::GenProlog()
-	{
-	if ( addl_tag <= 1 )
-		// This is either a compilation via gen-C++, or
-		// one using add-C++ and an empty CPP-gen.cc file.
-		Emit("#include \"zeek/script_opt/CPP/Runtime.h\"\n");
+    lambda_ASTs.clear();
+    for ( const auto& l : accessed_lambdas ) {
+        const auto& n = l->Name();
+        if ( lambda_ASTs.contains(n) )
+            continue;
 
-	Emit("namespace zeek::detail { //\n");
-	Emit("namespace CPP_%s { // %s\n", Fmt(addl_tag), working_dir);
+        CompileLambda(l, pfs->ExprProf(l).get());
+        lambda_ASTs[n] = l->Ingredients()->Body().get();
+    }
 
-	// The following might-or-might-not wind up being populated/used.
-	Emit("std::vector<int> field_mapping;");
-	Emit("std::vector<int> enum_mapping;");
-	NL();
+    NL();
+    Emit("std::vector<CPP_RegisterBody> CPP__bodies_to_register = {");
 
-	const_info[TYPE_BOOL] = CreateConstInitInfo("Bool", "ValPtr", "bool");
-	const_info[TYPE_INT] = CreateConstInitInfo("Int", "ValPtr", "bro_int_t");
-	const_info[TYPE_COUNT] = CreateConstInitInfo("Count", "ValPtr", "bro_uint_t");
-	const_info[TYPE_DOUBLE] = CreateConstInitInfo("Double", "ValPtr", "double");
-	const_info[TYPE_TIME] = CreateConstInitInfo("Time", "ValPtr", "double");
-	const_info[TYPE_INTERVAL] = CreateConstInitInfo("Interval", "ValPtr", "double");
-	const_info[TYPE_ADDR] = CreateConstInitInfo("Addr", "ValPtr", "");
-	const_info[TYPE_SUBNET] = CreateConstInitInfo("SubNet", "ValPtr", "");
-	const_info[TYPE_PORT] = CreateConstInitInfo("Port", "ValPtr", "uint32_t");
+    for ( const auto& f : compiled_func_to_zeek_func )
+        RegisterCompiledBody(f.first);
 
-	const_info[TYPE_ENUM] = CreateCompoundInitInfo("Enum", "ValPtr");
-	const_info[TYPE_STRING] = CreateCompoundInitInfo("String", "ValPtr");
-	const_info[TYPE_LIST] = CreateCompoundInitInfo("List", "ValPtr");
-	const_info[TYPE_PATTERN] = CreateCompoundInitInfo("Pattern", "ValPtr");
-	const_info[TYPE_VECTOR] = CreateCompoundInitInfo("Vector", "ValPtr");
-	const_info[TYPE_RECORD] = CreateCompoundInitInfo("Record", "ValPtr");
-	const_info[TYPE_TABLE] = CreateCompoundInitInfo("Table", "ValPtr");
-	const_info[TYPE_FUNC] = CreateCompoundInitInfo("Func", "ValPtr");
-	const_info[TYPE_FILE] = CreateCompoundInitInfo("File", "ValPtr");
+    Emit("};");
 
-	type_info = CreateCompoundInitInfo("Type", "Ptr");
-	attr_info = CreateCompoundInitInfo("Attr", "Ptr");
-	attrs_info = CreateCompoundInitInfo("Attributes", "Ptr");
+    if ( standalone )
+        // Now that we've identified all of the record fields we might have
+        // to generate, make sure we track their attributes.
+        for ( const auto& fd : field_decls ) {
+            auto td = fd.second;
+            if ( obj_matches_opt_files(td->type) == AnalyzeDecision::SHOULD ) {
+                TypePtr tp = {NewRef{}, const_cast<Type*>(TypeRep(td->type))};
+                RegisterType(tp);
+            }
+            if ( obj_matches_opt_files(td->attrs) == AnalyzeDecision::SHOULD )
+                RegisterAttributes(td->attrs);
+        }
 
-	call_exprs_info = CreateCustomInitInfo("CallExpr", "Ptr");
-	lambda_reg_info = CreateCustomInitInfo("LambdaRegistration", "");
-	global_id_info = CreateCustomInitInfo("GlobalID", "");
+    GenEpilog();
+}
 
-	NL();
-	DeclareDynCPPStmt();
-	NL();
-	}
+bool CPPCompile::AnalyzeFuncBody(FuncInfo& fi, unordered_set<string>& filenames_reported_as_skipped,
+                                 unordered_set<const Type*>& rep_types, bool report_uncompilable) {
+    const auto& f = fi.Func();
+    auto& body = fi.Body();
 
-shared_ptr<CPP_InitsInfo> CPPCompile::CreateConstInitInfo(const char* tag, const char* type,
-                                                          const char* c_type)
-	{
-	auto gi = make_shared<CPP_BasicConstInitsInfo>(tag, type, c_type);
-	return RegisterInitInfo(tag, type, gi);
-	}
+    string fn = body->GetLocationInfo()->FileName();
 
-shared_ptr<CPP_InitsInfo> CPPCompile::CreateCompoundInitInfo(const char* tag, const char* type)
-	{
-	auto gi = make_shared<CPP_CompoundInitsInfo>(tag, type);
-	return RegisterInitInfo(tag, type, gi);
-	}
+    if ( fi.ShouldAnalyze() && fi.ShouldSkip() ) {
+        const char* reason = nullptr;
+        auto is_compilable = is_CPP_compilable(fi.Profile(), &reason);
+        ASSERT(! is_compilable);
+        ASSERT(reason);
+        if ( standalone || report_uncompilable )
+            reporter->Warning("%s cannot be compiled to C++ due to %s", f->GetName().c_str(), reason);
 
-shared_ptr<CPP_InitsInfo> CPPCompile::CreateCustomInitInfo(const char* tag, const char* type)
-	{
-	auto gi = make_shared<CPP_CustomInitsInfo>(tag, type);
-	if ( type[0] == '\0' )
-		gi->SetCPPType("void*");
+        fi.SetSkip(true);
+        if ( standalone )
+            return false;
+    }
 
-	return RegisterInitInfo(tag, type, gi);
-	}
+    if ( ! analysis_options.allow_cond && ! fi.ShouldSkip() ) {
+        if ( ! analysis_options.only_files.empty() && files_with_conditionals.contains(fn) ) {
+            if ( report_uncompilable )
+                reporter->Warning("%s cannot be compiled to C++ due to source file %s having conditional code",
+                                  f->GetName().c_str(), fn.c_str());
+
+            else if ( ! filenames_reported_as_skipped.contains(fn) ) {
+                reporter->Warning("skipping compilation of files in %s due to presence of conditional code",
+                                  fn.c_str());
+                filenames_reported_as_skipped.emplace(fn);
+            }
+
+            fi.SetSkip(true);
+            skipped_uncompilable_func = true;
+        }
+    }
+
+    if ( fi.ShouldSkip() ) {
+        not_fully_compilable.insert(f->GetName());
+        return true;
+    }
+
+    auto pf = fi.Profile();
+    total_hash = merge_p_hashes(total_hash, pf->HashVal());
+
+    for ( auto t : pf->UnorderedTypes() )
+        rep_types.insert(pfs->TypeRep(t));
+
+    auto& pf_all_gl = pf->AllGlobals();
+    all_accessed_globals.insert(pf_all_gl.begin(), pf_all_gl.end());
+
+    auto& pf_gl = pf->Globals();
+    accessed_globals.insert(pf_gl.begin(), pf_gl.end());
+
+    auto& pf_events = pf->Events();
+    accessed_events.insert(pf_events.begin(), pf_events.end());
+
+    auto& pf_lambdas = pf->Lambdas();
+    accessed_lambdas.insert(pf_lambdas.begin(), pf_lambdas.end());
+
+    if ( is_lambda(f) || is_when_lambda(f) ) {
+        // We deal with these separately.
+        fi.SetSkip(true);
+        return true;
+    }
+
+    const char* reason;
+    if ( IsCompilable(fi, &reason) ) {
+        if ( f->Flavor() == FUNC_FLAVOR_FUNCTION )
+            // Note this as a callable compiled function.
+            compilable_funcs.insert(BodyName(fi));
+    }
+    else {
+        if ( reason && (standalone || report_uncompilable) ) {
+            reporter->Warning("%s cannot be compiled to C++ due to %s", f->GetName().c_str(), reason);
+        }
+
+        not_fully_compilable.insert(f->GetName());
+        skipped_uncompilable_func = true;
+
+        return false;
+    }
+
+    return true;
+}
+
+void CPPCompile::GenProlog() {
+    Emit("#include \"zeek/script_opt/CPP/Runtime.h\"\n");
+
+    // Get the working directory for annotating the output to help
+    // with debugging.
+    std::error_code ec;
+    auto cwd = std::filesystem::current_path(ec);
+    if ( ec )
+        reporter->FatalError("current_path failed: %s", ec.message().c_str());
+    std::string working_dir = cwd.string();
+
+    Emit("namespace zeek::detail { //\n");
+    Emit("namespace CPP_%s { // %s\n", Fmt(total_hash), working_dir);
+
+    // The following might-or-might-not wind up being populated/used.
+    Emit("std::vector<zeek_int_t> field_mapping;");
+    Emit("std::vector<zeek_int_t> enum_mapping;");
+
+    // These are "extern" so we can define them *after* generating the
+    // initialization logic, since that logic might result in additions
+    // to the mappings. They aren't used outside of this compilation.
+    Emit("extern std::vector<CPP_FieldMapping> CPP__field_mappings__;");
+    Emit("extern std::vector<CPP_EnumMapping> CPP__enum_mappings__;");
+
+    NL();
+
+    const_info[TYPE_BOOL] = CreateConstInitInfo("Bool", "ValPtr", "bool");
+    const_info[TYPE_INT] = CreateConstInitInfo("Int", "ValPtr", "zeek_int_t");
+    const_info[TYPE_COUNT] = CreateConstInitInfo("Count", "ValPtr", "zeek_uint_t");
+    const_info[TYPE_DOUBLE] = CreateConstInitInfo("Double", "ValPtr", "double");
+    const_info[TYPE_TIME] = CreateConstInitInfo("Time", "ValPtr", "double");
+    const_info[TYPE_INTERVAL] = CreateConstInitInfo("Interval", "ValPtr", "double");
+    const_info[TYPE_ADDR] = CreateConstInitInfo("Addr", "ValPtr", "");
+    const_info[TYPE_SUBNET] = CreateConstInitInfo("SubNet", "ValPtr", "");
+    const_info[TYPE_PORT] = CreateConstInitInfo("Port", "ValPtr", "uint32_t");
+
+    const_info[TYPE_ENUM] = CreateCompoundInitInfo("Enum", "ValPtr");
+    const_info[TYPE_STRING] = CreateCompoundInitInfo("String", "ValPtr");
+    const_info[TYPE_LIST] = CreateCompoundInitInfo("List", "ValPtr");
+    const_info[TYPE_PATTERN] = CreateCompoundInitInfo("Pattern", "ValPtr");
+    const_info[TYPE_VECTOR] = CreateCompoundInitInfo("Vector", "ValPtr");
+    const_info[TYPE_RECORD] = CreateCompoundInitInfo("Record", "ValPtr");
+    const_info[TYPE_TABLE] = CreateCompoundInitInfo("Table", "ValPtr");
+    const_info[TYPE_FUNC] = CreateCompoundInitInfo("Func", "ValPtr");
+    const_info[TYPE_FILE] = CreateCompoundInitInfo("File", "ValPtr");
+    const_info[TYPE_TYPE] = CreateCompoundInitInfo("TypeVal", "Ptr");
+
+    type_info = CreateCompoundInitInfo("Type", "Ptr");
+    attr_info = CreateCompoundInitInfo("Attr", "Ptr");
+    attrs_info = CreateCompoundInitInfo("Attributes", "Ptr");
+
+    call_exprs_info = CreateCustomInitInfo("CallExpr", "Ptr");
+    lambda_reg_info = CreateCustomInitInfo("LambdaRegistration", "");
+    global_id_info = CreateCustomInitInfo("GlobalID", "");
+
+    NL();
+    DeclareDynCPPStmt();
+    NL();
+}
+
+shared_ptr<CPP_InitsInfo> CPPCompile::CreateConstInitInfo(const char* tag, const char* type, const char* c_type) {
+    auto gi = make_shared<CPP_BasicConstInitsInfo>(tag, type, c_type);
+    return RegisterInitInfo(tag, type, gi);
+}
+
+shared_ptr<CPP_InitsInfo> CPPCompile::CreateCompoundInitInfo(const char* tag, const char* type) {
+    auto gi = make_shared<CPP_CompoundInitsInfo>(tag, type);
+    return RegisterInitInfo(tag, type, gi);
+}
+
+shared_ptr<CPP_InitsInfo> CPPCompile::CreateCustomInitInfo(const char* tag, const char* type) {
+    auto gi = make_shared<CPP_CustomInitsInfo>(tag, type);
+    if ( type[0] == '\0' )
+        gi->SetCPPType("void*");
+
+    return RegisterInitInfo(tag, type, gi);
+}
 
 shared_ptr<CPP_InitsInfo> CPPCompile::RegisterInitInfo(const char* tag, const char* type,
-                                                       shared_ptr<CPP_InitsInfo> gi)
-	{
-	string v_type = type[0] ? (string(tag) + type) : "void*";
-	Emit("std::vector<%s> CPP__%s__;", v_type, string(tag));
-	all_global_info.insert(gi);
-	return gi;
-	}
+                                                       shared_ptr<CPP_InitsInfo> gi) {
+    string v_type = type[0] ? (string(tag) + type) : "void*";
+    Emit("std::vector<%s> CPP__%s__;", v_type, string(tag));
+    all_global_info.insert(gi);
+    return gi;
+}
 
-void CPPCompile::RegisterCompiledBody(const string& f)
-	{
-	auto h = body_hashes[f];
-	auto p = body_priorities[f];
+void CPPCompile::RegisterCompiledBody(const string& f) {
+    // Build up an initializer of the events relevant to the function.
+    string events;
+    auto be = body_events.find(f);
+    if ( be != body_events.end() )
+        for ( const auto& e : be->second ) {
+            if ( ! events.empty() )
+                events += ", ";
 
-	// Build up an initializer of the events relevant to the function.
-	string events;
-	auto be = body_events.find(f);
-	if ( be != body_events.end() )
-		for ( const auto& e : be->second )
-			{
-			if ( events.size() > 0 )
-				events += ", ";
-			events = events + "\"" + e + "\"";
-			}
+            events += '\"';
+            events += e;
+            events += '\"';
+        }
 
-	events = string("{") + events + "}";
+    events = string("{") + events + "}";
 
-	auto fi = func_index.find(f);
-	ASSERT(fi != func_index.end());
-	auto type_signature = casting_index[fi->second];
-	Emit("\tCPP_RegisterBody(\"%s\", (void*) %s, %s, %s, %s, std::vector<std::string>(%s)),", f, f,
-	     Fmt(type_signature), Fmt(p), Fmt(h), events);
-	}
+    auto fi = func_index.find(f);
+    ASSERT(fi != func_index.end());
+    auto type_signature = casting_index[fi->second];
 
-void CPPCompile::GenEpilog()
-	{
-	NL();
-	for ( const auto& ii : init_infos )
-		GenInitExpr(ii.second);
+    const auto& bi = body_info[f];
+    auto body_info =
+        Fmt(bi.priority) + ", " + Fmt(bi.hash) + ", \"" + bi.loc->FileName() + " (C++)\", " + Fmt(bi.loc->FirstLine());
 
-	NL();
-	GenCPPDynStmt();
+    string module_group = "\"" + bi.module + "\"";
 
-	NL();
-	for ( auto gi : all_global_info )
-		gi->GenerateInitializers(this);
+    string attr_groups = "{";
+    for ( const auto& g : bi.groups )
+        attr_groups += " \"" + g + "\",";
+    attr_groups += " }";
 
-	NL();
-	InitializeEnumMappings();
+    string params = "std::vector<std::string>(" + events + "), " + module_group + ", " + attr_groups;
+    Emit("\tCPP_RegisterBody(\"%s\", \"%s\", (void*) %s, %s, %s, %s),", compiled_func_to_zeek_func[f], f, f,
+         Fmt(type_signature), body_info, params);
+}
 
-	NL();
-	InitializeFieldMappings();
+void CPPCompile::GenEpilog() {
+    NL();
+    for ( const auto& ii : init_infos )
+        GenInitExpr(ii.second);
 
-	NL();
-	InitializeBiFs();
+    NL();
+    GenCPPDynStmt();
 
-	NL();
-	indices_mgr.Generate(this);
+    NL();
+    for ( const auto& gi : all_global_info )
+        gi->GenerateInitializers(this);
 
-	NL();
-	InitializeStrings();
+    NL();
+    InitializeBiFs();
 
-	NL();
-	InitializeHashes();
+    NL();
+    indices_mgr.Generate(this);
 
-	NL();
-	InitializeConsts();
+    NL();
+    InitializeStrings();
 
-	NL();
-	GenLoadBiFs();
+    NL();
+    InitializeHashes();
 
-	NL();
-	GenFinishInit();
+    NL();
+    InitializeConsts();
 
-	NL();
-	GenRegisterBodies();
+    NL();
+    GenLoadBiFs();
 
-	NL();
-	Emit("void init__CPP()");
-	StartBlock();
-	Emit("register_bodies__CPP();");
-	EndBlock();
+    NL();
+    GenFinishInit();
 
-	if ( standalone )
-		GenStandaloneActivation();
+    // We had to defer these because the initializations can wind up adding
+    // elements to them.
+    NL();
+    InitializeEnumMappings();
+    NL();
+    InitializeFieldMappings();
 
-	GenInitHook();
+    NL();
+    GenRegisterBodies();
 
-	Emit("} // %s\n\n", scope_prefix(addl_tag));
-	Emit("} // zeek::detail");
-	}
+    NL();
+    Emit("void init__CPP()");
+    StartBlock();
+    Emit("register_bodies__CPP();");
+    EndBlock();
 
-void CPPCompile::GenCPPDynStmt()
-	{
-	Emit("ValPtr CPPDynStmt::Exec(Frame* f, StmtFlowType& flow)");
+    if ( standalone )
+        GenStandaloneActivation();
 
-	StartBlock();
+    GenInitHook();
 
-	Emit("flow = FLOW_RETURN;");
+    Emit("} //\n\n");
+    Emit("} // zeek::detail");
+}
 
-	Emit("switch ( type_signature )");
-	StartBlock();
-	for ( auto i = 0U; i < func_casting_glue.size(); ++i )
-		{
-		Emit("case %s:", to_string(i));
-		StartBlock();
-		auto& glue = func_casting_glue[i];
+void CPPCompile::GenCPPDynStmt() {
+    Emit("ValPtr CPPDynStmt::Exec(Frame* f, StmtFlowType& flow)");
 
-		auto invoke = string("(*(") + glue.cast + ")(func))(" + glue.args + ")";
+    StartBlock();
 
-		if ( glue.is_hook )
-			{
-			Emit("if ( ! %s )", invoke);
-			StartBlock();
-			Emit("flow = FLOW_BREAK;");
-			EndBlock();
-			Emit("return nullptr;");
-			}
+    Emit("flow = FLOW_RETURN;");
+    Emit("f->SetOnlyCall(ce.get());");
 
-		else if ( IsNativeType(glue.yield) )
-			GenInvokeBody(invoke, glue.yield);
+    Emit("switch ( type_signature )");
+    StartBlock();
+    for ( auto i = 0U; i < func_casting_glue.size(); ++i ) {
+        Emit("case %s:", to_string(i));
+        StartBlock();
+        auto& glue = func_casting_glue[i];
 
-		else
-			Emit("return %s;", invoke);
+        auto invoke = string("(*(") + glue.cast + ")(func))(" + glue.args + ")";
 
-		EndBlock();
-		}
+        if ( glue.is_hook ) {
+            Emit("if ( ! %s )", invoke);
+            StartBlock();
+            Emit("flow = FLOW_BREAK;");
+            EndBlock();
+            Emit("return nullptr;");
+        }
 
-	Emit("default:");
-	Emit("\treporter->InternalError(\"invalid type in CPPDynStmt::Exec\");");
-	Emit("\treturn nullptr;");
+        else if ( IsNativeType(glue.yield) )
+            GenInvokeBody(invoke, glue.yield);
 
-	EndBlock();
-	EndBlock();
-	}
+        else
+            Emit("return %s;", invoke);
 
-void CPPCompile::GenLoadBiFs()
-	{
-	Emit("void load_BiFs__CPP()");
-	StartBlock();
-	Emit("for ( auto& b : CPP__BiF_lookups__ )");
-	Emit("\tb.ResolveBiF();");
-	EndBlock();
-	}
+        EndBlock();
+    }
 
-void CPPCompile::GenFinishInit()
-	{
-	Emit("void finish_init__CPP()");
+    Emit("default:");
+    Emit("\treporter->InternalError(\"invalid type in CPPDynStmt::Exec\");");
+    Emit("\treturn nullptr;");
 
-	StartBlock();
+    EndBlock();
+    EndBlock();
+}
 
-	Emit("static bool did_init = false;");
-	Emit("if ( did_init )");
-	Emit("\treturn;");
-	Emit("did_init = true;");
+void CPPCompile::GenLoadBiFs() {
+    Emit("void load_BiFs__CPP()");
+    StartBlock();
+    Emit("for ( auto& b : CPP__BiF_lookups__ )");
+    Emit("\tb.ResolveBiF();");
+    EndBlock();
+}
 
-	NL();
-	Emit("std::vector<std::vector<int>> InitIndices;");
-	Emit("generate_indices_set(CPP__Indices__init, InitIndices);");
+void CPPCompile::GenFinishInit() {
+    Emit("void finish_init__CPP()");
 
-	Emit("std::map<TypeTag, std::shared_ptr<CPP_AbstractInitAccessor>> InitConsts;");
+    StartBlock();
 
-	NL();
-	for ( const auto& ci : const_info )
-		{
-		auto& gi = ci.second;
-		Emit("InitConsts.emplace(%s, std::make_shared<CPP_InitAccessor<%s>>(%s));",
-		     TypeTagName(ci.first), gi->CPPType(), gi->InitsName());
-		}
+    Emit("static bool did_init = false;");
+    Emit("if ( did_init )");
+    Emit("\treturn;");
+    Emit("did_init = true;");
 
-	Emit("InitsManager im(CPP__ConstVals, InitConsts, InitIndices, CPP__Strings, CPP__Hashes, "
-	     "CPP__Type__, CPP__Attributes__, CPP__Attr__, CPP__CallExpr__);");
+    NL();
+    Emit("std::vector<std::vector<int>> InitIndices;");
+    Emit("generate_indices_set(CPP__Indices__init, InitIndices);");
 
-	NL();
-	int max_cohort = 0;
-	for ( auto gi : all_global_info )
-		max_cohort = std::max(max_cohort, gi->MaxCohort());
+    Emit("std::map<TypeTag, std::shared_ptr<CPP_AbstractInitAccessor>> InitConsts;");
+    Emit("Frame* f__CPP = nullptr;");
 
-	for ( auto c = 0; c <= max_cohort; ++c )
-		for ( auto gi : all_global_info )
-			if ( gi->CohortSize(c) > 0 )
-				Emit("%s.InitializeCohort(&im, %s);", gi->InitializersName(), Fmt(c));
+    NL();
+    for ( const auto& ci : const_info ) {
+        auto& gi = ci.second;
+        Emit("InitConsts.emplace(%s, std::make_shared<CPP_InitAccessor<%s>>(%s));", TypeTagName(ci.first),
+             gi->CPPType(), gi->InitsName());
+    }
 
-	// Populate mappings for dynamic offsets.
-	NL();
-	Emit("for ( auto& em : CPP__enum_mappings__ )");
-	Emit("\tenum_mapping.push_back(em.ComputeOffset(&im));");
-	NL();
-	Emit("for ( auto& fm : CPP__field_mappings__ )");
-	Emit("\tfield_mapping.push_back(fm.ComputeOffset(&im));");
+    Emit(
+        "InitsManager im(CPP__ConstVals, InitConsts, InitIndices, CPP__Strings, CPP__Hashes, "
+        "CPP__Type__, CPP__Attributes__, CPP__Attr__, CPP__CallExpr__, field_mapping, CPP__field_mappings__, "
+        "enum_mapping, CPP__enum_mappings__);");
 
-	NL();
-	Emit("load_BiFs__CPP();");
+    NL();
+    int max_cohort = 0;
+    for ( const auto& gi : all_global_info )
+        max_cohort = std::max(max_cohort, gi->MaxCohort());
 
-	EndBlock();
-	}
+    for ( auto c = 0; c <= max_cohort; ++c )
+        for ( const auto& gi : all_global_info ) {
+            if ( gi->CohortSize(c) == 0 )
+                continue;
 
-void CPPCompile::GenRegisterBodies()
-	{
-	Emit("void register_bodies__CPP()");
-	StartBlock();
+            Emit("%s.InitializeCohort(&im, %s);", gi->InitializersName(), Fmt(c));
+            vector<IDPtr> init_ids;
+            gi->GetCohortIDs(c, init_ids);
 
-	Emit("for ( auto& b : CPP__bodies_to_register )");
-	StartBlock();
-	Emit("auto f = make_intrusive<CPPDynStmt>(b.func_name.c_str(), b.func, b.type_signature);");
-	Emit("register_body__CPP(f, b.priority, b.h, b.events, finish_init__CPP);");
-	EndBlock();
+            for ( auto& ii : init_ids )
+                if ( ! HasFixedInit(ii) )
+                    InitializeGlobal(ii);
+        }
 
-	EndBlock();
-	}
+    NL();
 
-bool CPPCompile::IsCompilable(const FuncInfo& func, const char** reason)
-	{
-	if ( ! is_CPP_compilable(func.Profile(), reason) )
-		return false;
+    Emit("load_BiFs__CPP();");
 
-	if ( reason )
-		// Indicate that there's no fundamental reason it can't be
-		// compiled.
-		*reason = nullptr;
+    EndBlock();
+}
 
-	if ( func.ShouldSkip() )
-		return false;
+void CPPCompile::GenRegisterBodies() {
+    Emit("void register_bodies__CPP()");
+    StartBlock();
 
-	return true;
-	}
+    Emit("for ( auto& b : CPP__bodies_to_register )");
+    StartBlock();
+    Emit(
+        "auto f = make_intrusive<CPPDynStmt>(b.func_name.c_str(), b.func, b.type_signature, "
+        "b.filename, b.line_num);");
 
-	} // zeek::detail
+    if ( standalone )
+        Emit(
+            "register_standalone_body__CPP(b.zeek_name, f, b.priority, b.h, b.events, b.module_group, b.attr_groups, "
+            "finish_init__CPP);");
+    else
+        Emit("register_body__CPP(b.zeek_name, f, b.priority, b.h, b.events, finish_init__CPP);");
+    EndBlock();
+
+    EndBlock();
+}
+
+bool CPPCompile::IsCompilable(const FuncInfo& func, const char** reason) {
+    if ( ! is_CPP_compilable(func.Profile(), reason) )
+        return false;
+
+    if ( reason )
+        // Indicate that there's no fundamental reason it can't be
+        // compiled.
+        *reason = nullptr;
+
+    if ( func.ShouldSkip() )
+        return false;
+
+    return true;
+}
+
+} // namespace zeek::detail

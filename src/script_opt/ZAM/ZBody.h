@@ -4,143 +4,186 @@
 
 #pragma once
 
-#include "zeek/script_opt/ZAM/IterInfo.h"
-#include "zeek/script_opt/ZAM/Support.h"
+#include <vector>
 
-namespace zeek::detail
-	{
+#include "zeek/script_opt/ZAM/IterInfo.h"
+
+namespace zeek::detail {
 
 // Static information about globals used in a function.
-class GlobalInfo
-	{
+class GlobalInfo {
 public:
-	IDPtr id;
-	int slot;
-	};
+    IDPtr id;
+    int slot;
+};
 
 // These are the counterparts to CaseMapI and CaseMapsI in ZAM.h,
 // but concretized to use instruction numbers rather than pointers
 // to instructions.
-template <typename T> using CaseMap = std::map<T, int>;
-template <typename T> using CaseMaps = std::vector<CaseMap<T>>;
+template<typename T>
+using CaseMap = std::map<T, int>;
+template<typename T>
+using CaseMaps = std::vector<CaseMap<T>>;
 
 using TableIterVec = std::vector<TableIterInfo>;
 
-class ZBody : public Stmt
-	{
+struct ProfVal {
+    zeek_uint_t num_samples = 0;
+    double CPU_time = 0.0;
+};
+
+using ProfVec = std::vector<ProfVal>;
+using ProfMap = std::unordered_map<std::string, ProfVal>;
+using CallStack = std::vector<const ZAMLocInfo*>;
+
+class ZBody : public Stmt {
 public:
-	ZBody(const char* _func_name, const ZAMCompiler* zc);
+    ZBody(std::string _func_name, const ZAMCompiler* zc);
 
-	~ZBody() override;
+    ~ZBody() override;
 
-	// These are split out from the constructor to allow construction
-	// of a ZBody from either save-file full instructions (first method)
-	// or intermediary instructions (second method).
-	void SetInsts(std::vector<ZInst*>& insts);
-	void SetInsts(std::vector<ZInstI*>& instsI);
+    // This is split out from the constructor to allow construction of
+    // a ZBody from save-file instructions (not currently supported).
+    void SetInsts(std::vector<ZInstI*>& instsI);
 
-	ValPtr Exec(Frame* f, StmtFlowType& flow) override;
+    ValPtr Exec(Frame* f, StmtFlowType& flow) override;
 
-	// Older code exists for save files, but let's see if we can
-	// avoid having to support them, as they're a fairly elaborate
-	// production.
-	//
-	// void SaveTo(FILE* f, int interp_frame_size) const;
+    // Older code exists for save files, but let's see if we can
+    // avoid having to support them, as they're a fairly elaborate
+    // production.
+    //
+    // void SaveTo(FILE* f, int interp_frame_size) const;
 
-	void Dump() const;
+    void Dump() const;
 
-	void ProfileExecution() const;
+    // Specify whether to measure CPU & memory for calls to the given body.
+    void SetProfilingCalls(bool active) {
+        profile_calls = active;
+        profiling_set_call = ncall;
+    }
+    bool IsProfilingCalls() const { return profile_calls; }
 
-protected:
-	friend class ZAMResumption;
+    uint64_t NumBodyCalls() const { return ncall; }
+    uint64_t NumBodyInsts() const;
+    uint64_t NumModuleInsts(const std::string& mod) const;
 
-	// Initializes profiling information, if needed.
-	void InitProfile();
+    double CPUTimeEst() const { return tot_CPU_time; }
+    uint64_t MemoryEst() const { return tot_mem; }
 
-	ValPtr DoExec(Frame* f, int start_pc, StmtFlowType& flow);
+    void ReportExecutionProfile(ProfMap& pm);
 
-	// Run-time checking for "any" type being consistent with
-	// expected typed.  Returns true if the type match is okay.
-	bool CheckAnyType(const TypePtr& any_type, const TypePtr& expected_type,
-	                  const Location* loc) const;
+    const std::string& FuncName() const { return func_name; }
+    const std::set<std::string>& Modules() const { return modules; }
 
-	StmtPtr Duplicate() override { return {NewRef{}, this}; }
+    // Helper run-time function for looking up a field in a record, checking
+    // that it exists and complaining if it does not. A member here rather than
+    // a standalone run-time function because ZBody is a "friend" of RecordVal
+    // and can use its low-level record field accessors.
+    static ZVal CheckAndLookupField(RecordVal* r, int f, const std::shared_ptr<ZAMLocInfo>& loc) {
+        auto opt_zv = r->RawOptField(f);
+        if ( ! opt_zv ) {
+            auto fn = r->GetType<RecordType>()->FieldName(f);
+            ZAM_run_time_error(loc, util::fmt("field value missing ($%s)", fn));
+        }
 
-	void StmtDescribe(ODesc* d) const override;
-	TraversalCode Traverse(TraversalCallback* cb) const override;
+        return *opt_zv;
+    }
 
 private:
-	const char* func_name;
+    friend class CPPCompile;
 
-	const ZInst* insts = nullptr;
-	unsigned int ninst;
+    auto Instructions() const { return insts; }
+    auto NumInsts() const { return end_pc; }
 
-	FrameReMap frame_denizens;
-	int frame_size;
+    std::shared_ptr<ProfVec> BuildProfVec() const;
 
-	// A list of frame slots that correspond to managed values.
-	std::vector<int> managed_slots;
+    void ReportProfile(ProfMap& pm, const ProfVec& pv, const std::string& prefix,
+                       const std::set<std::string>& caller_modules) const;
 
-	// This is non-nil if the function is (asserted to be) non-recursive,
-	// in which case we pre-allocate this.
-	ZVal* fixed_frame = nullptr;
+    StmtPtr Duplicate() override { return {NewRef{}, this}; }
 
-	// Pre-allocated table iteration values.  For recursive invocations,
-	// these are copied into a local stack variable, but for non-recursive
-	// functions they can be used directly.
-	TableIterVec table_iters;
+    void StmtDescribe(ODesc* d) const override;
+    TraversalCode Traverse(TraversalCallback* cb) const override;
 
-	// Points to the TableIterVec used to manage iteration over tables.
-	// For non-recursive functions, we just use the static one, but
-	// for recursive ones this points to the local stack variable.
-	TableIterVec* tiv_ptr = &table_iters;
+    std::string func_name;
 
-	// Number of StepIterInfo's required by the function.  These we
-	// always create using a local stack variable, since they don't
-	// require any overhead or cleanup.
-	int num_step_iters;
+    const ZInst* insts = nullptr;
+    unsigned int end_pc = 0;
 
-	std::vector<GlobalInfo> globals;
-	int num_globals;
+    FrameReMap frame_denizens;
+    int frame_size;
 
-	// The following are only maintained if we're doing profiling.
-	//
-	// These need to be pointers so we can manipulate them in a
-	// const method.
-	std::vector<int>* inst_count = nullptr; // for profiling
-	double* CPU_time = nullptr; // cumulative CPU time for the program
-	std::vector<double>* inst_CPU; // per-instruction CPU time.
+    // A list of frame slots that correspond to managed values.
+    std::vector<int> managed_slots;
 
-	CaseMaps<bro_int_t> int_cases;
-	CaseMaps<bro_uint_t> uint_cases;
-	CaseMaps<double> double_cases;
-	CaseMaps<std::string> str_cases;
-	};
+    // This is non-nil if the function is (asserted to be) non-recursive,
+    // in which case we pre-allocate this.
+    ZVal* fixed_frame = nullptr;
 
-// This is a statement that resumes execution into a code block in a
-// ZBody.  Used for deferred execution for "when" statements.
+    // Pre-allocated table iteration values.  For recursive invocations,
+    // these are copied into a local stack variable, but for non-recursive
+    // functions they can be used directly.
+    TableIterVec table_iters;
 
-class ZAMResumption : public Stmt
-	{
-public:
-	ZAMResumption(ZBody* _am, int _xfer_pc) : Stmt(STMT_ZAM_RESUMPTION), am(_am), xfer_pc(_xfer_pc)
-		{
-		}
+    // Number of StepIterInfo's required by the function.  These we
+    // always create using a local stack variable, since they don't
+    // require any overhead or cleanup.
+    int num_step_iters;
 
-	ValPtr Exec(Frame* f, StmtFlowType& flow) override;
+    std::vector<GlobalInfo> globals;
+    int num_globals;
 
-	StmtPtr Duplicate() override { return {NewRef{}, this}; }
+    CaseMaps<zeek_int_t> int_cases;
+    CaseMaps<zeek_uint_t> uint_cases;
+    CaseMaps<double> double_cases;
+    CaseMaps<std::string> str_cases;
 
-	void StmtDescribe(ODesc* d) const override;
+    // Variables controlling the depth of profiling.
+    bool profile_calls = false;  // CPU and memory for calls
+    bool sample_CPU_mem = false; // sample per instruction
 
-protected:
-	TraversalCode Traverse(TraversalCallback* cb) const override;
+    // We remember whenever profile_calls has been adjusted. This is to
+    // avoid a miscomputation of CPU time when set_module_profiling() is called
+    // from within the module being measured. See ZBody::DoExec() for more.
+    uint64_t profiling_set_call = 0;
 
-	ZBody* am;
-	int xfer_pc = 0;
-	};
+    // Indexed by program counter. Holds number of times the given instruction
+    // has executed. Always maintained.
+    uint64_t* inst_cnt = nullptr;
 
-// Prints the execution profile.
-extern void report_ZOP_profile();
+    uint64_t ncall = 0; // number of calls to the ZBody; always maintained
 
-	} // namespace zeek::detail
+    int prof_sampling_rate = 0; // sample CPU/memory every N'th instruction
+    uint64_t num_sampled_inst = 0;
+    double tot_CPU_time = 0.0;
+    uint64_t tot_mem = 0;
+
+    // Profiling information associated with different call stacks.
+    std::map<CallStack, std::shared_ptr<ProfVec>> prof_vecs;
+
+    // Profiling information for the common case of no nested ZAM calls.
+    std::shared_ptr<ProfVec> default_prof_vec;
+
+    // Profiling information for the current call.
+    ProfVec* curr_prof_vec;
+
+    // Modules associated with this body. Used to selectively activate
+    // profiling.
+    std::set<std::string> modules;
+};
+
+extern bool copy_vec_elem(VectorVal* vv, zeek_uint_t ind, ZVal zv, const TypePtr& t);
+
+extern VectorVal* vec_coerce_DI(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+extern VectorVal* vec_coerce_DU(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+extern VectorVal* vec_coerce_ID(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+extern VectorVal* vec_coerce_IU(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+extern VectorVal* vec_coerce_UD(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+extern VectorVal* vec_coerce_UI(VectorVal* vec, const std::shared_ptr<ZAMLocInfo>& z_loc);
+
+// Estimated overhead (in seconds) of a single CPU or memory measurement
+// when profiling.
+extern double CPU_prof_overhead;
+extern double mem_prof_overhead;
+
+} // namespace zeek::detail

@@ -1,0 +1,161 @@
+.. _cluster_backend_zeromq:
+
+======================
+ZeroMQ Cluster Backend
+======================
+
+.. versionadded:: 7.1
+
+Quickstart
+==========
+
+To switch a Zeek cluster with a static cluster layout over to use ZeroMQ
+as cluster backend, add the following snippet to ``local.zeek``:
+
+.. code-block:: zeek
+
+   @load frameworks/cluster/backend/zeromq
+
+
+Note that the function :zeek:see:`Broker::publish` will be non-functional
+and a warning emitted when used - use :zeek:see:`Cluster::publish` instead.
+
+By default, a configuration based on hard-coded endpoints and cluster layout
+information is created. For more customization, refer to the module documentation
+at :doc:`cluster/backend/zeromq/main.zeek </scripts/policy/frameworks/cluster/backend/zeromq/main.zeek>`.
+
+
+Architecture
+============
+
+Publish-Subscribe of Zeek Events
+--------------------------------
+
+The `ZeroMQ <https://zeromq.org/>`_ based cluster backend uses a central
+XPUB/XSUB broker for publish-subscribe functionality. Zeek events published
+via :zeek:see:`Cluster::publish` are distributed by this central broker to
+interested nodes.
+
+.. figure:: /images/cluster/backend/zeromq/zeromq-pubsub.png
+
+
+As depicted in the figure above, each cluster node connects to the central
+broker twice, once via its XPUB socket and once via its XSUB socket. This
+results in two TCP connections from every cluster node to the central broker.
+This setup allows every node in the cluster to see messages from all other
+nodes, avoiding the need for cluster topology awareness.
+
+.. note::
+
+   If you observe the central broker as a bottleneck in your setup, please
+   reach out with information about your environment and workload. We're generally
+   confident that ZeroMQ is fast enough for known and normal Zeek clusters sizes
+   and likely more performant than the previous cluster backend Broker. Specifically
+   for broadcast style worker-to-worker messaging patterns that previously had to
+   be routed through the manager node, ZeroMQ should reduce time spent in manager
+   script execution.
+
+On a cluster node, the XPUB socket provides notifications about subscriptions
+created by other nodes: For every subscription created by any node in
+the cluster, the :zeek:see:`Cluster::Backend::ZeroMQ::subscription` event is
+raised locally on every other node (unless another node had created the same
+subscription previously).
+
+This mechanism is used to discover the existence of other cluster nodes by
+matching the topics with the prefix for node specific subscriptions as produced
+by :zeek:see:`Cluster::nodeid_topic`.
+
+As of now, the implementation of the central broker calls ZeroMQ's
+``zmq::proxy()`` function to forward messages between the XPUB and
+XSUB socket.
+
+While the diagram above indicates the central broker being deployed separately
+from Zeek cluster nodes, by default the manager node will start and run this
+broker using a separate thread. There's nothing that would prevent from running
+a long running central broker independently from the Zeek cluster nodes, however.
+
+The serialization of Zeek events is done by the selected
+:zeek:see:`Cluster::event_serializer` and is independent of ZeroMQ.
+The central broker needs no knowledge about the chosen format, it is
+only shuffling messages between nodes.
+
+
+Logging
+-------
+
+While remote events always pass through the central broker, nodes connect and
+send log writes directly to logger nodes in a cluster. The ZeroMQ cluster backend
+leverages ZeroMQ's pipeline pattern for this functionality. That is, logger nodes
+(including the manager if configured using :zeek:see:`Cluster::manager_is_logger`)
+open a ZeroMQ PULL socket to receive log writes. All other nodes connect their
+PUSH socket to all available PULL sockets. These connections are separate from
+the publish-subscribe setup outlined above.
+
+When sending log-writes over a PUSH socket, load balancing is done by ZeroMQ.
+Individual cluster nodes do not have control over the decision which logger
+node receives log writes at any given time.
+
+.. figure:: /images/cluster/backend/zeromq/zeromq-logging.png
+
+While the previous paragraph used "log writes", a single message to a logger
+node actually contains a batch of log writes. The options :zeek:see:`Log::flush_interval`
+and :zeek:see:`Log::write_buffer_size` control the frequency and maximum size
+of these batches.
+
+The serialization format used to encode such batches is controlled by the
+selected :zeek:see:`Cluster::log_serializer` and is independent of ZeroMQ.
+
+With the default serializer (:zeek:see:`Cluster::LOG_SERIALIZER_ZEEK_BIN_V1`),
+every log batch on the wire has a header prepended that describes it. This allows
+interpretation of log writes even by non-Zeek processes. This opens the possibility
+to implement non-Zeek logger processes as long as the chosen serializer format
+is understood by the receiving process. In the future, a JSON lines serialization
+may be provided, allowing easier interpretation than a proprietary binary format.
+
+
+Summary
+-------
+
+Combining the diagrams above, the connections between the different socket
+types in a Zeek cluster looks something like the following.
+
+.. figure:: /images/cluster/backend/zeromq/zeromq-cluster.png
+
+Implementation Notes
+====================
+
+The Cluster::node_up() Mechanism
+--------------------------------
+
+The implementation for :zeek:see:`Cluster::node_up` relies on creating a node
+specific topic subscription. This subscription is established during the
+``subscribe_internal_nodeid_topic()`` event which itself is queued via :zeek:keyword:`event`
+from :zeek:see:`zeek_init` within the ``zeromq/main.zeek`` policy script. So it runs
+just after ``zeek_init``.
+The topic used is constructed as :zeek:see:`Cluster::Backend::ZeroMQ::internal_topic_prefix`
+suffixed with ``nodeid.``, the result of calling :zeek:see:`Cluster::node_id` and another ``.``.
+
+All other nodes in a Zeek cluster will observe this specific subscription through
+the low-level :zeek:see:`Cluster::Backend::ZeroMQ::subscription` event and reply
+with an internal :zeek:see:`Cluster::Backend::ZeroMQ::hello` event which in turn
+results in raising :zeek:see:`Cluster::node_up`.
+
+For ZeroMQ, it is guaranteed that all subscriptions created in :zeek:see:`zeek_init` handlers
+on a node A are in effect on a node B when B raises the :zeek:see:`Cluster::node_up` event
+for node A.
+
+
+Encryption
+==========
+
+.. versionadded:: 8.2
+
+When using ZeroMQ as a cluster backend, communication between Zeek nodes
+is unencrypted by default.
+Refer to the module documentation
+at :doc:`cluster/backend/zeromq/main.zeek </scripts/policy/frameworks/cluster/backend/zeromq/main.zeek>`
+for details and background how to setup encryption using the `CURVE mechanism <http://api.zeromq.org/4-2:zmq-curve>`_.
+
+:ref:`ZeekControl <cluster-configuration>` will automatically configure encryption
+and distribute the server and client keys when multiple physical systems (based on IP addresses)
+form a Zeek cluster. For single system setups, encryption is disabled by default.

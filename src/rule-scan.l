@@ -1,5 +1,13 @@
+%top{
+// Include cstdint at the start of the generated file. Typically
+// MSVC will include this header later, after the definitions of
+// the integral type macros. MSVC then complains that about the
+// redefinition of the types. Including cstdint early avoids this.
+#include <cstdint>
+}
+
 %{
-#include <string.h>
+#include <cstring>
 #include <string>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -179,36 +187,34 @@ finger	{ rules_lval.val = zeek::detail::Rule::FINGER; return TOK_PATTERN_TYPE; }
 
 {STRING}	{
 	*(yytext + strlen(yytext) - 1) = '\0';
-	rules_lval.str = yytext + 1;
+	rules_lval.str = zeek::util::copy_string(yytext + 1);
 	return TOK_STRING;
 	}
 
 {ID}	{
-	rules_lval.str = yytext;
+	rules_lval.str = zeek::util::copy_string(yytext);
 	return TOK_IDENT;
 	}
 
 <PS>{PID}	{
-	rules_lval.str = yytext;
+	rules_lval.str = zeek::util::copy_string(yytext);
 	return TOK_POLICY_SYMBOL;
 	}
 
 {RE}	{
 	auto len = strlen(yytext);
 
-	if ( yytext[len - 1] == 'i' )
-		{
+	if ( yytext[len - 1] == 'i' ) {
 		*(yytext + len - 2) = '\0';
 		const char fmt[] = "(?i:%s)";
 		int n = len + strlen(fmt);
 		char* s = new char[n + 5 /* slop */];
 		snprintf(s, n + 5, fmt, yytext + 1);
 		rules_lval.str = s;
-		}
-	else
-		{
+	}
+	else {
 		*(yytext + len - 1) = '\0';
-		rules_lval.str = yytext + 1;
+		rules_lval.str = zeek::util::copy_string(yytext + 1);
 		}
 
 	return TOK_PATTERN;
@@ -218,33 +224,27 @@ finger	{ rules_lval.val = zeek::detail::Rule::FINGER; return TOK_PATTERN_TYPE; }
 
 %%
 
-// We're about to parse a Bro policy-layer symbol.
-void begin_PS()
-	{
-	BEGIN(PS);
-	}
+// We're about to parse a Zeek policy-layer symbol.
+void begin_PS() {
+    BEGIN(PS);
+}
 
-void end_PS()
-	{
-	BEGIN(INITIAL);
-	}
+void end_PS() {
+    BEGIN(INITIAL);
+}
 
 static YY_BUFFER_STATE rules_buffer;
 
-void rules_set_input_from_buffer(const char* data, size_t size)
-	{
-	rules_buffer = yy_scan_bytes(data, size); // this copies the data
-	}
+void rules_set_input_from_buffer(const char* data, size_t size) {
+    rules_buffer = yy_scan_bytes(data, size); // this copies the data
+}
 
-void rules_set_input_from_file(FILE* f)
-	{
-	rules_buffer = yy_create_buffer(f, YY_BUF_SIZE);
-	}
+void rules_set_input_from_file(FILE* f) {
+    rules_buffer = yy_create_buffer(f, YY_BUF_SIZE);
+}
 
-void rules_parse_input()
-	{
-	yy_switch_to_buffer(rules_buffer);
-	rules_parse();
-	yy_delete_buffer(rules_buffer);
-	}
-
+void rules_parse_input() {
+    yy_switch_to_buffer(rules_buffer);
+    rules_parse();
+    yy_delete_buffer(rules_buffer);
+}

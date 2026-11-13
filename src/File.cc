@@ -7,355 +7,336 @@
 #include <sys/types.h>
 #ifdef TIME_WITH_SYS_TIME
 #include <sys/time.h>
-#include <time.h>
+#include <ctime>
 #else
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #else
-#include <time.h>
+#include <ctime>
 #endif
 #endif
-#include <errno.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <algorithm>
+#include <cerrno>
 
 #include "zeek/Attr.h"
 #include "zeek/Desc.h"
 #include "zeek/Event.h"
-#include "zeek/Expr.h"
-#include "zeek/NetVar.h"
 #include "zeek/Reporter.h"
 #include "zeek/RunState.h"
 #include "zeek/Type.h"
-#include "zeek/Var.h"
 
-namespace zeek
-	{
+#include "event.bif.netvar_h"
 
-std::list<std::pair<std::string, File*>> File::open_files;
+namespace zeek {
+
+namespace {
+
+std::list<std::pair<std::string, File*>> open_files;
+
+} // namespace
 
 // Maximizes the number of open file descriptors.
-static void maximize_num_fds()
-	{
-	struct rlimit rl;
-	if ( getrlimit(RLIMIT_NOFILE, &rl) < 0 )
-		reporter->FatalError("maximize_num_fds(): getrlimit failed");
+static void maximize_num_fds() {
+    struct rlimit rl;
+    if ( getrlimit(RLIMIT_NOFILE, &rl) < 0 )
+        reporter->FatalError("maximize_num_fds(): getrlimit failed");
 
-	if ( rl.rlim_max == RLIM_INFINITY )
-		{
-		// Don't try raising the current limit.
-		return;
-		}
+    if ( rl.rlim_max == RLIM_INFINITY ) {
+        // Don't try raising the current limit.
+        return;
+    }
 
-	// See if we can raise the current to the maximum.
-	rl.rlim_cur = rl.rlim_max;
+    // See if we can raise the current to the maximum.
+    rl.rlim_cur = rl.rlim_max;
 
-	if ( setrlimit(RLIMIT_NOFILE, &rl) < 0 )
-		reporter->FatalError("maximize_num_fds(): setrlimit failed");
-	}
+    if ( setrlimit(RLIMIT_NOFILE, &rl) < 0 )
+        reporter->FatalError("maximize_num_fds(): setrlimit failed");
+}
 
-File::File(FILE* arg_f)
-	{
-	Init();
-	f = arg_f;
-	name = access = nullptr;
-	t = base_type(TYPE_STRING);
-	is_open = (f != nullptr);
-	}
+File::File(FILE* arg_f) {
+    Init();
+    f = arg_f;
+    name = access = nullptr;
+    t = base_type(TYPE_STRING);
+    is_open = (f != nullptr);
+}
 
-File::File(FILE* arg_f, const char* arg_name, const char* arg_access)
-	{
-	Init();
-	f = arg_f;
-	name = util::copy_string(arg_name);
-	access = util::copy_string(arg_access);
-	t = base_type(TYPE_STRING);
-	is_open = (f != nullptr);
-	}
+File::File(FILE* arg_f, const char* arg_name, const char* arg_access) {
+    Init();
+    f = arg_f;
+    name = util::copy_string(arg_name);
+    access = util::copy_string(arg_access);
+    t = base_type(TYPE_STRING);
+    is_open = (f != nullptr);
+}
 
-File::File(const char* arg_name, const char* arg_access)
-	{
-	Init();
-	f = nullptr;
-	name = util::copy_string(arg_name);
-	access = util::copy_string(arg_access);
-	t = base_type(TYPE_STRING);
+File::File(const char* arg_name, const char* arg_access) {
+    Init();
+    f = nullptr;
+    name = util::copy_string(arg_name);
+    access = util::copy_string(arg_access);
+    t = base_type(TYPE_STRING);
 
-	if ( util::streq(name, "/dev/stdin") )
-		f = stdin;
-	else if ( util::streq(name, "/dev/stdout") )
-		f = stdout;
-	else if ( util::streq(name, "/dev/stderr") )
-		f = stderr;
+    if ( util::streq(name, "/dev/stdin") )
+        f = stdin;
+    else if ( util::streq(name, "/dev/stdout") )
+        f = stdout;
+    else if ( util::streq(name, "/dev/stderr") )
+        f = stderr;
 
-	if ( f )
-		is_open = true;
+    if ( f )
+        is_open = true;
 
-	else if ( ! Open() )
-		{
-		reporter->Error("cannot open %s: %s", name, strerror(errno));
-		is_open = false;
-		}
-	}
+    else if ( ! Open() ) {
+        reporter->Error("cannot open %s: %s", name, strerror(errno));
+        is_open = false;
+    }
+}
 
-const char* File::Name() const
-	{
-	if ( name )
-		return name;
+const char* File::Name() const {
+    if ( name )
+        return name;
 
-	if ( f == stdin )
-		return "/dev/stdin";
+    if ( f == stdin )
+        return "/dev/stdin";
 
-	if ( f == stdout )
-		return "/dev/stdout";
+    if ( f == stdout )
+        return "/dev/stdout";
 
-	if ( f == stderr )
-		return "/dev/stderr";
+    if ( f == stderr )
+        return "/dev/stderr";
 
-	return nullptr;
-	}
+    return nullptr;
+}
 
-bool File::Open(FILE* file, const char* mode)
-	{
-	static bool fds_maximized = false;
-	open_time = run_state::network_time ? run_state::network_time : util::current_time();
+bool File::Open(FILE* file, const char* mode) {
+    static bool fds_maximized = false;
+    open_time = run_state::network_time ? run_state::network_time : util::current_time();
 
-	if ( ! fds_maximized )
-		{
-		// Haven't initialized yet.
-		maximize_num_fds();
-		fds_maximized = true;
-		}
+    if ( ! fds_maximized ) {
+        // Haven't initialized yet.
+        maximize_num_fds();
+        fds_maximized = true;
+    }
 
-	f = file;
+    f = file;
 
-	if ( ! f )
-		{
-		if ( ! mode )
-			f = fopen(name, access);
-		else
-			f = fopen(name, mode);
-		}
+    if ( ! f ) {
+        if ( ! mode )
+            f = fopen(name, access);
+        else
+            f = fopen(name, mode);
+    }
 
-	SetBuf(buffered);
+    SetBuf(buffered);
 
-	if ( ! f )
-		{
-		is_open = false;
-		return false;
-		}
+    if ( ! f ) {
+        is_open = false;
+        return false;
+    }
 
-	is_open = true;
-	open_files.emplace_back(std::make_pair(name, this));
+    is_open = true;
+    open_files.emplace_back(name, this);
 
-	RaiseOpenEvent();
+    RaiseOpenEvent();
 
-	return true;
-	}
+    return true;
+}
 
-File::~File()
-	{
-	Close();
-	Unref(attrs);
+File::~File() {
+    Close();
+    Unref(attrs);
 
-	delete[] name;
-	delete[] access;
+    delete[] name;
+    delete[] access;
 
 #ifdef USE_PERFTOOLS_DEBUG
-	heap_checker->UnIgnoreObject(this);
+    heap_checker->UnIgnoreObject(this);
 #endif
-	}
+}
 
-void File::Init()
-	{
-	open_time = 0;
-	is_open = false;
-	attrs = nullptr;
-	buffered = true;
-	raw_output = false;
+void File::Init() {
+    open_time = 0;
+    is_open = false;
+    attrs = nullptr;
+    buffered = true;
+    raw_output = false;
 
 #ifdef USE_PERFTOOLS_DEBUG
-	heap_checker->IgnoreObject(this);
+    heap_checker->IgnoreObject(this);
 #endif
-	}
+}
 
-FILE* File::FileHandle()
-	{
-	return f;
-	}
+FILE* File::FileHandle() { return f; }
 
-FILE* File::Seek(long new_position)
-	{
-	if ( ! FileHandle() )
-		return nullptr;
+FILE* File::Seek(long new_position) {
+    if ( ! FileHandle() )
+        return nullptr;
 
-	if ( fseek(f, new_position, SEEK_SET) < 0 )
-		reporter->Error("seek failed");
+    if ( fseek(f, new_position, SEEK_SET) < 0 )
+        reporter->Error("seek failed");
 
-	return f;
-	}
+    return f;
+}
 
-void File::SetBuf(bool arg_buffered)
-	{
-	if ( ! f )
-		return;
+void File::SetBuf(bool arg_buffered) {
+    if ( ! f )
+        return;
 
-	if ( setvbuf(f, NULL, arg_buffered ? _IOFBF : _IOLBF, 0) != 0 )
-		reporter->Error("setvbuf failed");
+    if ( util::detail::setvbuf(f, nullptr, arg_buffered ? _IOFBF : _IOLBF, 0) != 0 )
+        reporter->Error("setvbuf failed");
 
-	buffered = arg_buffered;
-	}
+    buffered = arg_buffered;
+}
 
-bool File::Close()
-	{
-	if ( ! is_open )
-		return true;
+bool File::Close() {
+    if ( ! is_open )
+        return true;
 
-	// Do not close stdin/stdout/stderr.
-	if ( f == stdin || f == stdout || f == stderr )
-		return false;
+    // Do not close stdin/stdout/stderr.
+    if ( f == stdin || f == stdout || f == stderr )
+        return false;
 
-	if ( ! f )
-		return false;
+    if ( ! f )
+        return false;
 
-	fclose(f);
-	f = nullptr;
-	open_time = 0;
-	is_open = false;
+    fclose(f);
+    f = nullptr;
+    open_time = 0;
+    is_open = false;
 
-	Unlink();
+    Unlink();
 
-	return true;
-	}
+    return true;
+}
 
-void File::Unlink()
-	{
-	for ( auto it = open_files.begin(); it != open_files.end(); ++it )
-		{
-		if ( (*it).second == this )
-			{
-			open_files.erase(it);
-			return;
-			}
-		}
-	}
+void File::Unlink() {
+    // Don't unlink from the open_files list if we're in exit handlers. Doing so
+    // risks Zeek crashes due to ordering of static variable cleanup. Our own
+    // list cleanup occurs during orderly shutdown via CloseOpenFiles().
+    if ( run_state::is_exiting )
+        return;
 
-void File::Describe(ODesc* d) const
-	{
-	d->AddSP("file");
+    for ( auto it = open_files.begin(); it != open_files.end(); ++it ) {
+        if ( (*it).second == this ) {
+            open_files.erase(it);
+            return;
+        }
+    }
+}
 
-	if ( name )
-		{
-		d->Add("\"");
-		d->Add(name);
-		d->AddSP("\"");
-		}
+void File::Describe(ODesc* d) const {
+    d->AddSP("file");
 
-	d->AddSP("of");
-	if ( t )
-		t->Describe(d);
-	else
-		d->Add("(no type)");
-	}
+    if ( name ) {
+        d->Add("\"");
+        d->Add(name);
+        d->AddSP("\"");
+    }
 
-void File::SetAttrs(detail::Attributes* arg_attrs)
-	{
-	if ( ! arg_attrs )
-		return;
+    d->AddSP("of");
+    if ( t )
+        t->Describe(d);
+    else
+        d->Add("(no type)");
+}
 
-	attrs = arg_attrs;
-	Ref(attrs);
+void File::SetAttrs(detail::Attributes* arg_attrs) {
+    if ( ! arg_attrs )
+        return;
 
-	if ( attrs->Find(detail::ATTR_RAW_OUTPUT) )
-		EnableRawOutput();
-	}
+    attrs = arg_attrs;
+    Ref(attrs);
 
-RecordVal* File::Rotate()
-	{
-	if ( ! is_open )
-		return nullptr;
+    if ( attrs->Find(detail::ATTR_RAW_OUTPUT) )
+        EnableRawOutput();
+}
 
-	// Do not rotate stdin/stdout/stderr.
-	if ( f == stdin || f == stdout || f == stderr )
-		return nullptr;
+RecordVal* File::Rotate() {
+    if ( ! is_open )
+        return nullptr;
 
-	static auto rotate_info = id::find_type<RecordType>("rotate_info");
-	auto* info = new RecordVal(rotate_info);
-	FILE* newf = util::detail::rotate_file(name, info);
+    // Do not rotate stdin/stdout/stderr.
+    if ( f == stdin || f == stdout || f == stderr )
+        return nullptr;
 
-	if ( ! newf )
-		{
-		Unref(info);
-		return nullptr;
-		}
+    static auto rotate_info = id::find_type<RecordType>("rotate_info");
+    auto* info = new RecordVal(rotate_info);
 
-	info->AssignTime(2, open_time);
+#ifdef _MSC_VER
+    // Windows can't rename open files. Close before rotating.
+    fclose(f);
+    f = nullptr;
+#endif
 
-	Unlink();
+    FILE* newf = util::detail::rotate_file(name, info);
 
-	fclose(f);
-	f = nullptr;
+    if ( ! newf ) {
+        Unref(info);
+        return nullptr;
+    }
 
-	Open(newf);
-	return info;
-	}
+    info->AssignTime(2, open_time);
 
-void File::CloseOpenFiles()
-	{
-	auto it = open_files.begin();
-	while ( it != open_files.end() )
-		{
-		auto el = it++;
-		(*el).second->Close();
-		}
-	}
+    Unlink();
 
-bool File::Write(const char* data, int len)
-	{
-	if ( ! is_open )
-		return false;
+#ifndef _MSC_VER
+    fclose(f);
+    f = nullptr;
+#endif
 
-	if ( ! len )
-		len = strlen(data);
+    Open(newf);
+    return info;
+}
 
-	if ( fwrite(data, len, 1, f) < 1 )
-		return false;
+void File::CloseOpenFiles() {
+    auto it = open_files.begin();
+    while ( it != open_files.end() ) {
+        auto el = it++;
+        (*el).second->Close();
+    }
+}
 
-	return true;
-	}
+bool File::Write(const char* data, int len) {
+    if ( ! is_open )
+        return false;
 
-void File::RaiseOpenEvent()
-	{
-	if ( ! ::file_opened )
-		return;
+    if ( ! len )
+        len = strlen(data);
 
-	FilePtr bf{NewRef{}, this};
-	auto* event = new Event(::file_opened, {make_intrusive<FileVal>(std::move(bf))});
-	event_mgr.Dispatch(event, true);
-	}
+    if ( fwrite(data, len, 1, f) < 1 )
+        return false;
 
-double File::Size()
-	{
-	fflush(f);
-	struct stat s;
-	if ( fstat(fileno(f), &s) < 0 )
-		{
-		reporter->Error("can't stat fd for %s: %s", name, strerror(errno));
-		return 0;
-		}
+    return true;
+}
 
-	return s.st_size;
-	}
+void File::RaiseOpenEvent() {
+    if ( ! ::file_opened )
+        return;
 
-FilePtr File::Get(const char* name)
-	{
-	for ( const auto& el : open_files )
-		if ( el.first == name )
-			return {NewRef{}, el.second};
+    FilePtr bf{NewRef{}, this};
+    event_mgr.Dispatch(::file_opened, {make_intrusive<FileVal>(std::move(bf))});
+}
 
-	return make_intrusive<File>(name, "w");
-	}
+double File::Size() {
+    fflush(f);
+    struct stat s;
+    if ( fstat(fileno(f), &s) < 0 ) {
+        reporter->Error("can't stat fd for %s: %s", name, strerror(errno));
+        return 0;
+    }
 
-	} // namespace zeek
+    return s.st_size;
+}
+
+FilePtr File::Get(const char* name) {
+    for ( const auto& el : open_files )
+        if ( el.first == name )
+            return {NewRef{}, el.second};
+
+    return make_intrusive<File>(name, "w");
+}
+
+} // namespace zeek

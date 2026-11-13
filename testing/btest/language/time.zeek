@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -13,7 +14,7 @@ event zeek_init()
 	local t2: time = t1 + 3 sec;
 	local t3: time = t2 - 10 sec;
 	local t4: time = t1;
-	local t5: time = double_to_time(1234567890);
+	local t5: time = 1234567890 as time;
 	local t6 = current_time();	
 
 	# Type inference test
@@ -30,4 +31,3 @@ event zeek_init()
 	test_case( "size operator", |t5| == 1234567890.0 );
 
 }
-

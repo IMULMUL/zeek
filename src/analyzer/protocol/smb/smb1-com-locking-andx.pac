@@ -27,8 +27,8 @@ type LOCKING_ANDX_RANGE64 = record {
 	byte_len    : uint64;
 };
 
-# http://msdn.microsoft.com/en-us/library/ee442004.aspx
-type SMB1_locking_andx_request(header: SMB_Header, offset: uint16) = record {
+# https://msdn.microsoft.com/en-us/library/ee442004.aspx
+type SMB1_locking_andx_request(header: SMB_Header, offset: uint16, andx_depth: uint8) = record {
 	word_count            : uint8;
 	andx                  : SMB_andx;
 	file_id               : uint16;
@@ -50,12 +50,14 @@ type SMB1_locking_andx_request(header: SMB_Header, offset: uint16) = record {
 
 	extra_byte_parameters : bytestring &transient &length=(andx.offset == 0 || andx.offset >= (offset+offsetof(extra_byte_parameters))+2) ? 0 : (andx.offset-(offset+offsetof(extra_byte_parameters)));
 
-	andx_command          : SMB_andx_command(header, true, offset+offsetof(andx_command), andx.command);
+	andx_command          : SMB_andx_command(header, true, offset+offsetof(andx_command), $context.connection.adjust_andx_command(andx_depth, offset, andx.offset, andx.command), andx_depth + 1);
 } &let {
+	andx_offset_check : bool = $context.connection.check_offset_advancing(andx.command, offset, andx.offset);
+	andx_depth_check : bool = $context.connection.check_andx_depth(andx_depth, andx.command);
 	proc : bool = $context.connection.proc_smb1_locking_andx_request(header, this);
 };
 
-# http://msdn.microsoft.com/en-us/library/ee441519.aspx
+# https://msdn.microsoft.com/en-us/library/ee441519.aspx
 type SMB1_locking_andx_response(header: SMB_Header) = record {
 } &let {
 	proc : bool = $context.connection.proc_smb1_locking_andx_response(header, this);

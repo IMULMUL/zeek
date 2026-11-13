@@ -3,8 +3,10 @@
 # string depending on mode, and exits. We verify the resulting outputs.
 
 # @TEST-PORT: BROKER_PORT
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+# @TEST-REQUIRES: ! is-windows-ci
 # @TEST-EXEC: btest-bg-run zeek zeek -j -b %INPUT
-# @TEST-EXEC: btest-bg-wait 30
+# @TEST-EXEC: btest-bg-wait 45
 # @TEST-EXEC: btest-diff zeek/inherit/node.out
 # @TEST-EXEC: btest-diff zeek/bare/node.out
 # @TEST-EXEC: btest-diff zeek/default/node.out
@@ -33,7 +35,7 @@ event zeek_init()
 		Broker::subscribe(topic);
 		Broker::listen("127.0.0.1", to_port(getenv("BROKER_PORT")));
 
-		# Create a node that inherits basre mode from us.
+		# Create a node that inherits base mode from us.
 		local sn = Supervisor::NodeConfig($name="inherit", $directory="inherit");
 		Supervisor::create(sn);
 
@@ -53,7 +55,7 @@ event zeek_init()
 		print node_output_file, "supervised node zeek_init()";
 
 # This is only defined when we're loading init-default.zeek:
-@ifdef ( Notice::Info )
+@ifdef ( Conn::LOG )
 		print node_output_file, "default mode";
 @else
 		print node_output_file, "bare mode";

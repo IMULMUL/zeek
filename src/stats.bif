@@ -1,5 +1,8 @@
+%gen-native
 
 %%{ // C segment
+#include <sys/resource.h>
+
 #include "zeek/util.h"
 #include "zeek/threading/Manager.h"
 #include "zeek/broker/Manager.h"
@@ -39,28 +42,21 @@ zeek::RecordTypePtr ReporterStats;
 ##              get_reporter_stats
 function get_net_stats%(%): NetStats
 	%{
-	uint64_t recv = 0;
-	uint64_t drop = 0;
-	uint64_t link = 0;
-	uint64_t bytes_recv = 0;
+	struct zeek::iosource::PktSrc::Stats stat;
 
 	if ( zeek::iosource::PktSrc* ps = zeek::iosource_mgr->GetPktSrc() )
-		{
-		struct zeek::iosource::PktSrc::Stats stat;
 		ps->Statistics(&stat);
-		recv += stat.received;
-		drop += stat.dropped;
-		link += stat.link;
-		bytes_recv += stat.bytes_received;
-		}
 
 	auto r = zeek::make_intrusive<zeek::RecordVal>(NetStats);
 	int n = 0;
 
-	r->Assign(n++, recv);
-	r->Assign(n++, drop);
-	r->Assign(n++, link);
-	r->Assign(n++, bytes_recv);
+	r->Assign(n++, stat.received);
+	r->Assign(n++, stat.dropped);
+	r->Assign(n++, stat.link);
+	r->Assign(n++, stat.bytes_received);
+
+	if ( stat.filtered )
+		r->Assign(n++, stat.filtered.value());
 
 	return r;
 	%}
@@ -88,27 +84,30 @@ function get_conn_stats%(%): ConnStats
 
 	r->Assign(n++, Connection::TotalConnections());
 	r->Assign(n++, Connection::CurrentConnections());
-	r->Assign(n++, session_mgr->CurrentSessions());
+	if ( session_mgr ) {
+		r->Assign(n++, static_cast<uint64_t>(session_mgr->CurrentSessions()));
 
-	session::Stats s;
-	if ( session_mgr )
+		session::Stats s;
 		session_mgr->GetStats(s);
 
-#define ADD_STAT(x) \
-	r->Assign(n++, static_cast<uint64_t>(session_mgr ? x : 0));
-
-	ADD_STAT(s.num_packets);
-	ADD_STAT(s.num_fragments);
-	ADD_STAT(s.max_fragments);
-	ADD_STAT(s.num_TCP_conns);
-	ADD_STAT(s.max_TCP_conns);
-	ADD_STAT(s.cumulative_TCP_conns);
-	ADD_STAT(s.num_UDP_conns);
-	ADD_STAT(s.max_UDP_conns);
-	ADD_STAT(s.cumulative_UDP_conns);
-	ADD_STAT(s.num_ICMP_conns);
-	ADD_STAT(s.max_ICMP_conns);
-	ADD_STAT(s.cumulative_ICMP_conns);
+		r->Assign(n++, static_cast<uint64_t>(s.num_packets));
+		r->Assign(n++, static_cast<uint64_t>(s.num_fragments));
+		r->Assign(n++, static_cast<uint64_t>(s.max_fragments));
+		r->Assign(n++, static_cast<uint64_t>(s.num_TCP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.max_TCP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.cumulative_TCP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.num_UDP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.max_UDP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.cumulative_UDP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.num_ICMP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.max_ICMP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.cumulative_ICMP_conns));
+		r->Assign(n++, static_cast<uint64_t>(s.num_packets_unprocessed));
+	}
+	else {
+		// Skip all of the fields that would be set from session_mgr data.
+		n += 14;
+	}
 
 	r->Assign(n++, zeek::detail::killed_by_inactivity);
 
@@ -142,9 +141,9 @@ function get_proc_stats%(%): ProcStats
 
 	double elapsed_time = zeek::util::current_time() - zeek::run_state::zeek_start_time;
 	double user_time =
-		double(ru.ru_utime.tv_sec) + double(ru.ru_utime.tv_usec) / 1e6;
+		static_cast<double>(ru.ru_utime.tv_sec) + (static_cast<double>(ru.ru_utime.tv_usec) / 1e6);
 	double system_time =
-		double(ru.ru_stime.tv_sec) + double(ru.ru_stime.tv_usec) / 1e6;
+		static_cast<double>(ru.ru_stime.tv_sec) + (static_cast<double>(ru.ru_stime.tv_usec) / 1e6);
 
 #ifdef DEBUG
 	r->Assign(n++, true);
@@ -159,7 +158,7 @@ function get_proc_stats%(%): ProcStats
 	r->AssignInterval(n++, system_time);
 
 	uint64_t total_mem;
-	zeek::util::get_memory_usage(&total_mem, NULL);
+	zeek::util::get_memory_usage(&total_mem, nullptr);
 	r->Assign(n++, static_cast<uint64_t>(total_mem));
 
 	r->Assign(n++, static_cast<uint64_t>(ru.ru_minflt));
@@ -215,18 +214,16 @@ function get_event_stats%(%): EventStats
 ##              get_timer_stats
 ##              get_broker_stats
 ##              get_reporter_stats
+## TODO: this should have been deprecated before?
 function get_reassembler_stats%(%): ReassemblerStats
 	%{
 	auto r = zeek::make_intrusive<zeek::RecordVal>(ReassemblerStats);
 	int n = 0;
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 	r->Assign(n++, Reassembler::MemoryAllocation(zeek::REASSEM_FILE));
 	r->Assign(n++, Reassembler::MemoryAllocation(zeek::REASSEM_FRAG));
 	r->Assign(n++, Reassembler::MemoryAllocation(zeek::REASSEM_TCP));
 	r->Assign(n++, Reassembler::MemoryAllocation(zeek::REASSEM_UNKNOWN));
-#pragma GCC diagnostic pop
 
 	return r;
 	%}
@@ -259,8 +256,10 @@ function get_dns_stats%(%): DNSStats
 	r->Assign(n++, static_cast<uint64_t>(dstats.successful));
 	r->Assign(n++, static_cast<uint64_t>(dstats.failed));
 	r->Assign(n++, static_cast<uint64_t>(dstats.pending));
-	r->Assign(n++, static_cast<uint64_t>(dstats.cached_hosts));
-	r->Assign(n++, static_cast<uint64_t>(dstats.cached_addresses));
+	r->Assign(n++, static_cast<uint64_t>(dstats.cached.hosts));
+	r->Assign(n++, static_cast<uint64_t>(dstats.cached.addresses));
+	r->Assign(n++, static_cast<uint64_t>(dstats.cached.texts));
+	r->Assign(n++, static_cast<uint64_t>(dstats.cached.total));
 
 	return r;
 	%}
@@ -288,7 +287,7 @@ function get_timer_stats%(%): TimerStats
 
 	r->Assign(n++, static_cast<uint64_t>(zeek::detail::timer_mgr->Size()));
 	r->Assign(n++, static_cast<uint64_t>(zeek::detail::timer_mgr->PeakSize()));
-	r->Assign(n++, zeek::detail::timer_mgr->CumulativeNum());
+	r->Assign(n++, static_cast<uint64_t>(zeek::detail::timer_mgr->CumulativeNum()));
 
 	return r;
 	%}
@@ -342,7 +341,7 @@ function get_thread_stats%(%): ThreadStats
 	auto r = zeek::make_intrusive<zeek::RecordVal>(ThreadStats);
 	int n = 0;
 
-	r->Assign(n++, zeek::thread_mgr->NumThreads());
+	r->Assign(n++, static_cast<uint64_t>(zeek::thread_mgr->NumThreads()));
 
 	return r;
 	%}
@@ -440,8 +439,6 @@ function get_broker_stats%(%): BrokerStats
 
 	auto cs = broker_mgr->GetStatistics();
 	r->Assign(n++, static_cast<uint64_t>(cs.num_peers));
-	r->Assign(n++, static_cast<uint64_t>(cs.num_stores));
-	r->Assign(n++, static_cast<uint64_t>(cs.num_pending_queries));
 	r->Assign(n++, static_cast<uint64_t>(cs.num_events_incoming));
 	r->Assign(n++, static_cast<uint64_t>(cs.num_events_outgoing));
 	r->Assign(n++, static_cast<uint64_t>(cs.num_logs_incoming));
@@ -485,4 +482,31 @@ function get_reporter_stats%(%): ReporterStats
 	r->Assign(n++, std::move(weirds_by_type));
 
 	return r;
+	%}
+
+## Returns statistics about calls to event handlers.
+##
+## Returns: A record with event call statistics.
+##
+function get_event_handler_stats%(%): EventNameStats
+  %{
+	auto rval = zeek::make_intrusive<zeek::VectorVal>(zeek::id::find_type<VectorType>("EventNameStats"));
+	const auto& recordType = zeek::id::find_type<RecordType>("EventNameCounter");
+
+	const auto& events = event_registry->AllHandlers();
+	for ( const auto& name : events )
+		{
+		auto handler = event_registry->Lookup(name);
+		auto call_count = handler->CallCount();
+
+		if ( call_count > 0 )
+			{
+			auto eventStatRecord = zeek::make_intrusive<zeek::RecordVal>(recordType);
+			eventStatRecord->Assign(0, zeek::make_intrusive<zeek::StringVal>(name));
+			eventStatRecord->Assign(1, zeek::val_mgr->Count(handler->CallCount()));
+			rval->Append(std::move(eventStatRecord));
+			}
+		}
+
+	return rval;
 	%}

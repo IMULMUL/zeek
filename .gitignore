@@ -1,6 +1,10 @@
 # Ignore anything prefixed with build since people
 # tend to name all of their build directories prefixed that way.
 build*
+!ci/windows/build.cmd
+
+# Don't ignore things in the docs directory
+!doc/**
 
 tmp
 *.gcov
@@ -17,3 +21,18 @@ cmake-build-*
 
 # clangd
 .cache
+
+# Visual Studio
+.vs/
+.vscode/
+out/
+CMakeSettings.json
+
+# Emacs temporary files
+*~
+
+# Vim temporary files
+*.swp
+*.swo
+
+src/include

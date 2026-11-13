@@ -31,7 +31,7 @@ refine connection SMB_Conn += {
 
 	function get_is_file_a_pipe(id: uint16): bool
 		%{
-		if ( is_file_a_pipe.count(id) > 0 )
+		if ( is_file_a_pipe.contains(id) )
 			{
 			bool is_pipe = is_file_a_pipe.at(id);
 			is_file_a_pipe.erase(id);
@@ -54,7 +54,7 @@ refine connection SMB_Conn += {
 			return false;
 
 		auto parameters = zeek::make_intrusive<zeek::StringVal>(${val.parameters}.length(),
-		                                                  (const char*)${val.parameters}.data());
+		                                                  reinterpret_cast<const char*>(${val.parameters}.data()));
 		zeek::StringValPtr payload_str;
 
 		if ( ${val.data_count} > 0 )
@@ -79,7 +79,7 @@ refine connection SMB_Conn += {
 			return false;
 
 		auto parameters = zeek::make_intrusive<zeek::StringVal>(${val.parameters}.length(),
-		                                                  (const char*)${val.parameters}.data());
+		                                                  reinterpret_cast<const char*>(${val.parameters}.data()));
 		zeek::StringValPtr payload_str;
 
 		if ( ${val.data_count} > 0 )
@@ -136,7 +136,7 @@ type SMB1_transaction_request(header: SMB_Header) = record {
 	pad2                : padding to data_offset - SMB_Header_length;
 	data                : SMB1_transaction_data(header, true, data_count, sub_cmd, transtype, is_pipe);
 } &let {
-	sub_cmd : uint16 = (sizeof(setup) && word_count != 16) > 0 ? setup[0] : 0;
+	sub_cmd : uint16 = (sizeof(setup) > 0 && word_count != 16) ? setup[0] : 0;
 	transtype : int = determine_transaction_type(header, name);
 	is_pipe : bool = (transtype == SMB_PIPE || (transtype == SMB_UNKNOWN && $context.connection.get_tree_is_pipe(header.tid)));
 

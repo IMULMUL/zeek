@@ -2,22 +2,22 @@
 # variables to verify that an absolute path prefix gets added correctly
 # to relative/path-less input sources.
 #
-# @TEST-EXEC: cat %INPUT | sed "s|@path_prefix@|$PWD/subdir|" >input.zeek
+# @TEST-EXEC: cat %INPUT | sed "s|@path_prefix@|$(cygpath -m "$PWD" 2>/dev/null || echo "$PWD")/subdir|" >input.zeek
 # @TEST-EXEC: mkdir -p subdir
 #
 # Note, in the following we'd ideally use %DIR to express the
 # additional path, but there's currently a problem in btest with using
 # %DIR after TEST-START-NEXT.
 #
-# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$TEST_BASE/scripts/base/frameworks/input/path-prefix zeek -b input.zeek >output
+# @TEST-EXEC: ZEEKPATH=$ZEEKPATH:$(cd "$TEST_BASE/scripts/base/frameworks/input/path-prefix" && pwd) zeek -b input.zeek >output
 # @TEST-EXEC: btest-diff output
 
-@TEST-START-FILE subdir/input.data
+# @TEST-START-FILE subdir/input.data
 #fields	ip	tag
 127.0.3.1	just
 127.0.3.2	some
 127.0.3.3	value
-@TEST-END-FILE
+# @TEST-END-FILE
 
 @load path-prefix-common-table.zeek
 redef InputAscii::path_prefix = "@path_prefix@";

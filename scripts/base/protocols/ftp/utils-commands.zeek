@@ -10,6 +10,9 @@ export {
 		arg:  string &default="";
 		## Counter to track how many commands have been executed.
 		seq:  count &default=0;
+		## Flag indicating if the arg of this CmdArg has been used
+		## to update cwd of c$ftp.
+		cwd_consumed: bool &default=F;
 	};
 
 	## Structure for tracking pending commands in the event that the client
@@ -75,9 +78,9 @@ export {
 	};
 }
 
-function add_pending_cmd(pc: PendingCmds, cmd: string, arg: string): CmdArg
+function add_pending_cmd(pc: PendingCmds, seq: count, cmd: string, arg: string): CmdArg
 	{
-	local ca = [$cmd = cmd, $arg = arg, $seq=|pc|+1, $ts=network_time()];
+	local ca = CmdArg($cmd = cmd, $arg = arg, $seq=seq, $ts=network_time());
 	pc[ca$seq] = ca;
 
 	return ca;
@@ -131,11 +134,4 @@ function remove_pending_cmd(pc: PendingCmds, ca: CmdArg): bool
 		}
 	else
 		return F;
-	}
-
-function pop_pending_cmd(pc: PendingCmds, reply_code: count, reply_msg: string): CmdArg
-	{
-	local ca = get_pending_cmd(pc, reply_code, reply_msg);
-	remove_pending_cmd(pc, ca);
-	return ca;
 	}

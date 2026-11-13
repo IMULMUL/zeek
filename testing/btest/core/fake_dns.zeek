@@ -1,12 +1,13 @@
-# @TEST-EXEC: ZEEK_DNS_FAKE=1 zeek -b %INPUT >out
+# @TEST-EXEC: ZEEK_DNS_FAKE=1 zeek -D -b %INPUT >out 2>err
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff-remove-abspath err
 
 redef exit_only_after_terminate = T;
 
 global addrs: set[addr] = {
-	google.com,
-	bing.com,
-	yahoo.com
+	blocking_lookup_hostname("google.com"),
+	blocking_lookup_hostname("bing.com"),
+	blocking_lookup_hostname("yahoo.com")
 };
 
 global c: count = 0;

@@ -2,11 +2,11 @@
 # @TEST-EXEC: btest-bg-wait 10
 # @TEST-EXEC: btest-diff out
 # @TEST-EXEC: sed 1d .stderr > .stderrwithoutfirstline
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff .stderrwithoutfirstline
+# @TEST-EXEC: btest-diff-remove-abspath .stderrwithoutfirstline
 
 # Note the tab+space separator in the last line of the following is
 # intentional. It verifies our whitespace handling.
-@TEST-START-FILE input.log
+# @TEST-START-FILE input.log
 #separator \x09
 #fields	i	c
 #types	int	count
@@ -14,7 +14,7 @@
 9223372036854775801TEXTHERE	1Justtext
 Justtext	1
 9223372036854775800	 -18446744073709551612
-@TEST-END-FILE
+# @TEST-END-FILE
 
 redef exit_only_after_terminate = T;
 

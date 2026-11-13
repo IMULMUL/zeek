@@ -1,0 +1,42 @@
+# @TEST-DOC: Tests various error handling scenarios for the storage framework
+# @TEST-EXEC: zeek -b %INPUT > out
+# @TEST-EXEC: btest-diff-remove-abspath out
+# @TEST-EXEC: btest-diff-remove-abspath .stderr
+
+@load base/frameworks/storage/sync
+@load base/frameworks/reporter
+@load policy/frameworks/storage/backend/sqlite
+
+event zeek_init() {
+	# Test opening a database with an invalid path
+	local opts : Storage::BackendOptions;
+	opts$sqlite = [$database_path = "/this/path/should/not/exist/test.sqlite",
+	               $table_name = "testing"];
+
+	# This should report an error in .stderr and reporter.log
+	local open_res = Storage::Sync::open_backend(Storage::STORAGE_BACKEND_SQLITE, opts, string, string);
+	print "Open result", open_res;
+
+	# Open a valid database file
+	opts$sqlite$database_path = "test.sqlite";
+	open_res = Storage::Sync::open_backend(Storage::STORAGE_BACKEND_SQLITE, opts, string, string);
+	print "Open result 2", open_res;
+
+	local b = open_res$value;
+
+	print "Opened handle is open", Storage::is_open(b);
+
+	local bad_key: count = 12345;
+	local value = "abcde";
+	local res = Storage::Sync::put(b, [$key=bad_key, $value=value]);
+	print "Put result with bad key type", res;
+
+	# Close the backend and then attempt to use the closed handle
+	Storage::Sync::close_backend(b);
+
+	# Test if the now-closed backend is open.
+	print "Closed backend is open", Storage::is_open(b);
+
+	local res2 = Storage::Sync::put(b, [$key="a", $value="b"]);
+	print "Put result on closed handle", res2;
+}

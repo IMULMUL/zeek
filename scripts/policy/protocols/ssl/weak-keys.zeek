@@ -30,13 +30,13 @@ export {
 	## Warn if the DH key length is smaller than the certificate key length. This is
 	## potentially unsafe because it gives a wrong impression of safety due to the
 	## certificate key length. However, it is very common and cannot be avoided in some
-	## settings (e.g. with old jave clients).
+	## settings (e.g. with old java clients).
 	option notify_dh_length_shorter_cert_length = T;
 
 	## Warn if a server negotiates a SSL session with a protocol version smaller than
 	## the specified version. By default, the minimal version is TLSv10 because SSLv2
 	## and v3 have serious security issued.
-	## See https://tools.ietf.org/html/draft-thomson-sslv3-diediedie-00
+	## See https://datatracker.ietf.org/doc/html/draft-thomson-sslv3-diediedie-00
 	## To disable, set to SSLv20
 	option tls_minimum_version = TLSv10;
 
@@ -57,7 +57,7 @@ event ssl_established(c: connection) &priority=3
 
 	local fuid = c$ssl$cert_chain[0]$fuid;
 	local cert = c$ssl$cert_chain[0]$x509$certificate;
-	local hash = c$ssl$cert_chain[0]$sha1;
+	local hash = c$ssl$cert_chain[0]$x509$fingerprint;
 
 	if ( !cert?$key_type || !cert?$key_length )
 		return;
@@ -68,11 +68,13 @@ event ssl_established(c: connection) &priority=3
 	local key_length = cert$key_length;
 
 	if ( key_length < notify_minimal_key_length )
-		NOTICE([$note=Weak_Key,
-			$msg=fmt("Host uses weak certificate with %d bit key", key_length),
-			$conn=c, $suppress_for=1day,
-			$identifier=cat(c$id$resp_h, c$id$resp_h, hash, key_length)
-		]);
+		NOTICE(Notice::Info($note=Weak_Key,
+		                    $msg=fmt("Host uses weak certificate with %d bit key", key_length),
+		                    $conn=c, $suppress_for=1day,
+		                    $identifier=cat(c$id$resp_h, c$id$resp_p, hash, key_length),
+		                    $sub=fmt("Subject: %s", cert$subject),
+		                    $file_desc=fmt("Fingerprint: %s", hash)
+		));
 	}
 
 # Check for old SSL versions and weak connection keys
@@ -85,19 +87,19 @@ event ssl_server_hello(c: connection, version: count, record_version: count, pos
 		{
 		local minimum_string = version_strings[tls_minimum_version];
 		local host_string = version_strings[version];
-		NOTICE([$note=Old_Version,
-			$msg=fmt("Host uses protocol version %s which is lower than the safe minimum %s", host_string, minimum_string),
-			$conn=c, $suppress_for=1day,
-			$identifier=cat(c$id$resp_h, c$id$resp_h)
-		]);
+		NOTICE(Notice::Info($note=Old_Version,
+		                    $msg=fmt("Host uses protocol version %s which is lower than the safe minimum %s", host_string, minimum_string),
+		                    $conn=c, $suppress_for=1day,
+		                    $identifier=cat(c$id$resp_h, c$id$resp_p)
+		));
 		}
 
 	if ( unsafe_ciphers_regex in c$ssl$cipher )
-		NOTICE([$note=Weak_Cipher,
-			$msg=fmt("Host established connection using unsafe ciper suite %s", c$ssl$cipher),
-			$conn=c, $suppress_for=1day,
-			$identifier=cat(c$id$resp_h, c$id$resp_h, c$ssl$cipher)
-		]);
+		NOTICE(Notice::Info($note=Weak_Cipher,
+		                    $msg=fmt("Host established connection using unsafe cipher suite %s", c$ssl$cipher),
+		                    $conn=c, $suppress_for=1day,
+		                    $identifier=cat(c$id$resp_h, c$id$resp_p, c$ssl$cipher)
+		));
 	}
 
 event ssl_dh_server_params(c: connection, p: string, q: string, Ys: string) &priority=3
@@ -108,11 +110,11 @@ event ssl_dh_server_params(c: connection, p: string, q: string, Ys: string) &pri
 	local key_length = |p| * 8; # length of the used prime number in bits
 
 	if ( key_length < notify_minimal_key_length )
-		NOTICE([$note=Weak_Key,
-			$msg=fmt("Host uses weak DH parameters with %d key bits", key_length),
-			$conn=c, $suppress_for=1day,
-			$identifier=cat(c$id$resp_h, c$id$resp_p, key_length)
-		]);
+		NOTICE(Notice::Info($note=Weak_Key,
+		                    $msg=fmt("Host uses weak DH parameters with %d key bits", key_length),
+		                    $conn=c, $suppress_for=1day,
+		                    $identifier=cat(c$id$resp_h, c$id$resp_p, key_length)
+		));
 
 	if ( notify_dh_length_shorter_cert_length &&
 	     c?$ssl && c$ssl?$cert_chain && |c$ssl$cert_chain| > 0 && c$ssl$cert_chain[0]?$x509 &&
@@ -122,11 +124,11 @@ event ssl_dh_server_params(c: connection, p: string, q: string, Ys: string) &pri
 		{
 		if ( c$ssl$cert_chain[0]$x509$certificate?$key_length &&
 		     c$ssl$cert_chain[0]$x509$certificate$key_length > key_length )
-			NOTICE([$note=Weak_Key,
-				$msg=fmt("DH key length of %d bits is smaller certificate key length of %d bits",
-					 key_length, c$ssl$cert_chain[0]$x509$certificate$key_length),
-				$conn=c, $suppress_for=1day,
-				$identifier=cat(c$id$resp_h, c$id$resp_p)
-			       ]);
+			NOTICE(Notice::Info($note=Weak_Key,
+			                    $msg=fmt("DH key length of %d bits is smaller certificate key length of %d bits",
+			                             key_length, c$ssl$cert_chain[0]$x509$certificate$key_length),
+			                    $conn=c, $suppress_for=1day,
+			                    $identifier=cat(c$id$resp_h, c$id$resp_p)
+			));
 		}
 	}

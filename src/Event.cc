@@ -2,217 +2,397 @@
 
 #include "zeek/Event.h"
 
-#include "zeek/zeek-config.h"
+#include <cinttypes>
 
 #include "zeek/Desc.h"
-#include "zeek/Func.h"
-#include "zeek/NetVar.h"
+#include "zeek/EventRegistry.h"
+#include "zeek/Reporter.h"
 #include "zeek/RunState.h"
 #include "zeek/Trigger.h"
+#include "zeek/Type.h"
 #include "zeek/Val.h"
 #include "zeek/iosource/Manager.h"
-#include "zeek/iosource/PktSrc.h"
 #include "zeek/plugin/Manager.h"
+#include "zeek/telemetry/Manager.h"
+#include "zeek/util.h"
+
+#include "const.bif.netvar_h"
+#include "event.bif.netvar_h"
 
 zeek::EventMgr zeek::event_mgr;
-zeek::EventMgr& mgr = zeek::event_mgr;
 
-namespace zeek
-	{
+namespace zeek {
 
-Event::Event(EventHandlerPtr arg_handler, zeek::Args arg_args, util::detail::SourceID arg_src,
-             analyzer::ID arg_aid, Obj* arg_obj)
-	: handler(arg_handler), args(std::move(arg_args)), src(arg_src), aid(arg_aid), obj(arg_obj),
-	  next_event(nullptr)
-	{
-	if ( obj )
-		Ref(obj);
-	}
+detail::EventMetadataVectorPtr detail::MakeEventMetadataVector(double t) {
+    auto tv = make_intrusive<TimeVal>(t);
+    auto entry = detail::MetadataEntry{static_cast<zeek_uint_t>(detail::MetadataType::NetworkTimestamp), std::move(tv)};
+    return std::make_unique<detail::EventMetadataVector>(std::vector{std::move(entry)});
+}
 
-void Event::Describe(ODesc* d) const
-	{
-	if ( d->IsReadable() )
-		d->AddSP("event");
+RecordValPtr detail::MetadataEntry::BuildVal() const {
+    static const auto rt = id::find_type<RecordType>("EventMetadata::Entry");
+    auto rv = make_intrusive<RecordVal>(rt);
+    const auto* desc = event_registry->LookupMetadata(id);
+    if ( ! desc ) {
+        zeek::reporter->InternalWarning("unable to find metadata descriptor for id %" PRIu64, id);
+        return rv;
+    }
 
-	bool s = d->IsShort();
-	d->SetShort(s);
+    rv->Assign(0, desc->IdVal());
+    rv->Assign(1, val);
 
-	if ( ! d->IsBinary() )
-		d->Add("(");
-	describe_vals(args, d);
-	if ( ! d->IsBinary() )
-		d->Add("(");
-	}
+    return rv;
+}
 
-void Event::Dispatch(bool no_remote)
-	{
-	if ( src == util::detail::SOURCE_BROKER )
-		no_remote = true;
+Event::Event(detail::EventMetadataVectorPtr arg_meta, const EventHandlerPtr& arg_handler, zeek::Args arg_args,
+             util::detail::SourceID arg_src, analyzer::ID arg_aid, Obj* arg_obj)
+    : handler(arg_handler),
+      args(std::move(arg_args)),
+      meta(std::move(arg_meta)),
+      src(arg_src),
+      aid(arg_aid),
+      obj(zeek::NewRef{}, arg_obj) {}
 
-	if ( handler->ErrorHandler() )
-		reporter->BeginErrorHandler();
+zeek::VectorValPtr Event::MetadataValues(const EnumValPtr& id) const {
+    static const auto& any_vec_t = zeek::id::find_type<zeek::VectorType>("any_vec");
+    auto result = zeek::make_intrusive<zeek::VectorVal>(any_vec_t);
 
-	try
-		{
-		handler->Call(&args, no_remote);
-		}
+    if ( ! meta )
+        return result;
 
-	catch ( InterpreterException& e )
-		{
-		// Already reported.
-		}
+    auto id_int = id->Get();
+    if ( id_int < 0 )
+        zeek::reporter->InternalError("Negative enum value %s: %" PRId64, obj_desc_short(id.get()).c_str(), id_int);
 
-	if ( obj )
-		// obj->EventDone();
-		Unref(obj);
+    zeek_uint_t uintid = static_cast<zeek_uint_t>(id_int);
+    const auto* desc = event_registry->LookupMetadata(uintid);
+    if ( ! desc )
+        return result;
 
-	if ( handler->ErrorHandler() )
-		reporter->EndErrorHandler();
-	}
+    for ( const auto& entry : *meta ) {
+        if ( entry.Id() != uintid )
+            continue;
 
-EventMgr::EventMgr()
-	{
-	head = tail = nullptr;
-	current_src = util::detail::SOURCE_LOCAL;
-	current_aid = 0;
-	src_val = nullptr;
-	draining = false;
-	}
+        // Sanity check the type.
+        if ( ! same_type(desc->Type(), entry.Val()->GetType()) ) {
+            zeek::reporter->InternalWarning("metadata has unexpected type %s, wanted %s",
+                                            obj_desc_short(entry.Val()->GetType().get()).c_str(),
+                                            obj_desc_short(desc->Type().get()).c_str());
+            continue;
+        }
 
-EventMgr::~EventMgr()
-	{
-	while ( head )
-		{
-		Event* n = head->NextEvent();
-		Unref(head);
-		head = n;
-		}
+        result->Append(entry.Val());
+    }
 
-	Unref(src_val);
-	}
+    return result;
+}
 
-void EventMgr::Enqueue(const EventHandlerPtr& h, Args vl, util::detail::SourceID src,
-                       analyzer::ID aid, Obj* obj)
-	{
-	QueueEvent(new Event(h, std::move(vl), src, aid, obj));
-	}
+double Event::Time() const {
+    if ( ! meta )
+        return detail::NO_TIMESTAMP;
 
-void EventMgr::QueueEvent(Event* event)
-	{
-	bool done = PLUGIN_HOOK_WITH_RESULT(HOOK_QUEUE_EVENT, HookQueueEvent(event), false);
+    for ( const auto& m : *meta )
+        if ( m.Id() == static_cast<zeek_uint_t>(detail::MetadataType::NetworkTimestamp) ) {
+            if ( m.Val()->GetType()->Tag() != TYPE_TIME ) {
+                // This should've been caught during parsing.
+                zeek::reporter->InternalError("event metadata timestamp has wrong type: %s",
+                                              obj_desc_short(m.Val()->GetType().get()).c_str());
+            }
 
-	if ( done )
-		return;
+            return m.Val()->AsTime();
+        }
 
-	if ( ! head )
-		{
-		head = tail = event;
-		queue_flare.Fire();
-		}
-	else
-		{
-		tail->SetNext(event);
-		tail = event;
-		}
+    return detail::NO_TIMESTAMP;
+}
 
-	++event_mgr.num_events_queued;
-	}
+void Event::Describe(ODesc* d) const {
+    if ( d->IsReadable() )
+        d->AddSP("event");
 
-void EventMgr::Dispatch(Event* event, bool no_remote)
-	{
-	current_src = event->Source();
-	event->Dispatch(no_remote);
-	Unref(event);
-	}
+    bool s = d->IsShort();
+    d->SetShort(s);
 
-void EventMgr::Drain()
-	{
-	if ( event_queue_flush_point )
-		Enqueue(event_queue_flush_point, Args{});
+    if ( ! d->IsBinary() )
+        d->Add("(");
+    describe_vals(args, d);
+    if ( ! d->IsBinary() )
+        d->Add("(");
+}
 
-	detail::SegmentProfiler prof(detail::segment_logger, "draining-events");
+void Event::Dispatch() {
+    if ( handler->ErrorHandler() )
+        reporter->BeginErrorHandler();
 
-	PLUGIN_HOOK_VOID(HOOK_DRAIN_EVENTS, HookDrainEvents());
+    try {
+        handler->Call(&args);
+    } catch ( InterpreterException& e ) {
+        // Already reported.
+    }
 
-	draining = true;
+    // Unref obj
+    obj.reset();
 
-	// Past Bro versions drained as long as there events, including when
-	// a handler queued new events during its execution. This could lead
-	// to endless loops in case a handler kept triggering its own event.
-	// We now limit this to just a couple of rounds. We do more than
-	// just one round to make it less likley to break existing scripts
-	// that expect the old behavior to trigger something quickly.
+    if ( handler->ErrorHandler() )
+        reporter->EndErrorHandler();
+}
 
-	for ( int round = 0; head && round < 2; round++ )
-		{
-		Event* current = head;
-		head = nullptr;
-		tail = nullptr;
+EventMgr::~EventMgr() {
+    while ( head ) {
+        Event* n = head->NextEvent();
+        Unref(head);
+        head = n;
+    }
+}
 
-		while ( current )
-			{
-			Event* next = current->NextEvent();
+void EventMgr::Enqueue(const EventHandlerPtr& h, Args vl, util::detail::SourceID src, analyzer::ID aid, Obj* obj) {
+    detail::EventMetadataVectorPtr meta;
 
-			current_src = current->Source();
-			current_aid = current->Analyzer();
-			current->Dispatch();
-			Unref(current);
+    // If this is a local event and EventMetadata::add_network_timestamp is
+    // enabled, automatically set the network timestamp for this event to the
+    // current network time.
+    //
+    // See the other Enqueue() implementation for the local vs broker/remote
+    // motivation of want_network_timestamp.
+    bool want_network_timestamp =
+        BifConst::EventMetadata::add_network_timestamp &&
+        ((src == util::detail::SOURCE_LOCAL) ||
+         (src == util::detail::SOURCE_BROKER && BifConst::EventMetadata::add_missing_remote_network_timestamp));
 
-			++event_mgr.num_events_dispatched;
-			current = next;
-			}
-		}
+    if ( want_network_timestamp )
+        meta = detail::MakeEventMetadataVector(run_state::network_time);
 
-	// Note: we might eventually need a general way to specify things to
-	// do after draining events.
-	draining = false;
+    QueueEvent(new Event(std::move(meta), h, std::move(vl), src, aid, obj));
 
-	// Make sure all of the triggers get processed every time the events
-	// drain.
-	detail::trigger_mgr->Process();
-	}
+    if ( ! IsDraining() && MaxQueueSizeReached() )
+        OverflowDrain(h);
+}
 
-void EventMgr::Describe(ODesc* d) const
-	{
-	int n = 0;
-	Event* e;
-	for ( e = head; e; e = e->NextEvent() )
-		++n;
+void EventMgr::Enqueue(detail::EventMetadataVectorPtr meta, const EventHandlerPtr& h, Args vl,
+                       util::detail::SourceID src, analyzer::ID aid, Obj* obj) {
+    // Attach network timestamps to all events if EventMetadata::add_network_timestamp is T and
+    //
+    //   1) this event is locally generated
+    //   or
+    //   2) this is a remote event and EventMetadata::add_missing_remote_network_timestamp is T
+    //
+    // Why so complicated? It seems less surprising behavior to keep network timestamp metadata unset
+    // if a remote event didn't have any attached. It should help to more easily figure out what's
+    // actually going on compared to setting it to the local network time. If all nodes are required to
+    // send *their* network timestamp, filling it with this node's network time seems more confusing
+    // and error prone compared to just leaving it unset and having the consumer deal with the situation.
+    bool want_network_timestamp =
+        BifConst::EventMetadata::add_network_timestamp &&
+        ((src == util::detail::SOURCE_LOCAL) ||
+         (src == util::detail::SOURCE_BROKER && BifConst::EventMetadata::add_missing_remote_network_timestamp));
 
-	d->AddCount(n);
+    if ( want_network_timestamp ) {
+        bool has_time = false;
 
-	for ( e = head; e; e = e->NextEvent() )
-		{
-		e->Describe(d);
-		d->NL();
-		}
-	}
+        if ( ! meta ) {
+            // No metadata vector at all, make one with a timestamp.
+            meta = detail::MakeEventMetadataVector(run_state::network_time);
+        }
+        else {
+            // Check all entries for a network timestamp
+            for ( const auto& m : *meta ) {
+                if ( m.Id() == static_cast<zeek_uint_t>(detail::MetadataType::NetworkTimestamp) ) {
+                    has_time = true;
 
-void EventMgr::Process()
-	{
-	// If we don't have a source, or the source is closed, or we're
-	// reading live (which includes pseudo-realtime), advance the time
-	// here to the current time since otherwise it won't move forward.
-	iosource::PktSrc* pkt_src = iosource_mgr->GetPktSrc();
-	if ( ! pkt_src || ! pkt_src->IsOpen() || run_state::reading_live )
-		run_state::detail::update_network_time(util::current_time());
+                    if ( m.Val()->GetType()->Tag() != TYPE_TIME ) {
+                        // This should've been caught during parsing.
+                        zeek::reporter->InternalError("event metadata timestamp has wrong type: %s",
+                                                      obj_desc_short(m.Val()->GetType().get()).c_str());
+                    }
+                }
+            }
 
-	queue_flare.Extinguish();
+            if ( ! has_time ) {
+                auto tv = zeek::make_intrusive<zeek::TimeVal>(run_state::network_time);
+                meta->push_back({static_cast<zeek_uint_t>(detail::MetadataType::NetworkTimestamp), std::move(tv)});
+            }
+        }
+    }
 
-	// While it semes like the most logical thing to do, we dont want
-	// to call Drain() as part of this method. It will get called at
-	// the end of net_run after all of the sources have been processed
-	// and had the opportunity to spawn new events. We could use
-	// zeek::iosource_mgr->Wakeup() instead of making EventMgr an IOSource,
-	// but then we couldn't update the time above and nothing would
-	// drive it forward.
-	}
+    QueueEvent(new Event(std::move(meta), h, std::move(vl), src, aid, obj));
 
-void EventMgr::InitPostScript()
-	{
-	iosource_mgr->Register(this, true, false);
-	if ( ! iosource_mgr->RegisterFd(queue_flare.FD(), this) )
-		reporter->FatalError("Failed to register event manager FD with iosource_mgr");
-	}
+    if ( ! IsDraining() && MaxQueueSizeReached() )
+        OverflowDrain(h);
+}
 
-	} // namespace zeek
+void EventMgr::QueueEvent(Event* event) {
+    bool done = PLUGIN_HOOK_WITH_RESULT(HOOK_QUEUE_EVENT, HookQueueEvent(event), false);
+
+    if ( done )
+        return;
+
+    if ( ! head ) {
+        head = tail = event;
+    }
+    else {
+        tail->SetNext(event);
+        tail = event;
+    }
+
+    ++event_mgr.num_events_queued;
+}
+
+bool EventMgr::MaxQueueSizeReached() const {
+    // zeek_init_done is set to true in zeek-setup.cc::setup() after
+    // the first Drain() of zeek_init() and other events enqueued
+    // during the InitPostScript() phase. Ignore the max_event_queue_size
+    // limit before this happened.
+    if ( ! zeek::run_state::detail::zeek_init_done )
+        return false;
+
+    return BifConst::max_event_queue_size > 0 && static_cast<uint64_t>(Size()) > BifConst::max_event_queue_size;
+}
+
+void EventMgr::OverflowDrain(const EventHandlerPtr& h) {
+    // Low-level construct a net_weird) event by hand and use QueueEvent() instead
+    // of going through Reporter::Weird() which raises the event via EnqueueEvent()
+    // and would result in recursion.
+    //
+    // event net_weird(name: string, addl: string, source: string)
+    detail::EventMetadataVectorPtr weird_meta;
+    if ( BifConst::EventMetadata::add_network_timestamp )
+        weird_meta = detail::MakeEventMetadataVector(run_state::network_time);
+
+    Args weird_vl = {
+        make_intrusive<StringVal>("event_queue_overflow_drain"),
+        make_intrusive<StringVal>(h->Name()),
+        val_mgr->EmptyString(),
+    };
+
+    QueueEvent(new Event(std::move(weird_meta), net_weird, std::move(weird_vl), util::detail::SOURCE_LOCAL,
+                         /*arg_aid=*/0, /*arg_obj=*/nullptr));
+
+    event_queue_overflow_drains_metric->Inc();
+
+    Drain();
+}
+
+void EventMgr::Dispatch(const EventHandlerPtr& h, zeek::Args vl) {
+    detail::EventMetadataVectorPtr meta;
+
+    // If all events should have network timestamps, create the vector holding one.
+    if ( BifConst::EventMetadata::add_network_timestamp )
+        meta = detail::MakeEventMetadataVector(run_state::network_time);
+
+    auto* ev = new Event(std::move(meta), h, std::move(vl), util::detail::SOURCE_LOCAL, 0, nullptr);
+
+    // Technically this isn't queued, but still give plugins a chance to
+    // intercept the event and cancel or modify it if really wanted.
+    bool done = PLUGIN_HOOK_WITH_RESULT(HOOK_QUEUE_EVENT, HookQueueEvent(ev), false);
+    if ( done )
+        return;
+
+    Event* old_current = current;
+    current = ev;
+    ev->Dispatch();
+    current = old_current;
+    Unref(ev);
+}
+
+void EventMgr::Drain() {
+    draining = true;
+
+    if ( event_queue_flush_point )
+        Enqueue(event_queue_flush_point, Args{});
+
+    PLUGIN_HOOK_VOID(HOOK_DRAIN_EVENTS, HookDrainEvents());
+
+    // Past Zeek versions drained as long as there events, including when
+    // a handler queued new events during its execution. This could lead
+    // to endless loops in case a handler kept triggering its own event.
+    // We now limit this to just a couple of rounds. We do more than
+    // just one round to make it less likely to break existing scripts
+    // that expect the old behavior to trigger something quickly.
+
+    for ( int round = 0; head && round < 2; round++ ) {
+        Event* event = head;
+        head = nullptr;
+        tail = nullptr;
+
+        while ( event ) {
+            Event* next = event->NextEvent();
+
+            current = event;
+            event->Dispatch();
+            Unref(event);
+
+            ++event_mgr.num_events_dispatched;
+            event = next;
+        }
+    }
+
+    // Note: we might eventually need a general way to specify things to
+    // do after draining events.
+    current = nullptr;
+
+    draining = false;
+
+    // Make sure all of the triggers get processed every time the events
+    // drain.
+    detail::trigger_mgr->Process();
+}
+
+void EventMgr::Describe(ODesc* d) const {
+    int n = 0;
+    Event* e;
+    for ( e = head; e; e = e->NextEvent() )
+        ++n;
+
+    d->AddCount(n);
+
+    for ( e = head; e; e = e->NextEvent() ) {
+        e->Describe(d);
+        d->NL();
+    }
+}
+
+void EventMgr::Process() {
+    // While it semes like the most logical thing to do, we dont want
+    // to call Drain() as part of this method. It will get called at
+    // the end of run_loop after all of the sources have been processed
+    // and had the opportunity to spawn new events.
+}
+
+void EventMgr::InitPostScript() {
+    // Check if expected types and identifiers are available.
+    const auto& et = zeek::id::find_type<zeek::EnumType>("EventMetadata::ID");
+    if ( ! et )
+        zeek::reporter->FatalError("Failed to find EventMetadata::ID");
+
+    const auto& net_ts_val = et->GetEnumVal(et->Lookup("EventMetadata::NETWORK_TIMESTAMP"));
+    if ( ! net_ts_val )
+        zeek::reporter->FatalError("Failed to lookup EventMetadata::NETWORK_TIMESTAMP");
+
+    if ( ! zeek::event_registry->RegisterMetadata(net_ts_val, zeek::base_type(zeek::TYPE_TIME)) )
+        zeek::reporter->FatalError("Failed to register NETWORK_TIMESTAMP metadata");
+
+    // Remove this if there's ever a use-case to not use them together.
+    if ( BifConst::EventMetadata::add_missing_remote_network_timestamp &&
+         ! BifConst::EventMetadata::add_network_timestamp )
+        zeek::reporter->FatalError(
+            "Setting EventMetadata::add_missing_remote_network_timestamp is only valid together with "
+            "EventMetadata::add_network_timestamp");
+
+    events_queued_metric =
+        telemetry_mgr->CounterInstance("zeek", "events_queued", {}, "Total number of events queued", "", []() {
+            // XXX: This will get a bit lossy after 2**53 events.
+            return static_cast<double>(event_mgr.num_events_queued);
+        });
+
+    events_dispatched_metric =
+        telemetry_mgr->CounterInstance("zeek", "events_dispatched", {}, "Total number of events dispatched", "", []() {
+            // XXX: This will get a bit lossy after 2**53 events.
+            return static_cast<double>(event_mgr.num_events_dispatched);
+        });
+
+    event_queue_overflow_drains_metric =
+        telemetry_mgr->CounterInstance("zeek", "event_queue_overflow_drains", {},
+                                       "Number of event queue overflows resulting in a drain.", "");
+
+    iosource_mgr->Register(this, true, false);
+}
+} // namespace zeek

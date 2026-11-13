@@ -5,21 +5,20 @@
 #include "zeek/packet_analysis/Analyzer.h"
 #include "zeek/packet_analysis/Component.h"
 
-namespace zeek::packet_analysis::VLAN
-	{
+namespace zeek::packet_analysis::VLAN {
 
-class VLANAnalyzer : public Analyzer
-	{
+class VLANAnalyzer : public Analyzer {
 public:
-	VLANAnalyzer();
-	~VLANAnalyzer() override = default;
+    VLANAnalyzer();
 
-	bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
+    bool AnalyzePacket(size_t len, const uint8_t* data, Packet* packet) override;
 
-	static zeek::packet_analysis::AnalyzerPtr Instantiate()
-		{
-		return std::make_shared<VLANAnalyzer>();
-		}
-	};
+    static zeek::packet_analysis::AnalyzerPtr Instantiate() { return std::make_shared<VLANAnalyzer>(); }
 
-	}
+private:
+    zeek_uint_t snap_forwarding_key = 0;
+    zeek_uint_t novell_forwarding_key = 0;
+    zeek_uint_t llc_forwarding_key = 0;
+};
+
+} // namespace zeek::packet_analysis::VLAN

@@ -3,7 +3,7 @@
 # @TEST-EXEC: btest-diff x509.log
 # @TEST-EXEC: btest-diff .stdout
 
-@TEST-START-FILE common.zeek
+# @TEST-START-FILE common.zeek
 
 @load base/protocols/ssl
 @load protocols/ssl/validate-certs.zeek
@@ -23,7 +23,7 @@ hook X509::x509_certificate_cache_replay(f: fa_file, e: X509::Info, sha256: stri
 	print "Hook for", e$certificate$subject;
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
 # First: Plain, no changes - certificate event caching won't even engage.
 

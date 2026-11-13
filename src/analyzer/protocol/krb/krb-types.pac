@@ -3,13 +3,15 @@
 %header{
 zeek::ValPtr GetStringFromPrincipalName(const KRB_Principal_Name* pname);
 
-zeek::VectorValPtr proc_cipher_list(const Array* list);
+zeek::VectorValPtr proc_cipher_list(const EType_Array* list);
 
 zeek::VectorValPtr proc_host_address_list(const ZeekAnalyzer a, const KRB_Host_Addresses* list);
 zeek::RecordValPtr proc_host_address(const ZeekAnalyzer a, const KRB_Host_Address* addr);
 
 zeek::VectorValPtr proc_tickets(const KRB_Ticket_Sequence* list);
 zeek::RecordValPtr proc_ticket(const KRB_Ticket* ticket);
+
+zeek::RecordValPtr proc_encrypted_data(const KRB_Encrypted_Data* encrypted_data);
 %}
 
 %code{
@@ -18,18 +20,18 @@ zeek::ValPtr GetStringFromPrincipalName(const KRB_Principal_Name* pname)
 	if ( pname->data()->size() == 1 )
 		return to_stringval(pname->data()[0][0]->encoding()->content());
 	if ( pname->data()->size() == 2 )
-		return zeek::make_intrusive<zeek::StringVal>(zeek::util::fmt("%s/%s", (char *) pname->data()[0][0]->encoding()->content().begin(), (char *)pname->data()[0][1]->encoding()->content().begin()));
+		return zeek::make_intrusive<zeek::StringVal>(zeek::util::fmt("%.*s/%.*s", pname->data()[0][0]->encoding()->content().length(), reinterpret_cast<const char *> (pname->data()[0][0]->encoding()->content().begin()), pname->data()[0][1]->encoding()->content().length(), reinterpret_cast<const char *>(pname->data()[0][1]->encoding()->content().begin())));
 	if ( pname->data()->size() == 3 ) // if the name-string has a third value, this will just append it, else this will return unknown as the principal name
-		return zeek::make_intrusive<zeek::StringVal>(zeek::util::fmt("%s/%s/%s", (char *) pname->data()[0][0]->encoding()->content().begin(), (char *)pname->data()[0][1]->encoding()->content().begin(), (char *)pname->data()[0][2]->encoding()->content().begin()));
+		return zeek::make_intrusive<zeek::StringVal>(zeek::util::fmt("%.*s/%.*s/%.*s", pname->data()[0][0]->encoding()->content().length(), reinterpret_cast<const char *>(pname->data()[0][0]->encoding()->content().begin()), pname->data()[0][1]->encoding()->content().length(), reinterpret_cast<const char *>(pname->data()[0][1]->encoding()->content().begin()), pname->data()[0][2]->encoding()->content().length(), reinterpret_cast<const char *>(pname->data()[0][2]->encoding()->content().begin())));
 
 	return zeek::make_intrusive<zeek::StringVal>("unknown");
 }
 
-zeek::VectorValPtr proc_cipher_list(const Array* list)
+zeek::VectorValPtr proc_cipher_list(const EType_Array* list)
 {
 	auto ciphers = zeek::make_intrusive<zeek::VectorVal>(zeek::id::index_vec);
-	for ( uint i = 0; i < list->data()->size(); ++i )
-		ciphers->Assign(ciphers->Size(), asn1_integer_to_val((*list->data())[i], zeek::TYPE_COUNT));
+	for ( const auto& data : *(list->data()) )
+		ciphers->Assign(ciphers->Size(), asn1_integer_to_val(data, zeek::TYPE_COUNT));
 	return ciphers;
 }
 
@@ -37,10 +39,8 @@ zeek::VectorValPtr proc_host_address_list(const ZeekAnalyzer a, const KRB_Host_A
 {
 	auto addrs = zeek::make_intrusive<zeek::VectorVal>(zeek::id::find_type<zeek::VectorType>("KRB::Host_Address_Vector"));
 
-	for ( uint i = 0; i < list->addresses()->size(); ++i )
-		{
-		addrs->Assign(addrs->Size(), proc_host_address(a, (*list->addresses())[i]));
-		}
+	for ( const auto& addr : *(list->addresses()) )
+		addrs->Assign(addrs->Size(), proc_host_address(a, addr));
 
 	return addrs;
 }
@@ -96,11 +96,8 @@ zeek::VectorValPtr proc_tickets(const KRB_Ticket_Sequence* list)
 	{
 	auto tickets = zeek::make_intrusive<zeek::VectorVal>(zeek::id::find_type<zeek::VectorType>("KRB::Ticket_Vector"));
 
-	for ( uint i = 0; i < list->tickets()->size(); ++i )
-		{
-		KRB_Ticket* element = (*list->tickets())[i];
+	for ( KRB_Ticket* element : *(list->tickets()) )
 		tickets->Assign(tickets->Size(), proc_ticket(element));
-		}
 
 	return tickets;
 	}
@@ -114,6 +111,19 @@ zeek::RecordValPtr proc_ticket(const KRB_Ticket* ticket)
 	rv->Assign(2, GetStringFromPrincipalName(ticket->sname()));
 	rv->Assign(3, asn1_integer_to_val(ticket->enc_part()->data()->etype()->data(), zeek::TYPE_COUNT));
 	rv->Assign(4, to_stringval(ticket->enc_part()->data()->ciphertext()->encoding()->content()));
+
+	return rv;
+	}
+
+zeek::RecordValPtr proc_encrypted_data(const KRB_Encrypted_Data* encrypted_data)
+	{
+	auto rv = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::KRB::Encrypted_Data);
+	if ( encrypted_data->have_kvno() )
+		{
+		rv->Assign(0, asn1_integer_to_val(encrypted_data->kvno(), zeek::TYPE_COUNT));
+		}
+	rv->Assign(1, asn1_integer_to_val(encrypted_data->etype()->data(), zeek::TYPE_COUNT));
+	rv->Assign(2, to_stringval(encrypted_data->ciphertext()->encoding()->content()));
 
 	return rv;
 	}

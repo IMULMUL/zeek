@@ -463,10 +463,10 @@ refine flow DHCP_Flow += {
 	function process_par_req_list_option(v: OptionValue): bool
 		%{
 		auto params = zeek::make_intrusive<zeek::VectorVal>(zeek::id::index_vec);
-		int num_parms = ${v.par_req_list}->size();
+		int num_params = ${v.par_req_list}->size();
 		vector<uint8>* plist = ${v.par_req_list};
 
-		for ( int i = 0; i < num_parms; ++i )
+		for ( int i = 0; i < num_params; ++i )
 			{
 			uint8 param = (*plist)[i];
 			params->Assign(i, zeek::val_mgr->Count(param));
@@ -631,7 +631,7 @@ refine flow DHCP_Flow += {
 
 		if ( ${v.client_id.hwtype} == 0 )
 			sv = zeek::make_intrusive<zeek::StringVal>(${v.client_id.hwaddr}.length(),
-			                                     (const char*)${v.client_id.hwaddr}.begin());
+			                                     reinterpret_cast<const char*>(${v.client_id.hwaddr}.begin()));
 		else
 			sv = zeek::make_intrusive<zeek::StringVal>(zeek::fmt_mac(${v.client_id.hwaddr}.begin(),
 			                                     ${v.client_id.hwaddr}.length()));
@@ -756,12 +756,11 @@ refine flow DHCP_Flow += {
 
 		uint16 i = 0;
 
-		for ( auto ptrsubopt = ${v.relay_agent_inf}->begin();
-		      ptrsubopt != ${v.relay_agent_inf}->end(); ++ptrsubopt )
+		for ( const auto& ptrsubopt : *${v.relay_agent_inf} )
 			{
 			auto r = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::DHCP::SubOpt);
-			r->Assign(0, (*ptrsubopt)->code());
-			r->Assign(1, to_stringval((*ptrsubopt)->value()));
+			r->Assign(0, ptrsubopt->code());
+			r->Assign(1, to_stringval(ptrsubopt->value()));
 
 			relay_agent_sub_opt->Assign(i, std::move(r));
 			++i;

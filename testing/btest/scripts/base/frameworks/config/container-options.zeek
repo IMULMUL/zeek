@@ -2,7 +2,6 @@
 # @TEST-EXEC: btest-diff out
 
 @load base/frameworks/config
-@load base/frameworks/dpd
 
 type Color: enum { RED, GREEN, BLUE };
 
@@ -46,4 +45,3 @@ event zeek_init()
 	Config::set_value("my_table", table());
 	print my_table;
 	}
-

@@ -1,7 +1,7 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC-FAIL: zeek -b bad.zeek >errors 2>&1
 # @TEST-EXEC: btest-diff out
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff errors
+# @TEST-EXEC: btest-diff-remove-abspath errors
 
 global foo: event(a: string, b: string, c: string &default="C");
 global foo: event(c: string, b: string, a: string);
@@ -44,7 +44,7 @@ event zeek_init()
 	event foo("A", "B");
 	}
 
-@TEST-START-FILE bad.zeek
+# @TEST-START-FILE bad.zeek
 global foo: event(a: string, b: string, c: string &default="C");
 global foo: event(c: string, b: string, a: string &default="A");
-@TEST-END-FILE bad.zeek
+# @TEST-END-FILE bad.zeek

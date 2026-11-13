@@ -1,16 +1,16 @@
-# @TEST-EXEC: unset ZEEK_DISABLE_ZEEKYGEN; unset BRO_DISABLE_BROXYGEN; zeek -b -X zeekygen.config %INPUT
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff autogen-reST-vectors.rst
+# @TEST-EXEC: unset ZEEK_DISABLE_ZEEKYGEN; zeek -b -X zeekygen.config %INPUT
+# @TEST-EXEC: btest-diff-remove-abspath autogen-reST-vectors.rst
 
-@TEST-START-FILE zeekygen.config
+# @TEST-START-FILE zeekygen.config
 identifier	test_vector*	autogen-reST-vectors.rst
-@TEST-END-FILE
+# @TEST-END-FILE
 
 type TestRecord: record {
     field1: bool;
     field2: count;
 };
 
-## Yield type is documented/cross-referenced for primitize types.
+## Yield type is documented/cross-referenced for primitive types.
 global test_vector0: vector of string;
 
 ## Yield type is documented/cross-referenced for composite types.

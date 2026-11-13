@@ -14,26 +14,17 @@ event smb1_message(c: connection, hdr: SMB1::Header, is_orig: bool) &priority=5
 		local state: SMB::State;
 		state$fid_map = table();
 		state$tid_map = table();
-		state$uid_map = table();
-		state$pipe_map = table();
 		state$pending_cmds = table();
 		c$smb_state = state;
 		}
 
 	local smb_state = c$smb_state;
 	local tid = hdr$tid;
-	local uid = hdr$uid;
 	local mid = hdr$mid;
 
-	if ( uid in smb_state$uid_map )
-		{
-		smb_state$current_cmd$username = smb_state$uid_map[uid];
-		}
-
 	if ( tid !in smb_state$tid_map )
-		{
-		smb_state$tid_map[tid] = SMB::TreeInfo($uid=c$uid, $id=c$id);
-		}
+		SMB::insert_new_tree_info(c, tid);
+
 	smb_state$current_tree = smb_state$tid_map[tid];
 	if ( smb_state$current_tree?$path )
 		{
@@ -89,9 +80,10 @@ event smb1_negotiate_response(c: connection, hdr: SMB1::Header, response: SMB1::
 	{
 	if ( c$smb_state$current_cmd?$smb1_offered_dialects )
 		{
-		if ( response?$ntlm )
+		local offered_dialects = c$smb_state$current_cmd$smb1_offered_dialects;
+		if ( response?$ntlm && response$ntlm$dialect_index < |offered_dialects| )
 			{
-			c$smb_state$current_cmd$argument = c$smb_state$current_cmd$smb1_offered_dialects[response$ntlm$dialect_index];
+			c$smb_state$current_cmd$argument = offered_dialects[response$ntlm$dialect_index];
 			}
 
 		delete c$smb_state$current_cmd$smb1_offered_dialects;
@@ -112,6 +104,15 @@ event smb1_tree_connect_andx_request(c: connection, hdr: SMB1::Header, path: str
 
 event smb1_tree_connect_andx_response(c: connection, hdr: SMB1::Header, service: string, native_file_system: string) &priority=5
 	{
+	# If the current_cmd does not have a referenced tree, then likely we
+	# missed the  SMB_COM_TREE_CONNECT_ANDX. Report a weird and stop.
+	if ( ! c$smb_state$current_cmd?$referenced_tree )
+		{
+		local addl = fmt("current_cmd=%s", c$smb_state$current_cmd$command);
+		Reporter::conn_weird("smb_tree_connect_andx_response_without_tree", c, addl);
+		return;
+		}
+
 	c$smb_state$current_cmd$referenced_tree$service = service;
 	if ( service == "IPC" )
 		c$smb_state$current_cmd$referenced_tree$share_type = "PIPE";
@@ -143,26 +144,21 @@ event smb1_nt_create_andx_request(c: connection, hdr: SMB1::Header, name: string
 
 event smb1_nt_create_andx_response(c: connection, hdr: SMB1::Header, file_id: count, file_size: count, times: SMB::MACTimes) &priority=5
 	{
+	SMB::set_current_file(c, file_id);
+
 	c$smb_state$current_cmd$referenced_file$action = SMB::FILE_OPEN;
-	c$smb_state$current_cmd$referenced_file$fid = file_id;
 	c$smb_state$current_cmd$referenced_file$size = file_size;
 
 	# I'm seeing negative data from IPC tree transfers
-	if ( time_to_double(times$modified) > 0.0 )
+	if ( times$modified as double > 0.0 )
 		c$smb_state$current_cmd$referenced_file$times = times;
-
-	# We can identify the file by its file id now so let's stick it
-	# in the file map.
-	c$smb_state$fid_map[file_id] = c$smb_state$current_cmd$referenced_file;
-
-	c$smb_state$current_file = c$smb_state$fid_map[file_id];
 
 	SMB::write_file_log(c$smb_state);
 	}
 
 event smb1_read_andx_request(c: connection, hdr: SMB1::Header, file_id: count, offset: count, length: count) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id);
+	SMB::set_current_file(c, file_id);
 	c$smb_state$current_file$action = SMB::FILE_READ;
 	if ( c$smb_state$current_file?$name )
 		c$smb_state$current_cmd$argument = c$smb_state$current_file$name;
@@ -178,7 +174,7 @@ event smb1_read_andx_request(c: connection, hdr: SMB1::Header, file_id: count, o
 
 event smb1_write_andx_request(c: connection, hdr: SMB1::Header, file_id: count, offset: count, data_len: count) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id);
+	SMB::set_current_file(c, file_id);
 	c$smb_state$current_file$action = SMB::FILE_WRITE;
 	if ( !c$smb_state$current_cmd?$argument &&
 	     # TODO: figure out why name isn't getting set sometimes.
@@ -202,7 +198,7 @@ event smb1_write_andx_request(c: connection, hdr: SMB1::Header, file_id: count, 
 
 event smb1_close_request(c: connection, hdr: SMB1::Header, file_id: count) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id);
+	SMB::set_current_file(c, file_id);
 	c$smb_state$current_file$action = SMB::FILE_CLOSE;
 	}
 
@@ -258,62 +254,4 @@ event smb1_session_setup_andx_response(c: connection, hdr: SMB1::Header, respons
 event smb1_transaction_request(c: connection, hdr: SMB1::Header, name: string, sub_cmd: count, parameters: string, data: string)
 	{
 	c$smb_state$current_cmd$sub_command = SMB1::trans_sub_commands[sub_cmd];
-	}
-
-event smb1_write_andx_request(c: connection, hdr: SMB1::Header, file_id: count, offset: count, data_len: count)
-	{
-	if ( ! c$smb_state?$current_file || ! c$smb_state$current_file?$uuid )
-		{
-		# TODO: figure out why the uuid isn't getting set sometimes.
-		return;
-		}
-
-	c$smb_state$pipe_map[file_id] = c$smb_state$current_file$uuid;
-	}
-
-event smb_pipe_bind_ack_response(c: connection, hdr: SMB1::Header)
-	{
-	if ( ! c$smb_state?$current_file || ! c$smb_state$current_file?$uuid )
-		{
-		# TODO: figure out why the uuid isn't getting set sometimes.
-		return;
-		}
-
-	c$smb_state$current_cmd$sub_command = "RPC_BIND_ACK";
-	c$smb_state$current_cmd$argument = SMB::rpc_uuids[c$smb_state$current_file$uuid];
-	}
-
-event smb_pipe_bind_request(c: connection, hdr: SMB1::Header, uuid: string, version: string)
-	{
-	if ( ! c$smb_state?$current_file || ! c$smb_state$current_file?$uuid )
-		{
-		# TODO: figure out why the current_file isn't getting set sometimes.
-		return;
-		}
-
-	c$smb_state$current_cmd$sub_command = "RPC_BIND";
-	c$smb_state$current_file$uuid = uuid;
-	c$smb_state$current_cmd$argument = fmt("%s v%s", SMB::rpc_uuids[uuid], version);
-	}
-
-event smb_pipe_request(c: connection, hdr: SMB1::Header, op_num: count)
-	{
-	if ( ! c$smb_state?$current_file )
-		{
-		# TODO: figure out why the current file isn't being set sometimes.
-		return;
-		}
-
-	local f = c$smb_state$current_file;
-	if ( ! f?$uuid )
-		{
-		# TODO: figure out why this is happening.
-		Reporter::conn_weird("smb_pipe_request_missing_uuid", c, "");
-		return;
-		}
-	local arg = fmt("%s: %s",
-	                SMB::rpc_uuids[f$uuid],
-	                SMB::rpc_sub_cmds[f$uuid][op_num]);
-
-	c$smb_state$current_cmd$argument = arg;
 	}

@@ -15,7 +15,7 @@ export {
 		id: string &log;
 		## Hash algorithm used to generate issuerNameHash and issuerKeyHash.
 		hashAlgorithm: string &log;
-		## Hash of the issuer's distingueshed name.
+		## Hash of the issuer's distinguished name.
 		issuerNameHash: string &log;
 		## Hash of the issuer's public key.
 		issuerKeyHash: string &log;
@@ -40,7 +40,7 @@ export {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(LOG, [$columns=Info, $ev=log_ocsp, $path="ocsp", $policy=log_policy]);
+	Log::create_stream(LOG, Log::Stream($columns=Info, $ev=log_ocsp, $path="ocsp", $policy=log_policy));
 	Files::register_for_mime_type(Files::ANALYZER_OCSP_REPLY, "application/ocsp-response");
 	}
 
@@ -52,9 +52,9 @@ event ocsp_response_certificate(f: fa_file, hashAlgorithm: string, issuerNameHas
 
 	if ( revokereason != "" )
 		wr$revokereason = revokereason;
-	if ( time_to_double(revoketime) != 0 )
+	if ( revoketime as double != 0 )
 		wr$revoketime = revoketime;
-	if ( time_to_double(nextUpdate) != 0 )
+	if ( nextUpdate as double != 0 )
 		wr$nextUpdate = nextUpdate;
 
 	Log::write(LOG, wr);

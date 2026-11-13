@@ -28,11 +28,11 @@ event Dir::monitor_ev(dir: string, last_files: set[string],
                       callback: function(fname: string),
                       poll_interval: interval)
 	{
-	when ( local result = Exec::run([$cmd=fmt("ls -1 %s/", safe_shell_quote(dir))]) )
+	when [dir, last_files, callback, poll_interval] ( local result = Exec::run(Exec::Command($cmd=fmt("ls -1 %s/", safe_shell_quote(dir)))) )
 		{
 		if ( result$exit_code != 0 )
 			{
-			Reporter::warning(fmt("Requested monitoring of non-existent directory (%s).", dir));
+			Reporter::warning(fmt("Requested monitoring of nonexistent directory (%s).", dir));
 			return;
 			}
 
@@ -61,5 +61,3 @@ function monitor(dir: string, callback: function(fname: string),
 	{
 	event Dir::monitor_ev(dir, set(), callback, poll_interval);
 	}
-
-

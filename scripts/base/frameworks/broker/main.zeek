@@ -3,7 +3,7 @@
 module Broker;
 
 export {
-	## Default port for Broker communication. Where not specified
+	## Default port for native Broker communication. Where not specified
 	## otherwise, this is the port to connect to and listen on.
 	const default_port = 9999/tcp &redef;
 
@@ -11,7 +11,7 @@ export {
 	## use already.  Use of the ZEEK_DEFAULT_LISTEN_RETRY environment variable
 	## (set as a number of seconds) will override this option and also
 	## any values given to :zeek:see:`Broker::listen`.
-	const default_listen_retry = 30sec &redef;
+	const default_listen_retry = 1sec &redef;
 
 	## Default address on which to listen.
 	##
@@ -23,7 +23,7 @@ export {
 	## ZEEK_DEFAULT_CONNECT_RETRY environment variable (set as number of
 	## seconds) will override this option and also any values given to
 	## :zeek:see:`Broker::peer`.
-	const default_connect_retry = 30sec &redef;
+	const default_connect_retry = 1sec &redef;
 
 	## If true, do not use SSL for network connections. By default, SSL will
 	## even be used if no certificates / CAs have been configured. In that case
@@ -56,11 +56,6 @@ export {
 	## all peers.
 	const ssl_keyfile = "" &redef;
 
-	## The number of buffered messages at the Broker/CAF layer after which
-	## a subscriber considers themselves congested (i.e. tune the congestion
-	## control mechanisms).
-	const congestion_queue_size = 200 &redef;
-
 	## The max number of log entries per log stream to batch together when
 	## sending log messages to a remote logger.
 	const log_batch_size = 400 &redef;
@@ -70,8 +65,24 @@ export {
 	const log_batch_interval = 1sec &redef;
 
 	## Max number of threads to use for Broker/CAF functionality.  The
-	## ZEEK_BROKER_MAX_THREADS environment variable overrides this setting.
+	## ``ZEEK_BROKER_MAX_THREADS`` environment variable overrides this setting.
 	const max_threads = 1 &redef;
+
+	## Max number of items we buffer at most per peer. What action to take when
+	## the buffer reaches its maximum size is determined by
+	## :zeek:see:`Broker::peer_overflow_policy`.
+	const peer_buffer_size = 8192 &redef;
+
+	## Configures how Broker responds to peers that cannot keep up with the
+	## incoming message rate. Available strategies:
+	## - disconnect: drop the connection to the unresponsive peer
+	## - drop_newest: replace the newest message in the buffer
+	## - drop_oldest: removed the olsted message from the buffer, then append
+	const peer_overflow_policy = "drop_oldest" &redef;
+
+	## How frequently Zeek resets some peering/client buffer statistics,
+	## such as ``max_queued_recently`` in :zeek:see:`BrokerPeeringStats`.
+	const buffer_stats_reset_interval = 1min &redef;
 
 	## The CAF scheduling policy to use.  Available options are "sharing" and
 	## "stealing".  The "sharing" policy uses a single, global work queue along
@@ -115,43 +126,17 @@ export {
 	## Forward all received messages to subscribing peers.
 	const forward_messages = F &redef;
 
+	## Whether to process Broker's IdentifierUpdate messages to update
+	## script-layer globals at runtime. You almost certainly want to use the
+	## configuration framework instead.
+	const enable_identifier_updates = F &redef;
+
 	## Whether calling :zeek:see:`Broker::peer` will register the Broker
 	## system as an I/O source that will block the process from shutting
 	## down.  For example, set this to false when you are reading pcaps,
-	## but also want to initaiate a Broker peering and still shutdown after
+	## but also want to initiate a Broker peering and still shutdown after
 	## done reading the pcap.
 	option peer_counts_as_iosource = T;
-
-	## Port for Broker's metric exporter. Setting this to a valid TCP port causes
-	## Broker to make metrics available to Prometheus scrapers via HTTP. Zeek
-	## overrides any value provided in zeek_init or earlier at startup if the
-	## environment variable BROKER_METRICS_PORT is defined.
-	const metrics_port = 0/unknown &redef;
-
-	## Frequency for publishing scraped metrics to the target topic. Zeek
-	## overrides any value provided in zeek_init or earlier at startup if the
-	## environment variable BROKER_METRICS_EXPORT_INTERVAL is defined.
-	option metrics_export_interval = 1 sec;
-
-	## Target topic for the metrics. Setting a non-empty string starts the
-	## periodic publishing of local metrics. Zeek overrides any value provided in
-	## zeek_init or earlier at startup if the environment variable
-	## BROKER_METRICS_EXPORT_TOPIC is defined.
-	option metrics_export_topic = "";
-
-	## ID for the metrics exporter. When setting a target topic for the
-	## exporter, Broker sets this option to the suffix of the new topic *unless*
-	## the ID is a non-empty string. Since setting a topic starts the periodic
-	## publishing of events, we recommend setting the ID always first or avoid
-	## setting it at all if the topic suffix serves as a good-enough ID. Zeek
-	## overrides any value provided in zeek_init or earlier at startup if the
-	## environment variable BROKER_METRICS_ENDPOINT_NAME is defined.
-	option metrics_export_endpoint_name = "";
-
-	## Selects prefixes from the local metrics. Only metrics with prefixes
-	## listed in this variable are included when publishing local metrics.
-	## Setting an empty vector selects *all* metrics.
-	option metrics_export_prefixes: vector of string = vector();
 
 	## The default topic prefix where logs will be published.  The log's stream
 	## id is appended when writing to a particular stream.
@@ -176,6 +161,28 @@ export {
 	##          will be sent.
 	const log_topic: function(id: Log::ID, path: string): string = default_log_topic &redef;
 
+	## The possible log event severity levels for Broker.
+	type LogSeverityLevel: enum {
+		## Fatal event, normal operation has most likely broken down.
+		LOG_CRITICAL,
+		## Unrecoverable event that imparts at least part of the system.
+		LOG_ERROR,
+		## Unexpected or conspicuous event that may still be recoverable.
+		LOG_WARNING,
+		## Noteworthy event during normal operation.
+		LOG_INFO,
+		## Information that might be relevant for a user to understand system behavior.
+		LOG_VERBOSE,
+		## An event that is relevant only for troubleshooting and debugging.
+		LOG_DEBUG,
+	};
+
+	## The log event severity level for the Broker log output.
+	const log_severity_level = LOG_WARNING &redef;
+
+	## Event severity level for also printing the Broker log output to stderr.
+	const log_stderr_severity_level = LOG_CRITICAL &redef;
+
 	type ErrorCode: enum {
 		## The unspecified default error code.
 		UNSPECIFIED = 1,
@@ -185,24 +192,26 @@ export {
 		PEER_INVALID = 3,
 		## Remote peer not listening.
 		PEER_UNAVAILABLE = 4,
+		## Remote peer disconnected during the handshake.
+		PEER_DISCONNECT_DURING_HANDSHAKE = 5,
 		## A peering request timed out.
-		PEER_TIMEOUT = 5,
+		PEER_TIMEOUT = 6,
 		## Master with given name already exists.
-		MASTER_EXISTS = 6,
+		MASTER_EXISTS = 7,
 		## Master with given name does not exist.
-		NO_SUCH_MASTER = 7,
+		NO_SUCH_MASTER = 8,
 		## The given data store key does not exist.
-		NO_SUCH_KEY = 8,
+		NO_SUCH_KEY = 9,
 		## The store operation timed out.
-		REQUEST_TIMEOUT = 9,
+		REQUEST_TIMEOUT = 10,
 		## The operation expected a different type than provided.
-		TYPE_CLASH = 10,
+		TYPE_CLASH = 11,
 		## The data value cannot be used to carry out the desired operation.
-		INVALID_DATA = 11,
+		INVALID_DATA = 12,
 		## The storage backend failed to execute the operation.
-		BACKEND_FAILURE = 12,
+		BACKEND_FAILURE = 13,
 		## The storage backend failed to execute the operation.
-		STALE_DATA = 13,
+		STALE_DATA = 14,
 		## Catch-all for a CAF-level problem.
 		CAF_ERROR = 100
 	};
@@ -240,6 +249,10 @@ export {
 	type PeerInfo: record {
 		peer: EndpointInfo;
 		status: PeerStatus;
+
+		## Whether the local node created the peering, as opposed to a
+		## remote establishing it by connecting to us.
+		is_outbound: bool;
 	};
 
 	type PeerInfos: vector of PeerInfo;
@@ -267,7 +280,7 @@ export {
 		val: Broker::Data;
 	};
 
-	## Listen for remote connections.
+	## Listen for remote connections using the native Broker protocol.
 	##
 	## a: an address string on which to accept connections, e.g.
 	##    "127.0.0.1".  An empty string refers to INADDR_ANY.
@@ -323,6 +336,16 @@ export {
 	## TODO: We do not have a function yet to terminate a connection.
 	global unpeer: function(a: string, p: port): bool;
 
+	## Whether the local node originally initiated the peering with the
+	## given endpoint.
+	##
+	## a: the address used in previous successful call to :zeek:see:`Broker::peer`.
+	##
+	## p: the port used in previous successful call to :zeek:see:`Broker::peer`.
+	##
+	## Returns:: True if this node initiated the peering.
+	global is_outbound_peering: function(a: string, p: port): bool;
+
 	## Get a list of all peer connections.
 	##
 	## Returns: a list of all peer connections.
@@ -332,6 +355,12 @@ export {
 	##
 	## Returns: a unique identifier for the local broker endpoint.
 	global node_id: function(): string;
+
+	## Obtain each peering's send-buffer statistics. The keys are Broker
+	## endpoint IDs.
+	##
+	## Returns: per-peering statistics.
+	global peering_stats: function(): table[string] of BrokerPeeringStats;
 
 	## Sends all pending log messages to remote peers.  This normally
 	## doesn't need to be used except for test cases that are time-sensitive.
@@ -381,29 +410,6 @@ export {
 	##
 	## Returns: true if a new event forwarding/subscription is now registered.
 	global forward: function(topic_prefix: string): bool;
-
-	## Automatically send an event to any interested peers whenever it is
-	## locally dispatched. (For example, using "event my_event(...);" in a
-	## script.)
-	##
-	## topic: a topic string associated with the event message.
-	##        Peers advertise interest by registering a subscription to some
-	##        prefix of this topic name.
-	##
-	## ev: a Zeek event value.
-	##
-	## Returns: true if automatic event sending is now enabled.
-	global auto_publish: function(topic: string, ev: any): bool;
-
-	## Stop automatically sending an event to peers upon local dispatch.
-	##
-	## topic: a topic originally given to :zeek:see:`Broker::auto_publish`.
-	##
-	## ev: an event originally given to :zeek:see:`Broker::auto_publish`.
-	##
-	## Returns: true if automatic events will not occur for the topic/event
-	##          pair.
-	global auto_unpublish: function(topic: string, ev: any): bool;
 }
 
 @load base/bif/comm.bif
@@ -417,53 +423,9 @@ event Broker::log_flush() &priority=10
 	schedule Broker::log_batch_interval { Broker::log_flush() };
 	}
 
-function update_metrics_export_interval(id: string, val: interval): interval
-	{
-	Broker::__set_metrics_export_interval(val);
-	return val;
-	}
-
-function update_metrics_export_topic(id: string, val: string): string
-	{
-	Broker::__set_metrics_export_topic(val);
-	return val;
-	}
-
-function update_metrics_export_endpoint_name(id: string, val: string): string
-	{
-	Broker::__set_metrics_export_endpoint_name(val);
-	return val;
-	}
-
-function update_metrics_export_prefixes(id: string, filter: vector of string): vector of string
-	{
-	Broker::__set_metrics_export_prefixes(filter);
-	return filter;
-	}
-
 event zeek_init()
 	{
 	schedule Broker::log_batch_interval { Broker::log_flush() };
-	# interval
-	update_metrics_export_interval("Broker::metrics_export_interval",
-	                               Broker::metrics_export_interval);
-	Option::set_change_handler("Broker::metrics_export_interval",
-	                           update_metrics_export_interval);
-	# topic
-	update_metrics_export_topic("Broker::metrics_export_topic",
-	                            Broker::metrics_export_topic);
-	Option::set_change_handler("Broker::metrics_export_topic",
-	                           update_metrics_export_topic);
-	# endpoint name
-	update_metrics_export_endpoint_name("Broker::metrics_export_endpoint_name",
-	                                    Broker::metrics_export_endpoint_name);
-	Option::set_change_handler("Broker::metrics_export_endpoint_name",
-	                           update_metrics_export_endpoint_name);
-	# prefixes
-	update_metrics_export_prefixes("Broker::metrics_export_prefixes",
-	                               Broker::metrics_export_prefixes);
-	Option::set_change_handler("Broker::metrics_export_prefixes",
-	                           update_metrics_export_prefixes);
 	}
 
 event retry_listen(a: string, p: port, retry: interval)
@@ -480,7 +442,7 @@ function listen(a: string, p: port, retry: interval): port
 		local e = getenv("ZEEK_DEFAULT_LISTEN_RETRY");
 
 		if ( e != "" )
-			retry = double_to_interval(to_double(e));
+			retry = (e as double) as interval;
 
 		if ( retry != 0secs )
 			schedule retry { retry_listen(a, p, retry) };
@@ -499,6 +461,11 @@ function unpeer(a: string, p: port): bool
 	return __unpeer(a, p);
 	}
 
+function is_outbound_peering(a: string, p: port): bool
+	{
+	return __is_outbound_peering(a, p);
+	}
+
 function peers(): vector of PeerInfo
 	{
 	return __peers();
@@ -507,6 +474,11 @@ function peers(): vector of PeerInfo
 function node_id(): string
 	{
 	return __node_id();
+	}
+
+function peering_stats(): table[string] of BrokerPeeringStats
+	{
+	return __peering_stats();
 	}
 
 function flush_logs(): count
@@ -532,14 +504,4 @@ function forward(topic_prefix: string): bool
 function unsubscribe(topic_prefix: string): bool
 	{
 	return __unsubscribe(topic_prefix);
-	}
-
-function auto_publish(topic: string, ev: any): bool
-	{
-	return __auto_publish(topic, ev);
-	}
-
-function auto_unpublish(topic: string, ev: any): bool
-	{
-	return __auto_unpublish(topic, ev);
 	}

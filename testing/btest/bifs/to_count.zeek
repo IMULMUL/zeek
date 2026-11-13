@@ -1,6 +1,6 @@
-#
-# @TEST-EXEC: zeek -b %INPUT >out
+# @TEST-EXEC: zeek -b %INPUT 1>out 2>err
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff-remove-abspath err
 
 event zeek_init()
 	{
@@ -19,17 +19,24 @@ event zeek_init()
 	print to_count("7");
 	print to_count("");
 	print to_count("-5");
+	# We automatically trim leading, but not trailing whitespace.
+	print to_count(" 205"); # Okay.
+	print to_count("206 "); # Error.
+	print to_count("10101100", 2);
+	print to_count("43", 8);
+	print to_count("C3", 16);
+	print to_count("0xC3", 16);
 	print to_count("not a count");
 
 	local e: port = 123/tcp;
 	print port_to_count(e);
 
-	local origString =        "9223372036854775808";
+	local origString = "9223372036854775808";
 	local directCount: count = 9223372036854775808;
 	local fromStringCount: count = to_count(origString);
 
 	if ( directCount == fromStringCount )
-	   print fmt("%s and %s are the same", directCount, fromStringCount);
+		print fmt("%s and %s are the same", directCount, fromStringCount);
 	else
-	   print fmt("%s and %s are not the same", directCount, fromStringCount);
+		print fmt("%s and %s are not the same", directCount, fromStringCount);
 	}

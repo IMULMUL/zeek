@@ -6,6 +6,10 @@
 @load base/files/x509
 @load base/frameworks/cluster
 
+@load base/frameworks/storage/async
+@load base/frameworks/storage/sync
+@load policy/frameworks/storage/backend/sqlite
+
 module Known;
 
 export {
@@ -33,31 +37,45 @@ export {
 	## Choices are: LOCAL_HOSTS, REMOTE_HOSTS, ALL_HOSTS, NO_HOSTS.
 	option cert_tracking = LOCAL_HOSTS;
 
-	## Toggles between different implementations of this script.
-	## When true, use a Broker data store, else use a regular Zeek set
-	## with keys uniformly distributed over proxy nodes in cluster
-	## operation.
-	const use_cert_store = T &redef;
+	## Use the storage framework to enable persistence of the stored
+	## certs between runs.
+	const enable_certs_persistence = F &redef;
 
 	type AddrCertHashPair: record {
 		host: addr;
 		hash: string;
 	};
 
-	## Holds the set of all known certificates.  Keys in the store are of
-	## type :zeek:type:`Known::AddrCertHashPair` and their associated value is
-	## always the boolean value of "true".
-	global cert_store: Cluster::StoreInfo;
+	## Storage configuration for storage framework stores
 
-	## The Broker topic name to use for :zeek:see:`Known::cert_store`.
-	const cert_store_name = "zeek/known/certs" &redef;
+	## This requires setting a configuration in local.zeek that sets the
+	## Known::enable_certs_persistence boolean to T, and optionally setting different
+	## values in the Known::cert_store_backend_options record.
 
-	## The expiry interval of new entries in :zeek:see:`Known::cert_store`.
+	## Backend to use for storing known certs data using the storage framework.
+	global cert_store_backend: opaque of Storage::BackendHandle;
+
+	## The name to use for :zeek:see:`Known::cert_store_backend`. This will be used
+	## by the backends to differentiate tables/keys. This should be alphanumeric so
+	## that it can be used as the table name for the storage framework.
+	const cert_store_prefix = "zeekknowncerts" &redef;
+
+	## The type of storage backend to open.
+	const cert_store_backend_type : Storage::Backend = Storage::STORAGE_BACKEND_SQLITE &redef;
+
+	## The options for the cert store. This should be redef'd in local.zeek to set
+	## connection information for the backend. The options default to a central
+	## persistent sqlite database.
+	const cert_store_backend_options : Storage::BackendOptions = [ $sqlite = [
+		$database_path=fmt("%s/known/certs.sqlite", Cluster::default_store_dir),
+		$table_name=Known::cert_store_prefix ]] &redef;
+
+	## The expiry interval of new entries in :zeek:see:`Known::cert_store_backend`.
 	## This also changes the interval at which certs get logged.
 	option cert_store_expiry = 1day;
 
 	## The timeout interval to use for operations against
-	## :zeek:see:`Known::cert_store`.
+	## :zeek:see:`Known::cert_store_backend`.
 	option cert_store_timeout = 15sec;
 
 	## The set of all known certificates to store for preventing duplicate
@@ -76,41 +94,42 @@ export {
 
 event zeek_init()
 	{
-	if ( ! Known::use_cert_store )
+	if ( ! Known::enable_certs_persistence )
 		return;
 
-	Known::cert_store = Cluster::create_store(Known::cert_store_name);
+	mkdir(fmt("%s/known", Cluster::default_store_dir));
+	local res = Storage::Sync::open_backend(Known::cert_store_backend_type, Known::cert_store_backend_options, Known::AddrCertHashPair, bool);
+	if ( res$code == Storage::SUCCESS )
+		Known::cert_store_backend = res$value;
+	else
+		Reporter::error(fmt("%s: Failed to open backend connection: %s", Known::cert_store_prefix, res$error_str));
 	}
 
 event Known::cert_found(info: CertsInfo, hash: string)
-    {
-	if ( ! Known::use_cert_store )
+	{
+	if ( ! Known::enable_certs_persistence )
 		return;
 
 	local key = AddrCertHashPair($host = info$host, $hash = hash);
 
-	when ( local r = Broker::put_unique(Known::cert_store$store, key,
-	                                    T, Known::cert_store_expiry) )
+	when [info, key] ( local put_res = Storage::Async::put(Known::cert_store_backend, [$key=key, $value=T, $overwrite=F,
+	                                                    $expire_time=Known::cert_store_expiry]) )
 		{
-		if ( r$status == Broker::SUCCESS )
-			{
-			if ( r$result as bool )
-				Log::write(Known::CERTS_LOG, info);
-			}
-		else
-			Reporter::error(fmt("%s: data store put_unique failure",
-			                    Known::cert_store_name));
+		if ( put_res$code == Storage::SUCCESS )
+			Log::write(Known::CERTS_LOG, info);
+		else if ( put_res$code != Storage::KEY_EXISTS )
+			Reporter::error(fmt("%s: storage backend failure: %s",
+			                    Known::cert_store_prefix, put_res$error_str));
 		}
 	timeout Known::cert_store_timeout
 		{
-		# Can't really tell if master store ended up inserting a key.
 		Log::write(Known::CERTS_LOG, info);
 		}
-    }
+	}
 
 event known_cert_add(info: CertsInfo, hash: string)
 	{
-	if ( Known::use_cert_store )
+	if ( Known::enable_certs_persistence )
 		return;
 
 	if ( [info$host, hash] in Known::certs )
@@ -126,7 +145,7 @@ event known_cert_add(info: CertsInfo, hash: string)
 
 event Known::cert_found(info: CertsInfo, hash: string)
 	{
-	if ( Known::use_cert_store )
+	if ( Known::enable_certs_persistence )
 		return;
 
 	if ( [info$host, hash] in Known::certs )
@@ -139,26 +158,26 @@ event Known::cert_found(info: CertsInfo, hash: string)
 
 event Cluster::node_up(name: string, id: string)
 	{
-	if ( Known::use_cert_store )
+	if ( Known::enable_certs_persistence )
 		return;
 
 	if ( Cluster::local_node_type() != Cluster::WORKER )
 		return;
 
 	# Drop local suppression cache on workers to force HRW key repartitioning.
-	Known::certs = table();
+	clear_table(Known::certs);
 	}
 
 event Cluster::node_down(name: string, id: string)
 	{
-	if ( Known::use_cert_store )
+	if ( Known::enable_certs_persistence )
 		return;
 
 	if ( Cluster::local_node_type() != Cluster::WORKER )
 		return;
 
 	# Drop local suppression cache on workers to force HRW key repartitioning.
-	Known::certs = table();
+	clear_table(Known::certs);
 	}
 
 event ssl_established(c: connection) &priority=3
@@ -197,5 +216,5 @@ event ssl_established(c: connection) &priority=3
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Known::CERTS_LOG, [$columns=CertsInfo, $ev=log_known_certs, $path="known_certs", $policy=log_policy_certs]);
+	Log::create_stream(Known::CERTS_LOG, Log::Stream($columns=CertsInfo, $ev=log_known_certs, $path="known_certs", $policy=log_policy_certs));
 	}

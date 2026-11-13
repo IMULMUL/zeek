@@ -48,6 +48,19 @@ export {
 	## This event is generated every time a register is seen to be different
 	## than it was previously seen to be.
 	global changed_register: event(c: connection, register: count, old_val: count, new_val: count, delta: interval);
+
+	## The maximum number of device registers stored in the device_registers table. If
+	## this limit is exceeded, a random device will be evicted from the table and a
+	## ``modbus_max_device_registers_exceeded`` weird will be reported. Setting this
+	## to zero disables the limit.
+	const max_device_registers: count = 10000 &redef;
+
+	## The maximum number of slaves per device register stored in the device_registers
+	## table. If this limit is exceeded, a random device will be evicted from the
+	## table and a ``modbus_max_slave_registers_exceeded`` weird will be
+	## reported. Setting this to zero disables the limit.
+	const max_slave_registers: count = 10000 &redef;
+
 }
 
 redef record Modbus::Info += {
@@ -56,7 +69,7 @@ redef record Modbus::Info += {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Modbus::REGISTER_CHANGE_LOG, [$columns=MemmapInfo, $path="modbus_register_change", $policy=log_policy_register_change]);
+	Log::create_stream(Modbus::REGISTER_CHANGE_LOG, Log::Stream($columns=MemmapInfo, $path="modbus_register_change", $policy=log_policy_register_change));
 	}
 
 event modbus_read_holding_registers_request(c: connection, headers: ModbusHeaders, start_address: count, quantity: count)
@@ -72,7 +85,23 @@ event modbus_read_holding_registers_response(c: connection, headers: ModbusHeade
 		return;
 
 	if ( slave !in device_registers )
+		{
+		if ( max_device_registers > 0 && |device_registers| >= max_device_registers )
+			{
+			Reporter::net_weird("modbus_max_device_registers_exceeded", fmt("%d", max_device_registers));
+
+			local device_to_delete: addr;
+			for ( device_key, _ in device_registers )
+				{
+				device_to_delete = device_key;
+				break;
+				}
+
+			delete device_registers[device_to_delete];
+			}
+
 		device_registers[slave] = table();
+		}
 
 	local slave_regs = device_registers[slave];
 	for ( i in registers )
@@ -92,7 +121,21 @@ event modbus_read_holding_registers_response(c: connection, headers: ModbusHeade
 			}
 		else
 			{
-			local tmp_reg: RegisterValue = [$last_set=network_time(), $value=registers[i]];
+			if ( max_slave_registers > 0 && |slave_regs| > max_slave_registers )
+				{
+				Reporter::limit_reached_weird("modbus_max_slave_registers_exceeded", c, max_device_registers);
+
+				local slave_to_delete: count;
+				for ( slave_key, _ in slave_regs )
+					{
+					slave_to_delete = slave_key;
+					break;
+					}
+
+				delete slave_regs[slave_to_delete];
+				}
+
+			local tmp_reg = RegisterValue($last_set=network_time(), $value=registers[i]);
 			slave_regs[c$modbus$track_address] = tmp_reg;
 			}
 
@@ -102,7 +145,7 @@ event modbus_read_holding_registers_response(c: connection, headers: ModbusHeade
 
 event Modbus::changed_register(c: connection, register: count, old_val: count, new_val: count, delta: interval)
 	{
-	local rec: MemmapInfo = [$ts=network_time(), $uid=c$uid, $id=c$id,
-	                         $register=register, $old_val=old_val, $new_val=new_val, $delta=delta];
+	local rec = MemmapInfo($ts=network_time(), $uid=c$uid, $id=c$id,
+	                       $register=register, $old_val=old_val, $new_val=new_val, $delta=delta);
 	Log::write(REGISTER_CHANGE_LOG, rec);
 	}

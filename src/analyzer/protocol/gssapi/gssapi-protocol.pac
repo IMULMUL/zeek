@@ -1,29 +1,56 @@
+enum GSSAPI_Token_Type {
+	GSSAPI_SPNEGO_INIT = 0,
+	GSSAPI_SPNEGO_RESP = 1,
+	GSSAPI_KRB5        = 2,
+};
 
-type GSSAPI_NEG_TOKEN(is_orig: bool) = record {
+type GSSAPI_SELECT(is_orig: bool) = record {
 	wrapper  : ASN1EncodingMeta;
+	token: case tok_id of {
+		0x0404 -> mic_blob: bytestring &restofdata;
+		0x0504 -> wrap_blob: bytestring &restofdata;
+		default -> neg_token: GSSAPI_NEG_TOKEN(is_orig, is_init);
+	} &requires(is_init) &requires(tok_id);
+} &let {
+	is_init: bool = wrapper.tag == 0x60;
+	tok_id: uint32 = (wrapper.tag << 8) | wrapper.len;
+} &byteorder=littleendian;
+
+type GSSAPI_NEG_TOKEN(is_orig: bool, is_init: bool) = record {
 	have_oid : case is_init of {
 		true  -> oid    : ASN1Encoding;
 		false -> no_oid : empty;
 	};
-	have_init_wrapper : case is_init of {
-		true  -> init_wrapper    : ASN1EncodingMeta;
-		false -> no_init_wrapper : empty;
-	};
-	msg_type : case is_init of {
-		true  -> init : GSSAPI_NEG_TOKEN_INIT;
-		false -> resp : GSSAPI_NEG_TOKEN_RESP;
+	have_init_wrapper : case token_type of {
+		GSSAPI_SPNEGO_INIT -> init_wrapper    : ASN1EncodingMeta;
+		default            -> no_init_wrapper : empty;
+	} &requires(token_type);
+	msg_type : case token_type of {
+		GSSAPI_SPNEGO_INIT -> init : GSSAPI_NEG_TOKEN_INIT;
+		GSSAPI_SPNEGO_RESP -> resp : GSSAPI_NEG_TOKEN_RESP;
+		GSSAPI_KRB5        -> krb5 : GSSAPI_KRB5_TOKEN;
 	};
 } &let {
-	is_init: bool = wrapper.tag == 0x60;
+	# The OID selects the inner token: SPNEGO or Kerberos 5 (RFC 2743 section 3.1).
+	token_type: uint8 = ! is_init ? GSSAPI_SPNEGO_RESP :
+		($context.connection.is_krb5_oid(oid.content) ? GSSAPI_KRB5 : GSSAPI_SPNEGO_INIT);
 } &byteorder=littleendian;
+
+# Krb 5 context establishment token (RFC 4121 section 4.1)
+type GSSAPI_KRB5_TOKEN = record {
+	token_id : uint16 &byteorder=bigendian;
+	blob     : bytestring &restofdata;
+};
 
 type GSSAPI_NEG_TOKEN_INIT = record {
 	seq_meta : ASN1EncodingMeta;
-	args     : GSSAPI_NEG_TOKEN_INIT_Arg[];
+	args     : GSSAPI_NEG_TOKEN_INIT_Arg[] &length=seq_meta.length &transient &requires(reset_neg_token_args);
+} &let {
+    reset_neg_token_args: bool = $context.connection.reset_neg_token_args();
 };
 
 type GSSAPI_NEG_TOKEN_INIT_Arg = record {
-	seq_meta : ASN1EncodingMeta;
+	seq_meta : ASN1EncodingMeta &enforce($context.connection.validate_neg_token_arg(seq_meta.index));
 	args     : GSSAPI_NEG_TOKEN_INIT_Arg_Data(seq_meta.index) &length=seq_meta.length;
 };
 
@@ -36,11 +63,13 @@ type GSSAPI_NEG_TOKEN_INIT_Arg_Data(index: uint8) = case index of {
 
 type GSSAPI_NEG_TOKEN_RESP = record {
 	seq_meta : ASN1EncodingMeta;
-	args     : GSSAPI_NEG_TOKEN_RESP_Arg[];
+	args     : GSSAPI_NEG_TOKEN_RESP_Arg[] &length=seq_meta.length &transient &requires(reset_neg_token_args);
+} &let {
+    reset_neg_token_args: bool = $context.connection.reset_neg_token_args();
 };
 
 type GSSAPI_NEG_TOKEN_RESP_Arg = record {
-	seq_meta : ASN1EncodingMeta;
+	seq_meta : ASN1EncodingMeta &enforce($context.connection.validate_neg_token_arg(seq_meta.index));
 	args     : case seq_meta.index of {
 		0       -> neg_state      : ASN1Integer;
 		1       -> supported_mech : ASN1Encoding;
@@ -54,19 +83,59 @@ type GSSAPI_NEG_TOKEN_MECH_TOKEN(is_orig: bool) = record {
 	token : bytestring &length=meta.length;
 } &let {
 	ntlm : bytestring withinput token &if($context.connection.is_first_byte(token, 0x4E)) &restofdata;
-	krb : KRB_BLOB withinput token &if($context.connection.is_first_byte(token, 0x60)) &restofdata;
+	krb_with_oid : KRB_OID_BLOB withinput token &if($context.connection.is_first_byte(token, 0x60)) &restofdata;
+	krb_blob : bytestring withinput token &if(context.connection.is_first_byte(token, 0x6E) || context.connection.is_first_byte(token, 0x6F)) &restofdata;
 };
 
-type KRB_BLOB = record {
+type KRB_OID_BLOB = record {
 	meta     : ASN1EncodingMeta;
 	oid      : ASN1OctetString;
 	token_id : uint16 &byteorder=littleendian;
 	blob     : bytestring &restofdata;
 };
 
+%extern{
+	#include <string.h>
+	#include <array>
+%}
+
 refine connection GSSAPI_Conn += {
+	%member{
+        std::array<bool, 4> neg_token_args;
+	%}
+
+	%init{
+        memset(neg_token_args.data(), 0, sizeof(neg_token_args));
+	%}
+
+	function reset_neg_token_args(): bool
+		%{
+        memset(neg_token_args.data(), 0, sizeof(neg_token_args));
+		return true;
+		%}
+
+	function validate_neg_token_arg(index: uint8): bool
+		%{
+		if ( index > 3 || neg_token_args[index] )
+			throw binpac::Exception("invalid duplicate or unknown SPNEGO argument");
+
+		neg_token_args[index] = true;
+		return true;
+		%}
+
 	function is_first_byte(token: bytestring, byte: uint8): bool
 		%{
-		return token[0] == byte;
+		return token.length() > 0 && token[0] == byte;
+		%}
+
+	function is_krb5_oid(oid: bytestring): bool
+		%{
+		// 1.2.840.113554.1.2.2 (RFC 1964 section 1) and 1.2.840.48018.1.2.2 (MS Kerberos 5)
+		static const uint8 krb5[] = { 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02 };
+		static const uint8 ms_krb5[] = { 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02 };
+
+		return oid.length() == sizeof(krb5) &&
+		       ( memcmp(oid.begin(), krb5, sizeof(krb5)) == 0 ||
+		         memcmp(oid.begin(), ms_krb5, sizeof(ms_krb5)) == 0 );
 		%}
 };

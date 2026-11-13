@@ -1,3 +1,5 @@
+# @TEST-GROUP: broker
+#
 # @TEST-PORT: BROKER_PORT
 #
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
@@ -7,7 +9,7 @@
 # @TEST-EXEC: btest-diff recv/recv.out
 # @TEST-EXEC: btest-diff send/send.out
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -53,10 +55,10 @@ event pong(msg: string, n: any)
     send_event();
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -102,10 +104,4 @@ event ping(msg: string, n: any)
 			# internals should not wrap n into another Broker::Data record
 			Broker::publish("zeek/event/my_topic", pong, msg, n);
         }
-
-event zeek_done()
-	{
-	print get_broker_stats();
-	}
-
-@TEST-END-FILE
+# @TEST-END-FILE

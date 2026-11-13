@@ -47,8 +47,8 @@ function describe_file(f: fa_file): string
 	# we do not know when this function is called (hence, if the data structures
 	# are already populated).
 	#
-	# Just return a bit of our connection information and hope that that is good enough.
-	for ( cid, c in f$conns )
+	# Just return a bit of our connection information and hope that is good enough.
+	for ( _, c in f$conns )
 		{
 		if ( c?$krb )
 			{
@@ -64,12 +64,12 @@ function describe_file(f: fa_file): string
 event zeek_init() &priority=5
 	{
 	Files::register_protocol(Analyzer::ANALYZER_KRB_TCP,
-	                         [$get_file_handle = KRB::get_file_handle,
-	                          $describe        = KRB::describe_file]);
+	                         Files::ProtoRegistration($get_file_handle = KRB::get_file_handle,
+	                                                  $describe        = KRB::describe_file));
 
 	Files::register_protocol(Analyzer::ANALYZER_KRB,
-	                         [$get_file_handle = KRB::get_file_handle,
-	                          $describe        = KRB::describe_file]);
+	                         Files::ProtoRegistration($get_file_handle = KRB::get_file_handle,
+	                                                  $describe        = KRB::describe_file));
 	}
 
 event file_over_new_connection(f: fa_file, c: connection, is_orig: bool) &priority=5

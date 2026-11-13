@@ -1,5 +1,5 @@
 # @TEST-EXEC: zeek -b %INPUT >output 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff output
+# @TEST-EXEC: btest-diff-remove-abspath output
 
 type X: record  {
     a: addr;
@@ -41,5 +41,3 @@ event zeek_init()
 	cast_to_X(x, [$a=1.2.3.4, $b=1947/tcp]);
 	cast_to_X(x, [$a=2.3.4.5, $b=1947/tcp]);
 	}
-
-

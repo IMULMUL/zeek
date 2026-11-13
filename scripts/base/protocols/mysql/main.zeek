@@ -8,6 +8,9 @@ module MySQL;
 export {
 	redef enum Log::ID += { mysql::LOG };
 
+	## Well-known ports for MySQL.
+	const ports = { 1434/tcp, 3306/tcp } &redef;
+
 	global log_policy: Log::PolicyHook;
 
 	type Info: record {
@@ -41,11 +44,9 @@ redef record connection += {
 	mysql: Info &optional;
 };
 
-const ports = { 1434/tcp, 3306/tcp };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(mysql::LOG, [$columns=Info, $ev=log_mysql, $path="mysql", $policy=log_policy]);
+	Log::create_stream(mysql::LOG, Log::Stream($columns=Info, $ev=log_mysql, $path="mysql", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_MYSQL, ports);
 	}
 
@@ -84,6 +85,11 @@ event mysql_command_request(c: connection, command: count, arg: string) &priorit
 	Conn::register_removal_hook(c, finalize_mysql);
 	}
 
+event mysql_change_user(c: connection, username: string) &priority=5
+	{
+	c$mysql$arg = username;
+	}
+
 event mysql_command_request(c: connection, command: count, arg: string) &priority=-5
 	{
 	if ( c?$mysql && c$mysql?$cmd && c$mysql$cmd == "quit" )
@@ -107,6 +113,25 @@ event mysql_error(c: connection, code: count, msg: string) &priority=-5
 	{
 	if ( c?$mysql )
 		{
+		Log::write(mysql::LOG, c$mysql);
+		delete c$mysql;
+		}
+	}
+
+event mysql_eof(c: connection, is_intermediate: bool) &priority=-5
+	{
+	if ( is_intermediate )
+		return;
+
+	if ( c?$mysql )
+		{
+		# We don't have more information, so just
+		# place what mysql_ok() would've done.
+		if ( ! c$mysql?$success )
+			c$mysql$success = T;
+		if ( ! c$mysql?$rows )
+			c$mysql$rows = 0;
+
 		Log::write(mysql::LOG, c$mysql);
 		delete c$mysql;
 		}

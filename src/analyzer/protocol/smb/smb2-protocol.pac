@@ -1,5 +1,5 @@
 # Documentation for SMB2 protocol from here:
-#     http://msdn.microsoft.com/en-us/library/cc246497(v=PROT.13).aspx
+#     https://msdn.microsoft.com/en-us/library/cc246497(v=PROT.13).aspx
 
 %header{
 zeek::RecordValPtr BuildSMB2HeaderVal(SMB2_Header* hdr);
@@ -166,6 +166,12 @@ type SMB2_PDU(is_orig: bool) = record {
 		true  -> err : SMB2_error_response(header);
 		false -> msg : SMB2_Message(header, is_orig);
 	};
+    pad        : case header.next_command of {
+        0 ->       none: empty;
+        default -> chain_pad: bytestring &length = header.next_command - header.head_length - @sizeof(message);
+    };
+} &let {
+    end_of_chain: bool = header.next_command == 0;
 };
 
 type SMB2_Message(header: SMB2_Header, is_orig: bool) = case is_orig of {
@@ -230,6 +236,16 @@ refine connection SMB_Conn += {
 		%{
 		if ( is_orig )
 			{
+			if ( zeek::BifConst::SMB::max_pending_messages > 0 &&
+			     smb2_request_tree_id.size() >= zeek::BifConst::SMB::max_pending_messages )
+				{
+				if ( smb2_discarded_messages_state )
+					zeek::BifEvent::enqueue_smb2_discarded_messages_state(zeek_analyzer(), zeek_analyzer()->Conn(),
+					                                                     zeek::make_intrusive<zeek::StringVal>("tree"));
+
+				smb2_request_tree_id.clear();
+				}
+
 			// Store the tree_id
 			smb2_request_tree_id[${h.message_id}] = ${h.tree_id};
 			}
@@ -397,7 +413,7 @@ type SMB2_error_response(header: SMB2_Header) = record {
 	byte_count        : uint32;
 	# This is implemented incorrectly and is disabled for now.
 	#error_data        : SMB2_error_data(header, byte_count);
-	stuff : bytestring &restofdata &transient;
+	stuff : bytestring &length=byte_count &transient;
 } &byteorder = littleendian;
 
 type SMB2_logoff_request(header: SMB2_Header) = record {

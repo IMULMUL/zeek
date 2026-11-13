@@ -1,0 +1,26 @@
+# @TEST-DOC: Locals work with the blank identifier, but can not be referenced.
+
+# @TEST-EXEC: zeek -b %INPUT
+# @TEST-EXEC: btest-diff-remove-abspath .stderr
+event zeek_init()
+	{
+	local _ = "1";
+	}
+
+event zeek_init()
+	{
+	local _: string = "1";
+	local _: count = 1;
+	}
+
+event zeek_init()
+	{
+	local _: string = "1";
+	const _: count = 1;
+	}
+
+event zeek_init()
+	{
+	const _: string = "1";
+	const _: count = 1;
+	}

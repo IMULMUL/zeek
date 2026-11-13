@@ -9,6 +9,10 @@
 @load base/utils/directions-and-hosts
 @load base/frameworks/cluster
 
+@load base/frameworks/storage/async
+@load base/frameworks/storage/sync
+@load policy/frameworks/storage/backend/sqlite
+
 module Known;
 
 export {
@@ -33,11 +37,9 @@ export {
 		service:        set[string]     &log;
 	};
 
-	## Toggles between different implementations of this script.
-	## When true, use a Broker data store, else use a regular Zeek set
-	## with keys uniformly distributed over proxy nodes in cluster
-	## operation.
-	const use_service_store = T &redef;
+	## Use the storage framework to enable persistence of the stored
+	## services between runs.
+	const enable_services_persistence = F &redef;
 
 	## Require UDP server to respond before considering it an "active service".
 	option service_udp_requires_response = T;
@@ -52,20 +54,36 @@ export {
 		serv: string;
 	};
 
-	## Holds the set of all known services.  Keys in the store are
-	## :zeek:type:`Known::AddrPortServTriplet` and their associated value is
-	## always the boolean value of "true".
-	global service_store: Cluster::StoreInfo;
+	## Storage configuration for storage framework stores
 
-	## The Broker topic name to use for :zeek:see:`Known::service_store`.
-	const service_store_name = "zeek/known/services" &redef;
+	## This requires setting a configuration in local.zeek that sets the
+	## Known::enable_services_persistence boolean to T, and optionally setting different values
+	## in the Known::service_store_backend_options record.
 
-	## The expiry interval of new entries in :zeek:see:`Known::service_store`.
+	## Backend to use for storing known services data using the storage framework.
+	global service_store_backend: opaque of Storage::BackendHandle;
+
+	## The name to use for :zeek:see:`Known::service_store_backend`. This will be used
+	## by the backends to differentiate tables/keys. This should be alphanumeric so
+	## that it can be used as the table name for the storage framework.
+	const service_store_prefix = "zeekknownservices" &redef;
+
+	## The type of storage backend to open.
+	const service_store_backend_type : Storage::Backend = Storage::STORAGE_BACKEND_SQLITE &redef;
+
+	## The options for the service store. This should be redef'd in local.zeek to set
+	## connection information for the backend. The options default to a central
+	## persistent sqlite database.
+	const service_store_backend_options : Storage::BackendOptions = [ $sqlite = [
+		$database_path=fmt("%s/known/services.sqlite", Cluster::default_store_dir),
+		$table_name=Known::service_store_prefix ]] &redef;
+
+	## The expiry interval of new entries in :zeek:see:`Known::service_store_backend`.
 	## This also changes the interval at which services get logged.
 	const service_store_expiry = 1day &redef;
 
 	## The timeout interval to use for operations against
-	## :zeek:see:`Known::service_store`.
+	## :zeek:see:`Known::service_store_backend`.
 	option service_store_timeout = 15sec;
 
 	## Tracks the set of daily-detected services for preventing the logging
@@ -106,15 +124,20 @@ function check(info: ServicesInfo) : bool
 
 event zeek_init()
 	{
-	if ( ! Known::use_service_store )
+	if ( ! Known::enable_services_persistence )
 		return;
 
-	Known::service_store = Cluster::create_store(Known::service_store_name);
+	mkdir(fmt("%s/known", Cluster::default_store_dir));
+	local res = Storage::Sync::open_backend(Known::service_store_backend_type, Known::service_store_backend_options, Known::AddrPortServTriplet, bool);
+	if ( res$code == Storage::SUCCESS )
+		Known::service_store_backend = res$value;
+	else
+		Reporter::error(fmt("%s: Failed to open backend connection: %s", Known::service_store_prefix, res$error_str));
 	}
 
 event service_info_commit(info: ServicesInfo)
 	{
-	if ( ! Known::use_service_store )
+	if ( ! Known::enable_services_persistence )
 		return;
 
 	local tempservs = info$service;
@@ -123,19 +146,17 @@ event service_info_commit(info: ServicesInfo)
 		{
 		local key = AddrPortServTriplet($host = info$host, $p = info$port_num, $serv = s);
 
-		when ( local r = Broker::put_unique(Known::service_store$store, key,
-		                                    T, Known::service_store_expiry) )
+		when [info, s, key] ( local put_res = Storage::Async::put(Known::service_store_backend, [$key=key, $value=T, $overwrite=F,
+		                                                    $expire_time=Known::service_store_expiry]) )
 			{
-			if ( r$status == Broker::SUCCESS )
+			if ( put_res$code == Storage::SUCCESS )
 				{
-				if ( r$result as bool ) {
-					info$service = set(s);	# log one service at the time if multiservice
-					Log::write(Known::SERVICES_LOG, info);
-					}
+				info$service = set(s);	# log one service at the time if multiservice
+				Log::write(Known::SERVICES_LOG, info);
 				}
-			else
-				Reporter::error(fmt("%s: data store put_unique failure",
-				                    Known::service_store_name));
+			else if ( put_res$code != Storage::KEY_EXISTS )
+				Reporter::error(fmt("%s: storage backend failure: %s",
+				                    Known::service_store_prefix, put_res$error_str));
 			}
 		timeout Known::service_store_timeout
 			{
@@ -146,7 +167,7 @@ event service_info_commit(info: ServicesInfo)
 
 event known_service_add(info: ServicesInfo)
 	{
-	if ( Known::use_service_store )
+	if ( Known::enable_services_persistence )
 		return;
 
 	if ( check(info) )
@@ -155,7 +176,7 @@ event known_service_add(info: ServicesInfo)
 	if ( [info$host, info$port_num] !in Known::services )
 		Known::services[info$host, info$port_num] = set();
 
-	 # service to log can be a subset of info$service if some were already seen
+	# service to log can be a subset of info$service if some were already seen
 	local info_to_log: ServicesInfo;
 	info_to_log$ts = info$ts;
 	info_to_log$host = info$host;
@@ -172,39 +193,38 @@ event known_service_add(info: ServicesInfo)
 			}
 		}
 
-	@if ( ! Cluster::is_enabled() ||
-	      Cluster::local_node_type() == Cluster::PROXY )
-		Log::write(Known::SERVICES_LOG, info_to_log);
+	@if ( ! Cluster::is_enabled() || Cluster::local_node_type() == Cluster::PROXY )
+	Log::write(Known::SERVICES_LOG, info_to_log);
 	@endif
 	}
 
 event Cluster::node_up(name: string, id: string)
 	{
-	if ( Known::use_service_store )
+	if ( Known::enable_services_persistence )
 		return;
 
 	if ( Cluster::local_node_type() != Cluster::WORKER )
 		return;
 
 	# Drop local suppression cache on workers to force HRW key repartitioning.
-	Known::services = table();
+	clear_table(Known::services);
 	}
 
 event Cluster::node_down(name: string, id: string)
 	{
-	if ( Known::use_service_store )
+	if ( Known::enable_services_persistence )
 		return;
 
 	if ( Cluster::local_node_type() != Cluster::WORKER )
 		return;
 
 	# Drop local suppression cache on workers to force HRW key repartitioning.
-	Known::services = table();
+	clear_table(Known::services);
 	}
 
 event service_info_commit(info: ServicesInfo)
 	{
-	if ( Known::use_service_store )
+	if ( Known::enable_services_persistence )
 		return;
 
 	if ( check(info) )
@@ -293,9 +313,10 @@ function known_services_done(c: connection)
 		event service_info_commit(info);
 	}
 
-event analyzer_confirmation(c: connection, atype: AllAnalyzers::Tag, aid: count) &priority=-5
+event analyzer_confirmation_info(atype: AllAnalyzers::Tag, info: AnalyzerConfirmationInfo) &priority=-5
 	{
-	known_services_done(c);
+	if ( info?$c )
+		known_services_done(info$c);
 	}
 
 # Handle the connection ending in case no protocol was ever detected.
@@ -309,8 +330,8 @@ event connection_state_remove(c: connection) &priority=-5
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Known::SERVICES_LOG, [$columns=ServicesInfo,
-	                                         $ev=log_known_services,
-	                                         $path="known_services",
-						 $policy=log_policy_services]);
+	Log::create_stream(Known::SERVICES_LOG, Log::Stream($columns=ServicesInfo,
+	                                                    $ev=log_known_services,
+	                                                    $path="known_services",
+	                                                    $policy=log_policy_services));
 	}

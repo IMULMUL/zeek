@@ -1,3 +1,7 @@
+# Can't use this test for -O gen-C++ because of multiple simultaneous
+# Zeek runs.
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+#
 # @TEST-PORT: BROKER_PORT
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
 # @TEST-EXEC: btest-bg-run send "zeek -b -r $TRACES/tls/ecdhe.pcap --pseudo-realtime ../send.zeek >send.out"
@@ -6,7 +10,7 @@
 # @TEST-EXEC: btest-diff recv/recv.out
 # @TEST-EXEC: btest-diff send/send.out
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 @load base/frameworks/netcontrol
 @load base/frameworks/broker
@@ -60,8 +64,8 @@ event connection_established(c: connection)
 	local id = c$id;
 
 	local flow1 = NetControl::Flow(
-		$src_h=addr_to_subnet(c$id$orig_h),
-		$dst_h=addr_to_subnet(c$id$resp_h)
+		$src_h=c$id$orig_h as subnet,
+		$dst_h=c$id$resp_h as subnet
 	);
 	local e1: NetControl::Entity = [$ty=NetControl::FLOW, $flow=flow1];
 	local r1: NetControl::Rule = [$ty=NetControl::DROP, $target=NetControl::FORWARD, $entity=e1, $expire=10hrs, $location="here"];
@@ -88,9 +92,9 @@ event NetControl::rule_removed(r: NetControl::Rule, p: NetControl::PluginState, 
 	print "rule removed", r$entity, r$ty;
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 @load base/frameworks/netcontrol
 @load base/frameworks/broker
@@ -132,5 +136,4 @@ event NetControl::acld_remove_rule(id: count, r: NetControl::Rule, ar: NetContro
 		}
 	}
 
-@TEST-END-FILE
-
+# @TEST-END-FILE

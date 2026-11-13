@@ -64,10 +64,18 @@ export {
 		## to are tracked here.
 		pending_commands:   PendingCmds;
 
+		## Sequence number of previous command.
+		command_seq:        count &default=0;
+
 		## Indicates if the session is in active or passive mode.
 		passive:            bool &default=F;
 
 		## Determines if the password will be captured for this request.
 		capture_password:   bool &default=default_capture_password;
+		## Used to detect sessions that would otherwise produce no ftp.log entries.
+		logged_command_seen: bool &default=F;
+
+		## File unique ID.
+		fuid: string &optional &log;
 	};
 }

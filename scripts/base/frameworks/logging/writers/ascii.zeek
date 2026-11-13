@@ -7,9 +7,9 @@
 ##! names is printed out as meta information, with no "# fields" prepended; no
 ##! other meta data gets included in that mode.  Example filter using this::
 ##!
-##!    local f: Log::Filter = [$name = "my-filter",
-##!                            $writer = Log::WRITER_ASCII,
-##!                            $config = table(["tsv"] = "T")];
+##!    local f = Log::Filter($name = "my-filter",
+##!                          $writer = Log::WRITER_ASCII,
+##!                          $config = table(["tsv"] = "T"));
 ##!
 
 module LogAscii;
@@ -54,11 +54,6 @@ export {
 	## This option is also available as a per-filter ``$config`` option.
 	const gzip_file_extension = "gz" &redef;
 
-	## Define the default logging directory. If empty, logs are written
-	## to the current working directory.
-	##
-	const logdir = "" &redef;
-
 	## Format of timestamps when writing out JSON. By default, the JSON
 	## formatter will use double values for timestamps which represent the
 	## number of seconds from the UNIX epoch.
@@ -70,6 +65,10 @@ export {
 	## JSON formatter skips key and val when the field is absent. Setting
 	## the following field to T includes the key, with a null value.
 	const json_include_unset_fields = F &redef;
+
+	## How to escape non-printable / non-UTF8 sequences in strings
+	## when :zeek:see:`LogAscii::use_json` is set.
+	const json_string_escape_policy = JSON::STRING_ESCAPE_POLICY_HEX &redef;
 
 	## If true, include lines with log meta information such as column names
 	## with types, the values of ASCII logging options that are in use, and

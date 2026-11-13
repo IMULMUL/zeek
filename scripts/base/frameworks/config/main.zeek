@@ -15,7 +15,7 @@ export {
 
 	## Represents the data in config.log.
 	type Info: record {
-		## Timestamp at which the configuration change occured.
+		## Timestamp at which the configuration change occurred.
 		ts: time &log;
 		## ID of the value that was changed.
 		id: string &log;
@@ -57,16 +57,10 @@ global option_cache: table[string] of OptionCacheValue;
 
 global Config::cluster_set_option: event(ID: string, val: any, location: string);
 
-function broadcast_option(ID: string, val: any, location: string)
+function broadcast_option(ID: string, val: any, location: string) &is_used
 	{
-	# There's not currently a common topic to broadcast to as then enabling
-	# implicit Broker forwarding would cause a routing loop.
-	Broker::publish(Cluster::worker_topic, Config::cluster_set_option,
-	                ID, val, location);
-	Broker::publish(Cluster::proxy_topic, Config::cluster_set_option,
-	                ID, val, location);
-	Broker::publish(Cluster::logger_topic, Config::cluster_set_option,
-	                ID, val, location);
+	for ( topic in Cluster::broadcast_topics )
+		Cluster::publish(topic, Config::cluster_set_option, ID, val, location);
 	}
 
 event Config::cluster_set_option(ID: string, val: any, location: string)
@@ -95,7 +89,7 @@ function set_value(ID: string, val: any, location: string &default = ""): bool
 	option_cache[ID] = OptionCacheValue($val=val, $location=location);
 	broadcast_option(ID, val, location);
 @else
-	Broker::publish(Cluster::manager_topic, Config::cluster_set_option,
+	Cluster::publish(Cluster::manager_topic, Config::cluster_set_option,
 	                ID, val, location);
 @endif
 
@@ -115,7 +109,7 @@ event Cluster::node_up(name: string, id: string) &priority=-10
 	# When a node connects, send it all current Option values.
 	if ( name in Cluster::nodes )
 		for ( ID in option_cache )
-			Broker::publish(Cluster::node_topic(name), Config::cluster_set_option, ID, option_cache[ID]$val, option_cache[ID]$location);
+			Cluster::publish(Cluster::node_topic(name), Config::cluster_set_option, ID, option_cache[ID]$val, option_cache[ID]$location);
 	}
 @endif
 
@@ -145,8 +139,11 @@ function format_value(value: any) : string
 	return cat(value);
 	}
 
-function config_option_changed(ID: string, new_value: any, location: string): any
+function config_option_changed(ID: string, new_value: any, location: string): any &is_used
 	{
+	# Some option updates reflect Zeek-internal activity and shouldn't be logged.
+	if ( location == "<skip-config-log>" )
+		return new_value;
 	local log = Info($ts=network_time(), $id=ID, $old_value=format_value(lookup_ID(ID)), $new_value=format_value(new_value));
 	if ( location != "" )
 		log$location = location;
@@ -156,19 +153,13 @@ function config_option_changed(ID: string, new_value: any, location: string): an
 
 event zeek_init() &priority=10
 	{
-	Log::create_stream(LOG, [$columns=Info, $ev=log_config, $path="config", $policy=log_policy]);
+	Log::create_stream(LOG, Log::Stream($columns=Info, $ev=log_config, $path="config", $policy=log_policy));
 
 	# Limit logging to the manager - everyone else just feeds off it.
 @if ( !Cluster::is_enabled() || Cluster::local_node_type() == Cluster::MANAGER )
 	# Iterate over all existing options and add ourselves as change handlers
 	# with a low priority so that we can log the changes.
-	local gids = global_ids();
-	for ( i, gid in gids )
-		{
-		if ( ! gid$option_value )
-			next;
-
-		Option::set_change_handler(i, config_option_changed, -100);
-		}
+	for ( opt in global_options() )
+		Option::set_change_handler(opt, config_option_changed, -100);
 @endif
 	}

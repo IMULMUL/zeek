@@ -1,73 +1,118 @@
 name: Generate Documentation
 
 on:
+  pull_request:
   schedule:
     - cron: '0 0 * * *'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
 jobs:
   generate:
-    if: github.repository == 'zeek/zeek'
-    runs-on: ubuntu-18.04
+    permissions:
+      contents: write  # for Git to git push
+    if: "github.repository == 'zeek/zeek' && contains(github.event.pull_request.labels.*.name, 'CI: Skip All') == false"
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v2
+      # We only perform a push if the action was triggered via a schedule
+      # event, so we only need to authenticate in that case. Use
+      # unauthenticated access otherwise so this action can e.g., also run from
+      # clones.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'schedule'
         with:
+          fetch-depth: 0
+          filter: blob:none
           token: ${{ secrets.ZEEK_BOT_TOKEN }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name != 'schedule'
+        with:
+          fetch-depth: 0
+          filter: blob:none
 
-      - name: Sync Submodules
-        shell: bash
-        run: |
-          auth_header="$(git config --local --get http.https://github.com/.extraheader)"
-          git submodule sync --recursive
-          git -c "http.extraheader=$auth_header" -c protocol.version=2 \
-            submodule update --init --force --recursive --depth=1
-          ( cd doc && git checkout master )
+      - name: Fetch shallow submodules
+        run: git submodule update --init --recursive --depth=1
 
       - name: Fetch Dependencies
         run: |
           sudo apt-get update
           sudo apt-get -y install \
-            git \
-            cmake \
-            make \
-            gcc \
-            g++ \
-            flex \
             bison \
+            bsdmainutils \
+            ccache \
+            cmake \
+            cppzmq-dev \
+            flex \
+            g++ \
+            gcc \
+            git \
+            libhiredis-dev \
+            libfl-dev \
+            libfl2 \
+            libkrb5-dev \
+            libnode-dev \
             libpcap-dev \
             libssl-dev \
+            make \
             python3 \
             python3-dev \
-            python3-pip\
+            python3-pip \
+            sqlite3 \
             swig \
-            zlib1g-dev \
-            libkrb5-dev \
-            bsdmainutils \
-            sqlite3
-          # Many distros adhere to PEP 394's recommendation for `python` =
-          # `python2` so this is a simple workaround until we drop Python 2
-          # support and explicitly use `python3` for all invocations.
-          sudo ln -sf /usr/bin/python3 /usr/local/bin/python
-          sudo pip3 install -r doc/requirements.txt
+            zlib1g-dev
+          python3 -m venv ci-docs-venv
+          source ci-docs-venv/bin/activate
+          pip3 install -r doc/requirements.txt
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+        with:
+          key: 'docs-gen-${{ github.job }}'
+          max-size: '2000M'
+
+      # Github runners have node installed on them by default in /usr/local. This
+      # causes problems with configure finding the version from the apt package,
+      # plus gcc using it by default if we pass the right cmake variables to
+      # configure. The easiest solution is to move the directory away prior to
+      # running our build. It's moved back after just in case some workflow action
+      # expects it to exist.
+      - name: Move default node install to backup
+        run: sudo mv /usr/local/include/node /usr/local/include/node.bak
 
       - name: Configure
-        run: ./configure
+        run: ./configure --disable-broker-tests --disable-cpp-tests --ccache
 
       - name: Build
-        run: |
-          ( cd build && make -j 3 )
+        run: cd build && make -j $(nproc)
+
+      - name: Move default node install to original location
+        run: sudo mv /usr/local/include/node.bak /usr/local/include/node
+
+      - name: Check Spicy docs
+        run: cd doc && make check-spicy-docs
 
       - name: Generate Docs
-        shell: bash
         run: |
+          source ci-docs-venv/bin/activate
           git config --global user.name zeek-bot
           git config --global user.email info@zeek.org
 
           echo "*** Generating Zeekygen Docs ***"
           ./ci/update-zeekygen-docs.sh || exit 1
 
-          echo "*** Generating Sphinx Docs ***"
           cd doc
+
+          echo "*** Generating Sphinx Docs ***"
           make > make.out 2>&1
           make_status=$?
           echo "*** Sphinx Build Output ***"
@@ -76,32 +121,29 @@ jobs:
           echo "*** Check for Sphinx Warnings ***"
           grep -q WARNING make.out && exit 1
           rm make.out
-          echo "*** Pushing zeek-docs Changes ***"
-          git remote set-url origin "https://zeek-bot:${{ secrets.ZEEK_BOT_TOKEN }}@github.com/zeek/zeek-docs"
-          git add scripts/ script-reference/
-          git status
-          git commit -m "Generate docs" && git push || /bin/true
-          cd ..
 
-      - name: Update zeek-docs Submodule
+      - name: Push docs Changes
+        if: github.event_name == 'schedule'
         run: |
-          echo "*** Update zeek/doc Submodule ***"
-          git config --global user.name zeek-bot
-          git config --global user.email info@zeek.org
-          git remote add auth "https://zeek-bot:${{ secrets.ZEEK_BOT_TOKEN }}@github.com/zeek/zeek"
-          git add doc
+          cd doc
+          # Stage any changes to auto-generated files.
+          git add scripts/ reference/zeekscript/
           git status
-          git commit -m 'Update doc submodule [nomail] [skip ci]' && git push auth master || /bin/true
+          # git commit errors when there's nothing to commit, so guard it
+          # with a check that detects whether there's anything staged.
+          git diff-index --cached --quiet HEAD || { git commit -m "Docs: Regenerated via GitHub workflow [nomail] [skip ci]" && git push; }
 
       - name: Send email
-        if: failure()
-        uses: dawidd6/action-send-mail@v3.4.1
+        # Only send notifications for scheduled runs. Runs from pull requests
+        # show failures in the GitHub UI.
+        if: failure() && github.event_name == 'schedule'
+        uses: dawidd6/action-send-mail@27bf7a883db6de205849f760badd38a1a3ce0dd0 # v24
         with:
           server_address: ${{secrets.SMTP_HOST}}
           server_port: ${{secrets.SMTP_PORT}}
           username: ${{secrets.SMTP_USER}}
           password: ${{secrets.SMTP_PASS}}
-          subject: generate-docs Github Action failed!
+          subject: generate-docs GitHub Action failed!
           body: generate-docs job of ${{github.repository}} Failed! See https://github.com/${{github.repository}}/actions/runs/${{github.run_id}} for details.
           to: ${{secrets.MAIL_TO}}
-          from: Github Actions <${{secrets.MAIL_FROM}}>
+          from: GitHub Actions <${{secrets.MAIL_FROM}}>

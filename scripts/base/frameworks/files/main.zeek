@@ -41,18 +41,13 @@ export {
 		## An identifier associated with a single file.
 		fuid: string &log;
 
-		## If this file was transferred over a network
-		## connection this should show the host or hosts that
-		## the data sourced from.
-		tx_hosts: set[addr] &default=addr_set() &log;
+		## If this file, or parts of it, were transferred over a
+		## network connection, this is the uid for the connection.
+		uid: string &log &optional;
 
-		## If this file was transferred over a network
-		## connection this should show the host or hosts that
-		## the data traveled to.
-		rx_hosts: set[addr] &default=addr_set() &log;
-
-		## Connection UIDs over which the file was transferred.
-		conn_uids: set[string] &default=string_set() &log;
+		## If this file, or parts of it, were transferred over a
+		## network connection, this shows the connection.
+		id: conn_id &log &optional;
 
 		## An identification of the source of the file data.  E.g. it
 		## may be a network protocol over which it was transferred, or a
@@ -94,6 +89,8 @@ export {
 		is_orig: bool &log &optional;
 
 		## Number of bytes provided to the file analysis engine for the file.
+		## The value refers to the total number of bytes processed for this
+		## file across all connections seen by the current Zeek instance.
 		seen_bytes: count &log &default=0;
 
 		## Total number of bytes that are supposed to comprise the full file.
@@ -101,6 +98,8 @@ export {
 
 		## The number of bytes in the file stream that were completely missed
 		## during the process of analysis e.g. due to dropped packets.
+		## The value refers to number of bytes missed for this file
+		## across all connections seen by the current Zeek instance.
 		missing_bytes: count &log &default=0;
 
 		## The number of bytes in the file stream that were not delivered to
@@ -129,6 +128,9 @@ export {
 
 	## The default per-file reassembly buffer size.
 	const reassembly_buffer_size = 524288 &redef;
+
+	## The default per-file number of blocks allowed.
+	const reassembly_buffer_blocks = 10000 &redef;
 
 	## Lookup to see if a particular file id exists and is still valid.
 	##
@@ -161,8 +163,10 @@ export {
 	##
 	## f: the file.
 	##
-	## max: Maximum allowed size of the reassembly buffer.
-	global set_reassembly_buffer_size: function(f: fa_file, max: count);
+	## max_bytes: Maximum allowed size of the reassembly buffer.
+	##
+	## max_blocks: Maximum allowed blocks of the reassembly buffer.
+	global set_reassembly_buffer_size: function(f: fa_file, max_bytes: count, max_blocks: count &default=reassembly_buffer_blocks);
 
 	## Sets the *timeout_interval* field of :zeek:see:`fa_file`, which is
 	## used to determine the length of inactivity that is allowed for a file
@@ -342,7 +346,7 @@ global analyzer_add_callbacks: table[Files::Tag] of function(f: fa_file, args: A
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Files::LOG, [$columns=Info, $ev=log_files, $path="files", $policy=log_policy]);
+	Log::create_stream(Files::LOG, Log::Stream($columns=Info, $ev=log_files, $path="files", $policy=log_policy));
 	}
 
 function set_info(f: fa_file)
@@ -393,9 +397,9 @@ function disable_reassembly(f: fa_file)
 	__disable_reassembly(f$id);
 	}
 
-function set_reassembly_buffer_size(f: fa_file, max: count)
+function set_reassembly_buffer_size(f: fa_file, max: count, max_blocks: count &default=reassembly_buffer_blocks)
 	{
-	__set_reassembly_buffer(f$id, max);
+	__set_reassembly_buffer(f$id, max, max_blocks);
 	}
 
 function enable_analyzer(tag: Files::Tag): bool
@@ -500,6 +504,9 @@ function all_registered_mime_types(): table[Files::Tag] of set[string]
 
 function describe(f: fa_file): string
 	{
+	if ( ! Analyzer::has_tag(f$source) )
+		return "";
+
 	local tag = Analyzer::get_tag(f$source);
 	if ( tag !in registered_protocols )
 		return "";
@@ -508,10 +515,22 @@ function describe(f: fa_file): string
 	return handler$describe(f);
 	}
 
-event get_file_handle(tag: Files::Tag, c: connection, is_orig: bool) &priority=5
+# Only warn once about un-registered get_file_handle()
+global missing_get_file_handle_warned: table[Analyzer::Tag] of bool &default=F;
+
+event get_file_handle(tag: Analyzer::Tag, c: connection, is_orig: bool) &priority=5
 	{
 	if ( tag !in registered_protocols )
+		{
+		if ( ! missing_get_file_handle_warned[tag] )
+			{
+			missing_get_file_handle_warned[tag] = T;
+			Reporter::warning(fmt("get_file_handle() handler missing for %s", tag));
+			}
+
+		set_file_handle(fmt("%s-fallback-%s-%s-%s", tag, c$uid, is_orig, network_time()));
 		return;
+		}
 
 	local handler = registered_protocols[tag];
 	set_file_handle(handler$get_file_handle(c, is_orig));
@@ -524,7 +543,7 @@ event file_new(f: fa_file) &priority=10
 	if ( enable_reassembler )
 		{
 		Files::enable_reassembly(f);
-		Files::set_reassembly_buffer_size(f, reassembly_buffer_size);
+		Files::set_reassembly_buffer_size(f, reassembly_buffer_size, reassembly_buffer_blocks);
 		}
 	}
 
@@ -532,13 +551,9 @@ event file_over_new_connection(f: fa_file, c: connection, is_orig: bool) &priori
 	{
 	set_info(f);
 
-	add f$info$conn_uids[c$uid];
 	local cid = c$id;
-	add f$info$tx_hosts[f$is_orig ? cid$orig_h : cid$resp_h];
 	if( |Site::local_nets| > 0 )
 		f$info$local_orig=Site::is_local_addr(f$is_orig ? cid$orig_h : cid$resp_h);
-
-	add f$info$rx_hosts[f$is_orig ? cid$resp_h : cid$orig_h];
 	}
 
 event file_sniff(f: fa_file, meta: fa_metadata) &priority=10
@@ -572,5 +587,28 @@ event file_state_remove(f: fa_file) &priority=10
 
 event file_state_remove(f: fa_file) &priority=-10
 	{
-	Log::write(Files::LOG, f$info);
+	# No network connection for this file? Just write it out once without
+	# uid and c$id fields.
+	if ( ! f?$conns || |f$conns| == 0 )
+		{
+		Log::write(Files::LOG, f$info);
+		return;
+		}
+
+	# If f was seen over multiple connections, unroll them here as
+	# multiple files.log entries. In previous versions of Zeek, there
+	# would only be a single files.log entry (per worker) with multiple
+	# tx_hosts, rx_hosts and conn_uids associated. This changed with v5.1
+	# to have individual log entries that all share the same fuid value.
+	for ( [cid], c in f$conns )
+		{
+		# Make a copy of the record when there's more than one
+		# connection so that the log_files event doesn't see
+		# the same record multiple times due to it being queued
+		# by reference in Log::write() rather than by copy.
+		local info = |f$conns| > 1 ? copy(f$info) : f$info;
+		info$uid = c$uid;
+		info$id = c$id;
+		Log::write(Files::LOG, info);
+		}
 	}

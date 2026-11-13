@@ -11,8 +11,8 @@ the script's raw source code and comparing to the HTML-rendered
 version.
 
 Comments in the from ``##!`` are meant to summarize the script's
-purpose.  They are transferred directly in to the generated
-`reStructuredText <http://docutils.sourceforge.net/rst.html>`_
+purpose.  They are transferred directly into the generated
+`reStructuredText <https://docutils.sourceforge.io/rst.html>`_
 (reST) document associated with the script.
 
 .. tip:: You can embed directives and roles within ``##``-stylized comments.
@@ -59,36 +59,36 @@ Types
 Redefinitions
 #############
 =============================================================== =====================================================================
-:zeek:type:`Log::ID`: :zeek:type:`enum`                         
-                                                                
+:zeek:type:`Log::ID`: :zeek:type:`enum`
+
                                                                 * :zeek:enum:`ZeekygenExample::LOG`
-:zeek:type:`Notice::Type`: :zeek:type:`enum`                    
-                                                                
+:zeek:type:`Notice::Type`: :zeek:type:`enum`
+
                                                                 * :zeek:enum:`ZeekygenExample::Zeekygen_Four`:
                                                                   Omitting comments is fine, and so is mixing ``##`` and ``##<``, but
                                                                   it's probably best to use only one style consistently.
-                                                                
+
                                                                 * :zeek:enum:`ZeekygenExample::Zeekygen_One`:
                                                                   Any number of this type of comment
                                                                   will document "Zeekygen_One".
-                                                                
+
                                                                 * :zeek:enum:`ZeekygenExample::Zeekygen_Three`
-                                                                
+
                                                                 * :zeek:enum:`ZeekygenExample::Zeekygen_Two`:
                                                                   Any number of this type of comment
                                                                   will document "ZEEKYGEN_TWO".
 :zeek:type:`ZeekygenExample::SimpleEnum`: :zeek:type:`enum`     Document the "SimpleEnum" redef here with any special info regarding
                                                                 the *redef* itself.
-                                                                
+
                                                                 * :zeek:enum:`ZeekygenExample::FIVE`:
                                                                   Also "FIVE".
-                                                                
+
                                                                 * :zeek:enum:`ZeekygenExample::FOUR`:
                                                                   And some documentation for "FOUR".
 :zeek:type:`ZeekygenExample::SimpleRecord`: :zeek:type:`record` Document the record extension *redef* itself here.
-                                                                
+
                                                                 :New Fields: :zeek:type:`ZeekygenExample::SimpleRecord`
-                                                                
+
                                                                   field_ext: :zeek:type:`string` :zeek:attr:`&optional`
                                                                     Document the extending field like this.
 =============================================================== =====================================================================
@@ -165,19 +165,28 @@ Types
 
    :Type: :zeek:type:`record`
 
-      field1: :zeek:type:`count`
-         Counts something.
 
-      field2: :zeek:type:`bool`
-         Toggles something.
+   .. zeek:field:: field1 :zeek:type:`count`
 
-      field3: :zeek:type:`ZeekygenExample::SimpleRecord`
-         Zeekygen automatically tracks types
-         and cross-references are automatically
-         inserted in to generated docs.
+      Counts something.
 
-      msg: :zeek:type:`string` :zeek:attr:`&default` = ``"blah"`` :zeek:attr:`&optional`
-         Attributes are self-documenting.
+
+   .. zeek:field:: field2 :zeek:type:`bool`
+
+      Toggles something.
+
+
+   .. zeek:field:: field3 :zeek:type:`ZeekygenExample::SimpleRecord`
+
+      Zeekygen automatically tracks types
+      and cross-references are automatically
+      inserted into generated docs.
+
+
+   .. zeek:field:: msg :zeek:type:`string` :zeek:attr:`&default` = ``"blah"`` :zeek:attr:`&optional`
+
+      Attributes are self-documenting.
+
    :Attributes: :zeek:attr:`&redef`
 
    General documentation for a type "ComplexRecord" goes here.
@@ -187,11 +196,15 @@ Types
 
    :Type: :zeek:type:`record`
 
-      ts: :zeek:type:`time` :zeek:attr:`&log`
 
-      uid: :zeek:type:`string` :zeek:attr:`&log`
+   .. zeek:field:: ts :zeek:type:`time` :zeek:attr:`&log`
 
-      status: :zeek:type:`count` :zeek:attr:`&log` :zeek:attr:`&optional`
+
+   .. zeek:field:: uid :zeek:type:`string` :zeek:attr:`&log`
+
+
+   .. zeek:field:: status :zeek:type:`count` :zeek:attr:`&log` :zeek:attr:`&optional`
+
 
    An example record to be used with a logging stream.
    Nothing special about it.  If another script redefs this type
@@ -231,15 +244,22 @@ Types
 
    :Type: :zeek:type:`record`
 
-      field1: :zeek:type:`count`
-         Counts something.
 
-      field2: :zeek:type:`bool`
-         Toggles something.
+   .. zeek:field:: field1 :zeek:type:`count`
 
-      field_ext: :zeek:type:`string` :zeek:attr:`&optional`
-         Document the extending field like this.
-         Or here, like this.
+      Counts something.
+
+
+   .. zeek:field:: field2 :zeek:type:`bool`
+
+      Toggles something.
+
+
+   .. zeek:field:: field_ext :zeek:type:`string` :zeek:attr:`&optional`
+
+      Document the extending field like this.
+      Or here, like this.
+
 
    General documentation for a type "SimpleRecord" goes here.
    The way fields can be documented is similar to what's already seen
@@ -254,13 +274,13 @@ Events
 
    Summarize "an_event" here.
    Give more details about "an_event" here.
-   
+
    ZeekygenExample::a_function should not be confused as a parameter
    in the generated docs, but it also doesn't generate a cross-reference
    link.  Use the see role instead: :zeek:see:`ZeekygenExample::a_function`.
-   
 
-   :name: Describe the argument here.
+
+   :param name: Describe the argument here.
 
 Functions
 #########
@@ -273,14 +293,14 @@ Functions
    Give more details about "a_function" here.
    Separating the documentation of the params/return values with
    empty comments is optional, but improves readability of script.
-   
 
-   :tag: Function arguments can be described
+
+   :param tag: Function arguments can be described
         like this.
-   
 
-   :msg: Another param.
-   
+
+   :param msg: Another param.
+
 
    :returns: Describe the return type here.
 

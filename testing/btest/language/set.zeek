@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -185,82 +186,178 @@ function basic_functionality()
 	test_case( "magnitude", |a_and_b| == |a_or_b|);
 }
 
-function complex_index_types()
+type tss_set: set[table[string] of string];
+
+function complex_index_type_table()
 {
 	# Initialization
-	local s1: set[table[string] of string] = { table(["k1"] = "v1") };
+	local s: tss_set = { table(["k1"] = "v1") };
 
 	# Adding a member
-	add s1[table(["k2"] = "v2")];
+	add s[table(["k2"] = "v2")];
 
 	# Various checks, including membership test
-	test_case( "table index size", |s1| == 2 );
-	test_case( "table index membership", table(["k2"] = "v2") in s1 );
-	test_case( "table index non-membership", table(["k2"] = "v3") !in s1 );
+	test_case( "table index size", |s| == 2 );
+	test_case( "table index membership", table(["k2"] = "v2") in s );
+	test_case( "table index non-membership", table(["k2"] = "v3") !in s );
 
 	# Member deletion
-	delete s1[table(["k1"] = "v1")];
-	test_case( "table index reduced size", |s1| == 1 );
+	delete s[table(["k1"] = "v1")];
+	test_case( "table index reduced size", |s| == 1 );
 
 	# Iteration
-	for ( ti in s1 )
+	for ( ti in s )
 		{
 		test_case( "table index iteration", to_json(ti) == to_json(table(["k2"] = "v2")) );
 		break;
 		}
 
+	# JSON serialize/unserialize
+	local fjr = from_json(to_json(s), tss_set);
+	test_case( "table index JSON roundtrip success", fjr$valid );
+	test_case( "table index JSON roundtrip correct", to_json(s) == to_json(fjr$v) );
+}
+
+type vs_set: set[vector of string];
+
+function complex_index_type_vector()
+{
 	# As above, for other index types
-	local s2: set[vector of string] = { vector("v1", "v2") };
+	local s: vs_set = { vector("v1", "v2") };
 
-	add s2[vector("v3", "v4")];
-	test_case( "vector index size", |s2| == 2 );
-	test_case( "vector index membership", vector("v3", "v4") in s2 );
-	test_case( "vector index non-membership", vector("v4", "v5") !in s2 );
+	add s[vector("v3", "v4")];
+	test_case( "vector index size", |s| == 2 );
+	test_case( "vector index membership", vector("v3", "v4") in s );
+	test_case( "vector index non-membership", vector("v4", "v5") !in s );
 
-	delete s2[vector("v1", "v2")];
-	test_case( "vector index reduced size", |s2| == 1 );
+	delete s[vector("v1", "v2")];
+	test_case( "vector index reduced size", |s| == 1 );
 
-	for ( vi in s2 )
+	for ( vi in s )
 		{
 		test_case( "vector index iteration", to_json(vi) == to_json(vector("v3", "v4")) );
 		break;
 		}
 
-	local s3: set[set[string]] = { set("s1", "s2") };
+	local fjr = from_json(to_json(s), vs_set);
+	test_case( "vector index JSON roundtrip success", fjr$valid );
+	test_case( "vector index JSON roundtrip correct", to_json(s) == to_json(fjr$v) );
+}
 
-	add s3[set("s3", "s4")];
-	test_case( "set index size", |s3| == 2 );
-	test_case( "set index membership", set("s3", "s4") in s3 );
-	test_case( "set index non-membership", set("s4", "s5") !in s3 );
+type ss_set: set[set[string]];
 
-	delete s3[set("s1", "s2")];
-	test_case( "set index reduced size", |s3| == 1 );
+function complex_index_type_set()
+{
+	local s: ss_set = { set("s1", "s2") };
 
-	for ( si in s3 )
+	add s[set("s3", "s4")];
+	test_case( "set index size", |s| == 2 );
+	test_case( "set index membership", set("s3", "s4") in s );
+	test_case( "set index non-membership", set("s4", "s5") !in s );
+
+	delete s[set("s1", "s2")];
+	test_case( "set index reduced size", |s| == 1 );
+
+	for ( si in s )
 		{
 		test_case( "set index iteration", to_json(si) == to_json(set("s3", "s4")) );
 		break;
 		}
 
-	local s4: set[pattern] = { /pat1/ };
+	local fjr = from_json(to_json(s), ss_set);
+	test_case( "set index JSON roundtrip success", fjr$valid );
+	test_case( "set index JSON roundtrip correct", to_json(s) == to_json(fjr$v) );
+}
 
-	add s4[/pat2/];
-	test_case( "pattern index size", |s4| == 2 );
-	test_case( "pattern index membership", /pat2/ in s4 );
-	test_case( "pattern index non-membership", /pat3/ !in s4 );
+type p_set: set[pattern];
 
-	delete s4[/pat1/];
-	test_case( "pattern index reduced size", |s4| == 1 );
+function complex_index_type_pattern()
+{
+	local s: p_set = { /pat1/ };
 
-	for ( pi in s4 )
+	add s[/pat2/];
+	test_case( "pattern index size", |s| == 2 );
+	test_case( "pattern index membership", /pat2/ in s );
+	test_case( "pattern index non-membership", /pat3/ !in s );
+
+	delete s[/pat1/];
+	test_case( "pattern index reduced size", |s| == 1 );
+
+	for ( pi in s )
 		{
 		test_case( "pattern index iteration", to_json(pi) == to_json(/pat2/) );
 		break;
 		}
+
+	local fjr = from_json(to_json(s), p_set);
+	test_case( "pattern index JSON roundtrip success", fjr$valid );
+	test_case( "pattern index JSON roundtrip correct", to_json(s) == to_json(fjr$v) );
+}
+
+global on_change_removals = 0;
+
+function count_removals(s: set[count], tpe: TableChange, c: count)
+{
+	if ( tpe == TABLE_ELEMENT_REMOVED )
+		++on_change_removals;
+}
+
+function remove_from()
+{
+	local s: set[count] = {1, 2, 3, 4};
+	s -= s;
+	test_case( "remove set from itself", |s| == 0 );
+
+	local first_set: set[count] = {1, 2, 3, 4};
+	local second_set: set[count] = {1, 2, 3, 4};
+	first_set -= second_set;
+	test_case( "remove different sets with same values", |first_set| == 0 );
+
+	local set_a: set[count] = {1, 2, 3, 4};
+	local set_b: set[count] = {2, 3};
+	set_a -= set_b;
+	test_case( "remove different sets", |set_a| == 2 );
+
+	local ordered_set: set[count] = {1, 2, 3, 4} &ordered;
+	ordered_set -= ordered_set;
+	test_case( "remove ordered set from itself", |ordered_set| == 0 );
+
+	local ordered_set_a: set[count] = {1, 2, 3, 4} &ordered;
+	local ordered_set_b: set[count] = {2, 3} &ordered;
+	ordered_set_a -= ordered_set_b;
+	test_case( "remove different ordered sets", |ordered_set_a| == 2 );
+
+	local ordered_set_first: set[count] = {1, 2, 3, 4} &ordered;
+	local non_ordered_set_first: set[count] = {2, 3};
+	ordered_set_first -= non_ordered_set_first;
+	test_case( "remove non-ordered set from ordered set", |ordered_set_first| == 2 );
+
+	local t: table[count] of string = {[1] = "one", [2] = "two", [3] = "three"};
+	t -= t;
+	test_case( "remove table from itself", |t| == 0 );
+
+	local first_table: table[count] of string = {[1] = "one", [2] = "two", [3] = "three"};
+	local second_table: table[count] of string = {[1] = "one", [2] = "two", [3] = "three"};
+	first_table -= second_table;
+	test_case( "remove different tables with same values", |first_table| == 0 );
+
+	local table_a: table[count] of string = {[1] = "one", [2] = "two", [3] = "three"};
+	local table_b: table[count] of string = {[2] = "two"};
+	table_a -= table_b;
+	test_case( "remove different tables", |table_a| == 2 );
+
+	local set_for_onchange: set[count] = {1, 2, 3, 4, 5} &on_change=count_removals;
+	set_for_onchange -= set_for_onchange;
+	test_case( "remove &on_change set from itself", |set_for_onchange| == 0 );
+	test_case( "&on_change called for each removed element", on_change_removals == 5 );
 }
 
 event zeek_init()
 {
 	basic_functionality();
-	complex_index_types();
+	complex_index_type_table();
+	complex_index_type_vector();
+	complex_index_type_set();
+	complex_index_type_pattern();
+	remove_from();
 }

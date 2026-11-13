@@ -2,76 +2,45 @@
 
 #include "zeek/telemetry/Counter.h"
 
-#include "zeek/telemetry/Detail.h"
+#include <algorithm>
+#include <span>
 
-#include "caf/telemetry/counter.hpp"
-#include "caf/telemetry/metric_family.hpp"
-#include "caf/telemetry/metric_family_impl.hpp"
+using namespace zeek::telemetry;
 
-namespace zeek::telemetry
-	{
+Counter::Counter(FamilyType* family, const prometheus::Labels& labels, detail::CollectCallbackPtr callback) noexcept
+    : family(family), handle(family->Add(labels)), labels(labels), callback(std::move(callback)) {}
 
-// -- IntCounter ---------------------------------------------------------------
+double Counter::Value() const noexcept {
+    if ( callback )
+        return callback();
 
-void IntCounter::Inc() noexcept
-	{
-	deref(pimpl).inc();
-	}
+    return handle.Value();
+}
 
-void IntCounter::Inc(int64_t amount) noexcept
-	{
-	deref(pimpl).inc(amount);
-	}
+std::shared_ptr<Counter> CounterFamily::GetOrAdd(std::span<const LabelView> labels,
+                                                 detail::CollectCallbackPtr callback) {
+    prometheus::Labels p_labels = detail::BuildPrometheusLabels(labels);
 
-int64_t IntCounter::operator++() noexcept
-	{
-	return ++deref(pimpl);
-	}
+    auto check = [&](const std::shared_ptr<Counter>& counter) { return counter->CompareLabels(p_labels); };
 
-int64_t IntCounter::Value() const noexcept
-	{
-	return deref(pimpl).value();
-	}
+    if ( auto it = std::ranges::find_if(counters, check); it != counters.end() )
+        return *it;
 
-IntCounterFamily::IntCounterFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
+    auto counter = std::make_shared<Counter>(family, p_labels, callback);
+    counters.push_back(counter);
+    return counter;
+}
 
-IntCounter IntCounterFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return IntCounter{hdl};
-							  });
-	}
+std::shared_ptr<Counter> CounterFamily::GetOrAdd(std::initializer_list<LabelView> labels,
+                                                 detail::CollectCallbackPtr callback) {
+    return GetOrAdd(std::span{labels.begin(), labels.size()}, std::move(callback));
+}
 
-// -- DblCounter ---------------------------------------------------------------
-
-void DblCounter::Inc() noexcept
-	{
-	deref(pimpl).inc();
-	}
-
-void DblCounter::Inc(double amount) noexcept
-	{
-	deref(pimpl).inc(amount);
-	}
-
-double DblCounter::Value() const noexcept
-	{
-	return deref(pimpl).value();
-	}
-
-DblCounterFamily::DblCounterFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
-
-DblCounter DblCounterFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return DblCounter{hdl};
-							  });
-	}
-
-	} // namespace zeek::telemetry
+void CounterFamily::RunCallbacks() {
+    for ( auto& c : counters ) {
+        if ( c->HasCallback() ) {
+            double val = c->RunCallback();
+            c->Set(val);
+        }
+    }
+}

@@ -1,25 +1,19 @@
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
-# @TEST-PORT: BROKER_PORT3
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
+# @TEST-PORT: BROKER_WORKER2_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager-1 zeek -b %INPUT
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# @TEST-EXEC: btest-bg-run manager   ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager zeek -b %INPUT
 # @TEST-EXEC: btest-bg-run worker-1  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-1 zeek -b %INPUT
 # @TEST-EXEC: btest-bg-run worker-2  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-2 zeek -b %INPUT
 # @TEST-EXEC: btest-bg-wait 30
 
-# @TEST-EXEC: btest-diff manager-1/.stdout
+# @TEST-EXEC: btest-diff manager/.stdout
 #
 
-@load base/frameworks/cluster
+@load policy/frameworks/cluster/experimental
 @load base/frameworks/sumstats
-
-@TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1", $interface="eth0"],
-	["worker-2"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT3")), $manager="manager-1", $interface="eth1"],
-};
-@TEST-END-FILE
 
 redef Log::default_rotation_interval = 0secs;
 
@@ -38,18 +32,16 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 	terminate();
 	}
 
-global ready_for_data: event();
-
 event on_demand()
 	{
 	local host = 7.2.1.5;
-	when ( local result = SumStats::request_key("test sumstat", [$host=host]) )
+	when [host] ( local result = SumStats::request_key("test sumstat", [$host=host]) )
 		{
 		print "SumStat key request";
 		if ( "test" in result )
 			print fmt("    Host: %s -> %.0f", host, result["test"]$sum);
 
-		if ( Cluster::node == "manager-1" )
+		if ( Cluster::node == "manager" )
 		  terminate();
 		}
 	}
@@ -63,7 +55,7 @@ event ready_to_demand()
 		event on_demand();
 	}
 
-event ready_for_data()
+event Cluster::Experimental::cluster_started()
 	{
 	if ( Cluster::node == "worker-1" )
 		{
@@ -82,15 +74,3 @@ event ready_for_data()
 
 	Broker::publish(Cluster::manager_topic, ready_to_demand);
 	}
-
-global peer_count = 0;
-event Broker::peer_added(endpoint: Broker::EndpointInfo, msg: string)
-	{
-	if ( Cluster::node != "manager-1" )
-		return;
-
-	++peer_count;
-	if ( peer_count == 2 )
-		Broker::publish(Cluster::worker_topic, ready_for_data);
-	}
-

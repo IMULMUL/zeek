@@ -2,9 +2,9 @@
 # function that also use $include/$exclude: the extension function
 # overrides those restrictions.
 #
-# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.trace %INPUT
-# @TEST-EXEC: btest-diff conn-inc.log
-# @TEST-EXEC: btest-diff conn-exc.log
+# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.pcap %INPUT
+# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-timestamps btest-diff conn-inc.log
+# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-timestamps btest-diff conn-exc.log
 
 @load base/protocols/conn
 

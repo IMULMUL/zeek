@@ -101,8 +101,8 @@ export {
 		host_count: count        &log &optional;
 	};
 
-	## Actions for a signature.
-	const actions: table[string] of Action =  {
+	## Actions for a signature.  Can be updated dynamically.
+	global actions: table[string] of Action =  {
 		["unspecified"] = SIG_IGNORE, # place-holder
 	} &redef &default = SIG_ALARM;
 
@@ -145,21 +145,14 @@ global did_sig_log: set[string] &read_expire = 1 hr;
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Signatures::LOG, [$columns=Info, $ev=log_signature, $path="signatures", $policy=log_policy]);
-	}
-
-# Returns true if the given signature has already been triggered for the given
-# [orig, resp] pair.
-function has_signature_matched(id: string, orig: addr, resp: addr): bool
-	{
-	return [orig, resp] in vert_table ? id in vert_table[orig, resp] : F;
+	Log::create_stream(Signatures::LOG, Log::Stream($columns=Info, $ev=log_signature, $path="signatures", $policy=log_policy));
 	}
 
 event sig_summary(orig: addr, id: string, msg: string)
 	{
-	NOTICE([$note=Signature_Summary, $src=orig,
-	        $msg=fmt("%s: %s", orig, msg),
-	        $n=count_per_orig[orig,id] ]);
+	NOTICE(Notice::Info($note=Signature_Summary, $src=orig,
+	                    $msg=fmt("%s: %s", orig, msg),
+	                    $n=count_per_orig[orig,id]));
 	}
 
 event signature_match(state: signature_state, msg: string, data: string)
@@ -196,16 +189,16 @@ event signature_match(state: signature_state, msg: string, data: string)
 
 	if ( action != SIG_QUIET && action != SIG_COUNT_PER_RESP )
 		{
-		local info: Info = [$ts=network_time(),
-		                    $note=Sensitive_Signature,
-		                    $uid=state$conn$uid,
-		                    $src_addr=src_addr,
-		                    $src_port=src_port,
-		                    $dst_addr=dst_addr,
-		                    $dst_port=dst_port,
-		                    $event_msg=fmt("%s: %s", src_addr, msg),
-		                    $sig_id=sig_id,
-		                    $sub_msg=data];
+		local info = Info($ts=network_time(),
+		                  $note=Sensitive_Signature,
+		                  $uid=state$conn$uid,
+		                  $src_addr=src_addr,
+		                  $src_port=src_port,
+		                  $dst_addr=dst_addr,
+		                  $dst_port=dst_port,
+		                  $event_msg=fmt("%s: %s", src_addr, msg),
+		                  $sig_id=sig_id,
+		                  $sub_msg=data);
 		Log::write(Signatures::LOG, info);
 		}
 
@@ -218,12 +211,12 @@ event signature_match(state: signature_state, msg: string, data: string)
 		local dst = state$conn$id$resp_h;
 		if ( ++count_per_resp[dst,sig_id] in count_thresholds )
 			{
-			NOTICE([$note=Count_Signature, $conn=state$conn,
-			        $msg=msg,
-			        $n=count_per_resp[dst,sig_id],
-			        $sub=fmt("%d matches of signature %s on host %s",
-			                 count_per_resp[dst,sig_id],
-			                 sig_id, dst)]);
+			NOTICE(Notice::Info($note=Count_Signature, $conn=state$conn,
+			                    $msg=msg,
+			                    $n=count_per_resp[dst,sig_id],
+			                    $sub=fmt("%d matches of signature %s on host %s",
+			                             count_per_resp[dst,sig_id],
+			                             sig_id, dst)));
 			}
 		}
 
@@ -248,10 +241,10 @@ event signature_match(state: signature_state, msg: string, data: string)
 		}
 
 	if ( notice )
-		NOTICE([$note=Sensitive_Signature,
-		        $conn=state$conn, $src=src_addr,
-		        $dst=dst_addr, $msg=fmt("%s: %s", src_addr, msg),
-		        $sub=data]);
+		NOTICE(Notice::Info($note=Sensitive_Signature,
+		                    $conn=state$conn, $src=src_addr,
+		                    $dst=dst_addr, $msg=fmt("%s: %s", src_addr, msg),
+		                    $sub=data));
 
 	if ( action == SIG_FILE_BUT_NO_SCAN || action == SIG_SUMMARY )
 		return;
@@ -280,12 +273,12 @@ event signature_match(state: signature_state, msg: string, data: string)
 				orig, sig_id, hcount);
 
 		Log::write(Signatures::LOG,
-			[$ts=network_time(), $note=Multiple_Sig_Responders,
-		     $src_addr=orig, $sig_id=sig_id, $event_msg=msg,
-		     $host_count=hcount, $sub_msg=horz_scan_msg]);
+		           Info($ts=network_time(), $note=Multiple_Sig_Responders,
+		                $src_addr=orig, $sig_id=sig_id, $event_msg=msg,
+		                $host_count=hcount, $sub_msg=horz_scan_msg));
 
-		NOTICE([$note=Multiple_Sig_Responders, $src=orig,
-			$msg=msg, $n=hcount, $sub=horz_scan_msg]);
+		NOTICE(Notice::Info($note=Multiple_Sig_Responders, $src=orig,
+		                    $msg=msg, $n=hcount, $sub=horz_scan_msg));
 
 		last_hthresh[orig] = hcount;
 		}
@@ -297,16 +290,16 @@ event signature_match(state: signature_state, msg: string, data: string)
 				orig, vcount, resp);
 
 		Log::write(Signatures::LOG,
-		           [$ts=network_time(),
-		            $note=Multiple_Signatures,
-		            $src_addr=orig,
-		            $dst_addr=resp, $sig_id=sig_id, $sig_count=vcount,
-		            $event_msg=fmt("%s different signatures triggered", vcount),
-		            $sub_msg=vert_scan_msg]);
+		           Info($ts=network_time(),
+		                $note=Multiple_Signatures,
+		                $src_addr=orig,
+		                $dst_addr=resp, $sig_id=sig_id, $sig_count=vcount,
+		                $event_msg=fmt("%s different signatures triggered", vcount),
+		                $sub_msg=vert_scan_msg));
 
-		NOTICE([$note=Multiple_Signatures, $src=orig, $dst=resp,
-		        $msg=fmt("%s different signatures triggered", vcount),
-		        $n=vcount, $sub=vert_scan_msg]);
+		NOTICE(Notice::Info($note=Multiple_Signatures, $src=orig, $dst=resp,
+		                    $msg=fmt("%s different signatures triggered", vcount),
+		                    $n=vcount, $sub=vert_scan_msg));
 
 		last_vthresh[orig] = vcount;
 		}

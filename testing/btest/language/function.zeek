@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -70,4 +71,3 @@ event zeek_init()
 	f13 = f7;
 	test_case("reassign function variable", !f13("bar") );
 }
-

@@ -1,14 +1,7 @@
-# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.trace %INPUT
+# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.pcap %INPUT
 # @TEST-EXEC: btest-diff stats.log
 
 @load policy/misc/stats
-
-event load_sample(samples: load_sample_info, CPU: interval, dmem: int)
-	{
-	# This output not part of baseline as it varies, but guess this test
-	# should still exist to cover potential memory leaks.
-	print CPU;
-	}
 
 event zeek_init()
 	{

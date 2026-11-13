@@ -85,7 +85,7 @@ export {
 	## By default, x509 certificates are deduplicated. This configuration option configures
 	## the maximum time after which certificates are re-logged. Note - depending on other configuration
 	## options, this setting might only apply on a per-worker basis and you still might see certificates
-	## logged several times.
+	## logged several times. Further note that a full Zeek restart will reset the deduplication state.
 	##
 	## To disable deduplication completely, set this to 0secs.
 	option relog_known_certificates_after = 1day;
@@ -97,17 +97,42 @@ export {
 	## Maximum size of the known_log_certs table
 	option known_log_certs_maximum_size = 1000000;
 
-	## Use broker stores to deduplicate certificates across the whole cluster. This will cause log-deduplication
-	## to work cluster wide, but come at a slightly higher cost of memory and inter-node-communication.
+	## Whether to publish the hash of any logged certificate to other cluster
+	## nodes to deduplicate certificates across the whole cluster.
+	const known_log_certs_enable_publish: bool = T &redef;
+
+	## Whether the manager sends all logged certs in response to a
+	## Cluster::node_up() for workers.
 	##
-	## This setting is ignored if Zeek is run in standalone mode.
-	global known_log_certs_use_broker: bool = T;
+	## See also :zeek:see:`X509::known_log_certs_enable_publish`.
+	const known_log_certs_enable_node_up_publish: bool = T &redef;
 
 	## Event for accessing logged records.
 	global log_x509: event(rec: Info);
-}
 
-global known_log_certs_with_broker: set[LogCertHash] &create_expire=relog_known_certificates_after &backend=Broker::MEMORY;
+	## The maximum number of bytes that a single string field can contain when
+	## logging. If a string reaches this limit, the log output for the field will be
+	## truncated. Setting this to zero disables the limiting.
+	##
+	## .. zeek:see:: Log::default_max_field_string_bytes
+	const default_max_field_string_bytes = Log::default_max_field_string_bytes &redef;
+
+	## The maximum number of elements a single container field can contain when
+	## logging. If a container reaches this limit, the log output for the field will
+	## be truncated. Setting this to zero disables the limiting.
+	##
+	## .. zeek:see:: Log::default_max_field_container_elements
+	const default_max_field_container_elements = 500 &redef;
+
+	## The maximum total number of container elements a record may log. This is the
+	## sum of all container elements logged for the record. If this limit is reached,
+	## all further containers will be logged as empty containers. If the limit is
+	## reached while processing a container, the container will be truncated in the
+	## output. Setting this to zero disables the limiting.
+	##
+	## .. zeek:see:: Log::default_max_total_container_elements
+	const default_max_total_container_elements = 1500 &redef;
+}
 
 redef record Files::Info += {
 	## Information about X509 certificates. This is used to keep
@@ -117,12 +142,17 @@ redef record Files::Info += {
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(X509::LOG, [$columns=Info, $ev=log_x509, $path="x509", $policy=log_policy]);
+	# x509 can have some very large certificates and very large sets of URIs. Expand the log size filters
+	# so that we're not truncating those.
+	Log::create_stream(X509::LOG, Log::Stream($columns=Info, $ev=log_x509, $path="x509", $policy=log_policy,
+	                                          $max_field_string_bytes=X509::default_max_field_string_bytes,
+	                                          $max_field_container_elements=X509::default_max_field_container_elements,
+	                                          $max_total_container_elements=X509::default_max_total_container_elements));
 
 	# We use MIME types internally to distinguish between user and CA certificates.
 	# The first certificate in a connection always gets tagged as user-cert, all
 	# following certificates get tagged as CA certificates. Certificates gotten via
-	# other means (e.g. identified from HTTP traffic when they are transfered in plain
+	# other means (e.g. identified from HTTP traffic when they are transferred in plain
 	# text) get tagged as application/pkix-cert.
 	Files::register_for_mime_type(Files::ANALYZER_X509, "application/x-x509-user-cert");
 	Files::register_for_mime_type(Files::ANALYZER_X509, "application/x-x509-ca-cert");
@@ -142,11 +172,6 @@ event zeek_init() &priority=5
 	Files::register_for_mime_type(Files::ANALYZER_SHA256, "application/x-x509-user-cert");
 	Files::register_for_mime_type(Files::ANALYZER_SHA256, "application/x-x509-ca-cert");
 	Files::register_for_mime_type(Files::ANALYZER_SHA256, "application/pkix-cert");
-
-@if ( Cluster::is_enabled() )
-	if ( known_log_certs_use_broker )
-		known_log_certs = known_log_certs_with_broker;
-@endif
 	}
 
 hook Files::log_policy(rec: Files::Info, id: Log::ID, filter: Log::Filter) &priority=5
@@ -167,7 +192,7 @@ event x509_certificate(f: fa_file, cert_ref: opaque of x509, cert: X509::Certifi
 	{
 	local der_cert = x509_get_certificate_string(cert_ref);
 	local fp = hash_function(der_cert);
-	f$info$x509 = [$ts=f$info$ts, $fingerprint=fp, $certificate=cert, $handle=cert_ref];
+	f$info$x509 = X509::Info($ts=f$info$ts, $fingerprint=fp, $certificate=cert, $handle=cert_ref);
 	if ( f$info$mime_type == "application/x-x509-user-cert" )
 		f$info$x509$host_cert = T;
 	if ( f$is_orig )
@@ -207,6 +232,52 @@ event x509_ocsp_ext_signed_certificate_timestamp(f: fa_file, version: count, log
 		f$info$x509$extensions_cache += SctInfo($version=version, $logid=logid, $timestamp=timestamp, $hash_alg=hash_algorithm, $sig_alg=signature_algorithm, $signature=signature);
 	}
 
+
+# Internal event arriving at manager or worker nodes.
+event X509::log_cert_hashes_internal(lchs: set[LogCertHash])
+	{
+	for (lch in lchs)
+		if ( |known_log_certs| < known_log_certs_maximum_size )
+			add X509::known_log_certs[lch];
+
+	# The manager re-distributes to all workers (including the one
+	# that sent the original event).
+	if ( Cluster::local_node_type() == Cluster::MANAGER )
+		Cluster::publish(Cluster::worker_topic, X509::log_cert_hashes_internal, lchs);
+	}
+
+
+@if ( Cluster::local_node_type() == Cluster::MANAGER )
+# When a node comes up and it is a worker and there's already data
+# in known_log_certs, distribute it to that node.
+#
+# With the default 1mio entries, this might be a pretty big message. E.g.
+# if LogCertHash takes 80 bytes, that'd result in a 80MB message assuming
+# the serialization is efficient. 80MB might be fine though and it's not
+# clear how the Broker store approach solved that internally. So at least
+# it now is explicit :-)
+event Cluster::node_up(name: string, id: string)
+	{
+	if ( ! known_log_certs_enable_publish || ! known_log_certs_enable_node_up_publish )
+		return;
+
+	if ( name !in Cluster::nodes || Cluster::nodes[name]$node_type != Cluster::WORKER )
+		return;
+
+	if ( |known_log_certs| == 0 )
+		return;
+
+	Cluster::publish(Cluster::node_topic(name), X509::log_cert_hashes_internal, known_log_certs);
+	}
+@endif
+
+# Publish through manager which also stores all hashes to distribute
+# to any workers that restart.
+function publish_x509_log_cert_hash(lch: LogCertHash)
+	{
+	Cluster::publish(Cluster::manager_topic, X509::log_cert_hashes_internal, set(lch));
+	}
+
 event file_state_remove(f: fa_file) &priority=5
 	{
 	if ( ! f$info?$x509 )
@@ -217,12 +288,19 @@ event file_state_remove(f: fa_file) &priority=5
 
 	if ( f$info$x509?$deduplication_index )
 		{
-		if ( f$info$x509$deduplication_index in known_log_certs )
+		local lch = f$info$x509$deduplication_index;  # lch: LogCertHash
+		if ( lch in known_log_certs )
 			return;
 		else if ( |known_log_certs| < known_log_certs_maximum_size )
-			add known_log_certs[f$info$x509$deduplication_index];
+			{
+			add known_log_certs[lch];
+
+			# The index was added to our local known certs table.
+			# Propagate it to other workers.
+			if ( known_log_certs_enable_publish )
+				publish_x509_log_cert_hash(lch);
+			}
 		}
 
 	Log::write(LOG, f$info$x509);
 	}
-

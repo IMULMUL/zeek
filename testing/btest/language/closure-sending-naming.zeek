@@ -14,7 +14,7 @@
 # still works), or separately.
 ####
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 redef exit_only_after_terminate = T;
 type myfunctype: function(c: count) : function(d: count) : count;
@@ -34,7 +34,7 @@ global n = 0;
 function send_event()
     {
     local event_count = 1;
-    # log fails to be looked up because of a missing print statment
+    # log fails to be looked up because of a missing print statement
     # functions must have the same name on both ends of broker.
     local log : myfunctype = function(c: count) : function(d: count) : count
         {
@@ -66,9 +66,9 @@ event pong(msg: string, f: myfunctype)
     send_event();
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 redef exit_only_after_terminate = T;
 const events_to_recv = 1;
@@ -76,7 +76,7 @@ type myfunctype: function(c: count) : function(d: count) : count;
 
 global global_with_same_name = 100;
 
-global pong: event(msg: string, f: myfunctype);
+global pong: event(msg: string, f: myfunctype) &is_used;
 
 # This is one, of many, ways to declare your functions that you plan to receive.
 # All you are doing is giving the parser a version of their body, so they can be
@@ -116,7 +116,7 @@ event Broker::peer_lost(endpoint: Broker::EndpointInfo, msg: string)
 
 global n = 0;
 
-event ping(msg: string, f: myfunctype)
+event ping(msg: string, f: myfunctype) &is_used
     {
     print fmt("receiver got ping: %s", msg);
     ++n;
@@ -132,4 +132,4 @@ event ping(msg: string, f: myfunctype)
         }
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE

@@ -2,8 +2,7 @@
 
 #include "zeek/NetVar.h"
 
-#include "zeek/zeek-config.h"
-
+// EventHandler.h is needed for event.bif.netvar_init later.
 #include "zeek/EventHandler.h"
 #include "zeek/ID.h"
 #include "zeek/Val.h"
@@ -15,7 +14,6 @@ zeek::RecordType* endpoint_stats;
 zeek::RecordType* connection_type;
 zeek::RecordType* fa_file_type;
 zeek::RecordType* fa_metadata_type;
-zeek::RecordType* icmp_conn;
 zeek::RecordType* icmp_context;
 zeek::RecordType* SYN_packet;
 zeek::RecordType* pcap_packet;
@@ -32,9 +30,6 @@ zeek::VectorType* mime_matches;
 zeek::RecordType* mime_match;
 
 zeek::RecordType* socks_address;
-
-zeek::TableVal* tcp_reassembler_ports_orig;
-zeek::TableVal* tcp_reassembler_ports_resp;
 
 zeek::TableVal* tcp_content_delivery_ports_orig;
 zeek::TableVal* tcp_content_delivery_ports_resp;
@@ -106,14 +101,14 @@ zeek::StringVal* cmd_line_bpf_filter;
 
 zeek::StringVal* global_hash_seed;
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-int watchdog_interval;
+double watchdog_interval;
 
 int max_timer_expires;
 
 int ignore_checksums;
+int drop_bad_checksums;
 int partial_connection_ok;
 int tcp_SYN_ack_ok;
 int tcp_match_undelivered;
@@ -132,11 +127,13 @@ int tcp_max_initial_window;
 int tcp_max_above_hole_without_any_acks;
 int tcp_excessive_data_without_further_acks;
 int tcp_max_old_segments;
+int tcp_max_reassembler_blocks;
 
 double non_analyzed_lifetime;
 double tcp_inactivity_timeout;
 double udp_inactivity_timeout;
 double icmp_inactivity_timeout;
+double unknown_ip_inactivity_timeout;
 
 int tcp_storm_thresh;
 double tcp_storm_interarrival_thresh;
@@ -158,6 +155,11 @@ int truncate_http_URI;
 int dns_skip_all_auth;
 int dns_skip_all_addl;
 int dns_max_queries;
+int dns_max_compression_chain_depth;
+int dns_max_txt_character_strings;
+int dns_max_spf_character_strings;
+int dns_max_nsec_type_bitmaps;
+int dns_max_nsec3_type_bitmaps;
 
 double table_expire_interval;
 double table_expire_delay;
@@ -170,11 +172,8 @@ int other_addr_anonymization;
 
 double profiling_interval;
 int expensive_profiling_multiple;
-int segment_profiling;
 int pkt_profile_mode;
 double pkt_profile_freq;
-
-int load_sample_freq;
 
 int packet_filter_default;
 
@@ -187,166 +186,159 @@ int dpd_match_only_beginning;
 int dpd_late_match_stop;
 int dpd_ignore_ports;
 
-int check_for_unused_event_handlers;
-
-double timer_mgr_inactivity_timeout;
-
 int record_all_packets;
 
-bro_uint_t bits_per_uid;
+zeek_uint_t bits_per_uid = 0;
 
-	} // namespace zeek::detail. The namespace has be closed here before we include the netvar_def
-	  // files.
+zeek_uint_t tunnel_max_changes_per_connection;
+
+} // namespace zeek::detail
+  // files.
 
 // Because of how the BIF include files are built with namespaces already in them,
 // these files need to be included separately before the namespace is opened below.
 
-static void bif_init_event_handlers()
-	{
+static void bif_init_event_handlers() {
 #include "event.bif.netvar_init"
-	}
+}
 
-static void bif_init_net_var()
-	{
+static void bif_init_net_var() {
 #include "const.bif.netvar_init"
 #include "packet_analysis.bif.netvar_init"
 #include "reporter.bif.netvar_init"
 #include "supervisor.bif.netvar_init"
-	}
+#include "telemetry_consts.bif.netvar_init"
+}
 
-static void init_bif_types()
-	{
+static void init_bif_types() {
+#include "telemetry_types.bif.netvar_init"
 #include "types.bif.netvar_init"
-	}
+}
 
 #include "const.bif.netvar_def"
 #include "event.bif.netvar_def"
 #include "packet_analysis.bif.netvar_def"
 #include "reporter.bif.netvar_def"
 #include "supervisor.bif.netvar_def"
+#include "telemetry_consts.bif.netvar_def"
+#include "telemetry_types.bif.netvar_def"
 #include "types.bif.netvar_def"
 
 // Re-open the namespace now that the bif headers are all included.
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-void init_event_handlers()
-	{
-	bif_init_event_handlers();
-	}
+void init_event_handlers() { bif_init_event_handlers(); }
 
-void init_general_global_var()
-	{
-	table_expire_interval = id::find_val("table_expire_interval")->AsInterval();
-	table_expire_delay = id::find_val("table_expire_delay")->AsInterval();
-	table_incremental_step = id::find_val("table_incremental_step")->AsCount();
-	packet_filter_default = id::find_val("packet_filter_default")->AsBool();
-	sig_max_group_size = id::find_val("sig_max_group_size")->AsCount();
-	check_for_unused_event_handlers = id::find_val("check_for_unused_event_handlers")->AsBool();
-	record_all_packets = id::find_val("record_all_packets")->AsBool();
-	bits_per_uid = id::find_val("bits_per_uid")->AsCount();
-	}
+void init_general_global_var() {
+    table_expire_interval = id::find_val("table_expire_interval")->AsInterval();
+    table_expire_delay = id::find_val("table_expire_delay")->AsInterval();
+    table_incremental_step = id::find_val("table_incremental_step")->AsCount();
+    packet_filter_default = id::find_val("packet_filter_default")->AsBool();
+    sig_max_group_size = id::find_val("sig_max_group_size")->AsCount();
+    record_all_packets = id::find_val("record_all_packets")->AsBool();
+    bits_per_uid = id::find_val("bits_per_uid")->AsCount();
+}
 
-void init_builtin_types()
-	{
-	init_bif_types();
-	id::detail::init_types();
-	}
+void init_builtin_types() {
+    init_bif_types();
+    id::detail::init_types();
+}
 
-void init_net_var()
-	{
-	bif_init_net_var();
+void init_net_var() {
+    bif_init_net_var();
 
-	ignore_checksums = id::find_val("ignore_checksums")->AsBool();
-	partial_connection_ok = id::find_val("partial_connection_ok")->AsBool();
-	tcp_SYN_ack_ok = id::find_val("tcp_SYN_ack_ok")->AsBool();
-	tcp_match_undelivered = id::find_val("tcp_match_undelivered")->AsBool();
+    ignore_checksums = id::find_val("ignore_checksums")->AsBool();
+    drop_bad_checksums = id::find_val("drop_bad_checksums")->AsBool();
+    partial_connection_ok = id::find_val("partial_connection_ok")->AsBool();
+    tcp_SYN_ack_ok = id::find_val("tcp_SYN_ack_ok")->AsBool();
+    tcp_match_undelivered = id::find_val("tcp_match_undelivered")->AsBool();
 
-	frag_timeout = id::find_val("frag_timeout")->AsInterval();
+    frag_timeout = id::find_val("frag_timeout")->AsInterval();
 
-	tcp_SYN_timeout = id::find_val("tcp_SYN_timeout")->AsInterval();
-	tcp_session_timer = id::find_val("tcp_session_timer")->AsInterval();
-	tcp_connection_linger = id::find_val("tcp_connection_linger")->AsInterval();
-	tcp_attempt_delay = id::find_val("tcp_attempt_delay")->AsInterval();
-	tcp_close_delay = id::find_val("tcp_close_delay")->AsInterval();
-	tcp_reset_delay = id::find_val("tcp_reset_delay")->AsInterval();
-	tcp_partial_close_delay = id::find_val("tcp_partial_close_delay")->AsInterval();
+    tcp_SYN_timeout = id::find_val("tcp_SYN_timeout")->AsInterval();
+    tcp_session_timer = id::find_val("tcp_session_timer")->AsInterval();
+    tcp_connection_linger = id::find_val("tcp_connection_linger")->AsInterval();
+    tcp_attempt_delay = id::find_val("tcp_attempt_delay")->AsInterval();
+    tcp_close_delay = id::find_val("tcp_close_delay")->AsInterval();
+    tcp_reset_delay = id::find_val("tcp_reset_delay")->AsInterval();
+    tcp_partial_close_delay = id::find_val("tcp_partial_close_delay")->AsInterval();
 
-	tcp_max_initial_window = id::find_val("tcp_max_initial_window")->AsCount();
-	tcp_max_above_hole_without_any_acks =
-		id::find_val("tcp_max_above_hole_without_any_acks")->AsCount();
-	tcp_excessive_data_without_further_acks =
-		id::find_val("tcp_excessive_data_without_further_acks")->AsCount();
-	tcp_max_old_segments = id::find_val("tcp_max_old_segments")->AsCount();
+    tcp_max_initial_window = id::find_val("tcp_max_initial_window")->AsCount();
+    tcp_max_above_hole_without_any_acks = id::find_val("tcp_max_above_hole_without_any_acks")->AsCount();
+    tcp_excessive_data_without_further_acks = id::find_val("tcp_excessive_data_without_further_acks")->AsCount();
+    tcp_max_old_segments = id::find_val("tcp_max_old_segments")->AsCount();
+    tcp_max_reassembler_blocks = id::find_val("tcp_max_reassembler_blocks")->AsCount();
 
-	non_analyzed_lifetime = id::find_val("non_analyzed_lifetime")->AsInterval();
-	tcp_inactivity_timeout = id::find_val("tcp_inactivity_timeout")->AsInterval();
-	udp_inactivity_timeout = id::find_val("udp_inactivity_timeout")->AsInterval();
-	icmp_inactivity_timeout = id::find_val("icmp_inactivity_timeout")->AsInterval();
+    non_analyzed_lifetime = id::find_val("non_analyzed_lifetime")->AsInterval();
+    tcp_inactivity_timeout = id::find_val("tcp_inactivity_timeout")->AsInterval();
+    udp_inactivity_timeout = id::find_val("udp_inactivity_timeout")->AsInterval();
+    icmp_inactivity_timeout = id::find_val("icmp_inactivity_timeout")->AsInterval();
+    unknown_ip_inactivity_timeout = id::find_val("unknown_ip_inactivity_timeout")->AsInterval();
 
-	tcp_storm_thresh = id::find_val("tcp_storm_thresh")->AsCount();
-	tcp_storm_interarrival_thresh = id::find_val("tcp_storm_interarrival_thresh")->AsInterval();
+    tcp_storm_thresh = id::find_val("tcp_storm_thresh")->AsCount();
+    tcp_storm_interarrival_thresh = id::find_val("tcp_storm_interarrival_thresh")->AsInterval();
 
-	tcp_content_deliver_all_orig = bool(id::find_val("tcp_content_deliver_all_orig")->AsBool());
-	tcp_content_deliver_all_resp = bool(id::find_val("tcp_content_deliver_all_resp")->AsBool());
+    tcp_content_deliver_all_orig = id::find_val("tcp_content_deliver_all_orig")->AsBool();
+    tcp_content_deliver_all_resp = id::find_val("tcp_content_deliver_all_resp")->AsBool();
 
-	udp_content_deliver_all_orig = bool(id::find_val("udp_content_deliver_all_orig")->AsBool());
-	udp_content_deliver_all_resp = bool(id::find_val("udp_content_deliver_all_resp")->AsBool());
-	udp_content_delivery_ports_use_resp = bool(
-		id::find_val("udp_content_delivery_ports_use_resp")->AsBool());
+    udp_content_deliver_all_orig = id::find_val("udp_content_deliver_all_orig")->AsBool();
+    udp_content_deliver_all_resp = id::find_val("udp_content_deliver_all_resp")->AsBool();
+    udp_content_delivery_ports_use_resp = id::find_val("udp_content_delivery_ports_use_resp")->AsBool();
 
-	dns_session_timeout = id::find_val("dns_session_timeout")->AsInterval();
-	rpc_timeout = id::find_val("rpc_timeout")->AsInterval();
+    dns_session_timeout = id::find_val("dns_session_timeout")->AsInterval();
+    rpc_timeout = id::find_val("rpc_timeout")->AsInterval();
 
-	watchdog_interval = int(id::find_val("watchdog_interval")->AsInterval());
+    watchdog_interval = static_cast<int>(id::find_val("watchdog_interval")->AsInterval());
 
-	max_timer_expires = id::find_val("max_timer_expires")->AsCount();
+    max_timer_expires = id::find_val("max_timer_expires")->AsCount();
 
-	mime_segment_length = id::find_val("mime_segment_length")->AsCount();
-	mime_segment_overlap_length = id::find_val("mime_segment_overlap_length")->AsCount();
+    mime_segment_length = id::find_val("mime_segment_length")->AsCount();
+    mime_segment_overlap_length = id::find_val("mime_segment_overlap_length")->AsCount();
 
-	http_entity_data_delivery_size = id::find_val("http_entity_data_delivery_size")->AsCount();
-	truncate_http_URI = id::find_val("truncate_http_URI")->AsInt();
+    http_entity_data_delivery_size = id::find_val("http_entity_data_delivery_size")->AsCount();
+    truncate_http_URI = id::find_val("truncate_http_URI")->AsInt();
 
-	dns_skip_all_auth = id::find_val("dns_skip_all_auth")->AsBool();
-	dns_skip_all_addl = id::find_val("dns_skip_all_addl")->AsBool();
-	dns_max_queries = id::find_val("dns_max_queries")->AsCount();
+    dns_skip_all_auth = id::find_val("dns_skip_all_auth")->AsBool();
+    dns_skip_all_addl = id::find_val("dns_skip_all_addl")->AsBool();
+    dns_max_queries = id::find_val("dns_max_queries")->AsCount();
+    dns_max_compression_chain_depth = id::find_val("dns_max_compression_chain_depth")->AsCount();
+    dns_max_txt_character_strings = id::find_val("dns_max_txt_character_strings")->AsCount();
+    dns_max_spf_character_strings = id::find_val("dns_max_spf_character_strings")->AsCount();
+    dns_max_nsec_type_bitmaps = id::find_val("dns_max_nsec_type_bitmaps")->AsCount();
+    dns_max_nsec3_type_bitmaps = id::find_val("dns_max_nsec3_type_bitmaps")->AsCount();
 
-	orig_addr_anonymization = 0;
-	if ( const auto& id = id::find("orig_addr_anonymization") )
-		if ( const auto& v = id->GetVal() )
-			orig_addr_anonymization = v->AsInt();
-	resp_addr_anonymization = 0;
-	if ( const auto& id = id::find("resp_addr_anonymization") )
-		if ( const auto& v = id->GetVal() )
-			resp_addr_anonymization = v->AsInt();
-	other_addr_anonymization = 0;
-	if ( const auto& id = id::find("other_addr_anonymization") )
-		if ( const auto& v = id->GetVal() )
-			other_addr_anonymization = v->AsInt();
+    orig_addr_anonymization = 0;
+    if ( const auto& id = id::find("orig_addr_anonymization") )
+        if ( const auto& v = id->GetVal() )
+            orig_addr_anonymization = v->AsInt();
+    resp_addr_anonymization = 0;
+    if ( const auto& id = id::find("resp_addr_anonymization") )
+        if ( const auto& v = id->GetVal() )
+            resp_addr_anonymization = v->AsInt();
+    other_addr_anonymization = 0;
+    if ( const auto& id = id::find("other_addr_anonymization") )
+        if ( const auto& v = id->GetVal() )
+            other_addr_anonymization = v->AsInt();
 
-	connection_status_update_interval = 0.0;
-	if ( const auto& id = id::find("connection_status_update_interval") )
-		if ( const auto& v = id->GetVal() )
-			connection_status_update_interval = v->AsInterval();
+    connection_status_update_interval = 0.0;
+    if ( const auto& id = id::find("connection_status_update_interval") )
+        if ( const auto& v = id->GetVal() )
+            connection_status_update_interval = v->AsInterval();
 
-	expensive_profiling_multiple = id::find_val("expensive_profiling_multiple")->AsCount();
-	profiling_interval = id::find_val("profiling_interval")->AsInterval();
-	segment_profiling = id::find_val("segment_profiling")->AsBool();
+    expensive_profiling_multiple = id::find_val("expensive_profiling_multiple")->AsCount();
+    profiling_interval = id::find_val("profiling_interval")->AsInterval();
 
-	pkt_profile_mode = id::find_val("pkt_profile_mode")->InternalInt();
-	pkt_profile_freq = id::find_val("pkt_profile_freq")->AsDouble();
+    pkt_profile_mode = id::find_val("pkt_profile_mode")->InternalInt();
+    pkt_profile_freq = id::find_val("pkt_profile_freq")->AsDouble();
 
-	load_sample_freq = id::find_val("load_sample_freq")->AsCount();
+    dpd_reassemble_first_packets = id::find_val("dpd_reassemble_first_packets")->AsBool();
+    dpd_buffer_size = id::find_val("dpd_buffer_size")->AsCount();
+    dpd_max_packets = id::find_val("dpd_max_packets")->AsCount();
+    dpd_match_only_beginning = id::find_val("dpd_match_only_beginning")->AsBool();
+    dpd_late_match_stop = id::find_val("dpd_late_match_stop")->AsBool();
+    dpd_ignore_ports = id::find_val("dpd_ignore_ports")->AsBool();
 
-	dpd_reassemble_first_packets = id::find_val("dpd_reassemble_first_packets")->AsBool();
-	dpd_buffer_size = id::find_val("dpd_buffer_size")->AsCount();
-	dpd_max_packets = id::find_val("dpd_max_packets")->AsCount();
-	dpd_match_only_beginning = id::find_val("dpd_match_only_beginning")->AsBool();
-	dpd_late_match_stop = id::find_val("dpd_late_match_stop")->AsBool();
-	dpd_ignore_ports = id::find_val("dpd_ignore_ports")->AsBool();
+    tunnel_max_changes_per_connection = id::find_val("Tunnel::max_changes_per_connection")->AsCount();
+}
 
-	timer_mgr_inactivity_timeout = id::find_val("timer_mgr_inactivity_timeout")->AsInterval();
-	}
-
-	} // namespace zeek::detail
+} // namespace zeek::detail

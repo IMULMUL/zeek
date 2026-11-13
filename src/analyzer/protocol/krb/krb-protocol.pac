@@ -18,12 +18,12 @@ type KRB_PDU_TCP(is_orig: bool) = record {
 
 type KRB_PDU(is_orig: bool) = record {
 	app_meta  : ASN1EncodingMeta;
-	msg_type  : case (app_meta.tag - ASN1_APP_TAG_OFFSET) of {
+	msg_type  : case (app_meta.tag_num) of {
 		AS_REQ    -> as_req   : KRB_AS_REQ(is_orig);
 		AS_REP    -> as_rep   : KRB_AS_REP(is_orig);
 		TGS_REQ   -> tgs_req  : KRB_TGS_REQ(is_orig);
 		TGS_REP   -> tgs_rep  : KRB_TGS_REP(is_orig);
-		AP_REQ    -> ap_req   : KRB_AP_REQ(is_orig);
+		AP_REQ    -> ap_req   : KRB_AP_REQ(is_orig, false);
 		AP_REP    -> ap_rep   : KRB_AP_REP(is_orig);
 		KRB_SAFE  -> krb_safe : KRB_SAFE_MSG(is_orig);
 		KRB_PRIV  -> krb_priv : KRB_PRIV_MSG(is_orig);
@@ -56,11 +56,13 @@ type KRB_KDC_REQ(is_orig: bool, pkt_type: uint8) = record {
 	msg_type   : SequenceElement(true);
 	padata	   : KRB_PA_Data_Optional(is_orig, pkt_type, 3);
 	body_meta  : ASN1EncodingMeta;
-	body_args  : KRB_REQ_Arg[];
+	body_args  : KRB_REQ_Arg[] &length=body_meta.length &requires(reset_kdc_req_args);
+} &let {
+	reset_kdc_req_args: bool = $context.connection.reset_kdc_req_args();
 };
 
 type KRB_REQ_Arg = record {
-	seq_meta   : ASN1EncodingMeta;
+	seq_meta   : ASN1EncodingMeta &enforce($context.connection.validate_kdc_req_arg(seq_meta.index));
 	data	   : KRB_REQ_Arg_Data(seq_meta.index) &length=seq_meta.length;
 };
 
@@ -73,11 +75,16 @@ type KRB_REQ_Arg_Data(index: uint8) = case index of {
 	5  	-> till		: KRB_Time;
 	6  	-> rtime	: KRB_Time;
 	7  	-> nonce	: ASN1Integer;
-	8  	-> etype	: Array;
+	8  	-> etype	: EType_Array;
 	9  	-> addrs	: KRB_Host_Addresses;
 	10 	-> auth_data 	: ASN1OctetString;
 	11 	-> addl_tkts 	: KRB_Ticket_Sequence;
 	default -> unknown	: bytestring &restofdata;
+};
+
+type EType_Array = record {
+	array_meta: ASN1EncodingMeta;
+	data:       ASN1Encoding[] &enforce(array_meta.length < 1000);
 };
 
 type KRB_KDC_Options = record {
@@ -125,7 +132,7 @@ type KRB_KDC_REP(is_orig: bool, pkt_type: uint8) = record {
 
 ### AP_REQ
 
-type KRB_AP_REQ(is_orig: bool) = record {
+type KRB_AP_REQ(is_orig: bool, in_kdc_padata: bool) = record {
 	seq_meta    : ASN1EncodingMeta;
 	pvno 	    : SequenceElement(true);
 	msg_type    : SequenceElement(true);

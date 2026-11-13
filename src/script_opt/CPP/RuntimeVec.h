@@ -10,16 +10,21 @@
 
 #include "zeek/Val.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
 // Appends v2 to the vector v1.  A separate function because of the
 // need to support assignment cascades.
-inline ValPtr vector_append__CPP(VectorValPtr v1, ValPtr v2)
-	{
-	v1->Assign(v1->Size(), v2);
-	return v2;
-	}
+inline ValPtr vector_append__CPP(VectorValPtr v1, const ValPtr& v2) {
+    v1->Assign(v1->Size(), v2);
+    return v1;
+}
+
+// Appends vector v2 to the vector v1.
+inline ValPtr vector_vec_append__CPP(VectorValPtr v1, const VectorValPtr& v2) {
+    if ( ! v2->AddTo(v1.get(), false) )
+        reporter->CPPRuntimeError("incompatible vector element assignment");
+    return v1;
+}
 
 // Unary vector operations.
 extern VectorValPtr vec_op_pos__CPP(const VectorValPtr& v, const TypePtr& t);
@@ -38,6 +43,8 @@ extern VectorValPtr vec_op_or__CPP(const VectorValPtr& v1, const VectorValPtr& v
 extern VectorValPtr vec_op_xor__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
 extern VectorValPtr vec_op_andand__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
 extern VectorValPtr vec_op_oror__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
+extern VectorValPtr vec_op_lshift__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
+extern VectorValPtr vec_op_rshift__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
 
 // Vector relational operations.
 extern VectorValPtr vec_op_lt__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
@@ -65,6 +72,10 @@ extern VectorValPtr str_vec_op_ne__CPP(const VectorValPtr& v1, const VectorValPt
 extern VectorValPtr str_vec_op_gt__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
 extern VectorValPtr str_vec_op_ge__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
 
+// Pattern vector relationals.
+extern VectorValPtr pat_vec_op_eq__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
+extern VectorValPtr pat_vec_op_ne__CPP(const VectorValPtr& v1, const VectorValPtr& v2);
+
 // Support for vector conditional ('?:') expressions.  Using the boolean
 // vector v1 as a selector, returns a new vector populated with the
 // elements selected out of v2 and v3.
@@ -76,12 +87,12 @@ extern VectorValPtr vector_select__CPP(const VectorValPtr& v1, VectorValPtr v2, 
 extern VectorValPtr vector_coerce_to__CPP(const VectorValPtr& v, const TypePtr& targ);
 
 // Similar coercion, but works for v having perhaps not the correct type.
-extern VectorValPtr vec_coerce_to_bro_int_t__CPP(const VectorValPtr& v, TypePtr targ);
-extern VectorValPtr vec_coerce_to_bro_uint_t__CPP(const VectorValPtr& v, TypePtr targ);
+extern VectorValPtr vec_coerce_to_zeek_int_t__CPP(const VectorValPtr& v, TypePtr targ);
+extern VectorValPtr vec_coerce_to_zeek_uint_t__CPP(const VectorValPtr& v, TypePtr targ);
 extern VectorValPtr vec_coerce_to_double__CPP(const VectorValPtr& v, TypePtr targ);
 
 // A dummy function used during code generation for unsupported operations
 // that mix vector and scalar arguments.
 extern VectorValPtr vec_scalar_mixed_with_vector();
 
-	} // namespace zeek::detail
+} // namespace zeek::detail

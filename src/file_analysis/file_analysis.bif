@@ -1,3 +1,5 @@
+%gen-native
+
 ##! Internal functions and types used by the file analysis framework.
 
 module Files;
@@ -13,60 +15,56 @@ type AnalyzerArgs: record;
 ## :zeek:see:`Files::set_timeout_interval`.
 function Files::__set_timeout_interval%(file_id: string, t: interval%): bool
 	%{
-	bool result = zeek::file_mgr->SetTimeoutInterval(file_id->CheckString(), t);
-	return zeek::val_mgr->Bool(result);
+	return zeek::file_mgr->SetTimeoutInterval(file_id->CheckString(), t);
 	%}
 
 ## :zeek:see:`Files::enable_reassembly`.
 function Files::__enable_reassembly%(file_id: string%): bool
 	%{
-	bool result = zeek::file_mgr->EnableReassembly(file_id->CheckString());
-	return zeek::val_mgr->Bool(result);
+	return zeek::file_mgr->EnableReassembly(file_id->CheckString());
 	%}
 
 ## :zeek:see:`Files::disable_reassembly`.
 function Files::__disable_reassembly%(file_id: string%): bool
 	%{
-	bool result = zeek::file_mgr->DisableReassembly(file_id->CheckString());
-	return zeek::val_mgr->Bool(result);
+	return zeek::file_mgr->DisableReassembly(file_id->CheckString());
 	%}
 
 ## :zeek:see:`Files::set_reassembly_buffer_size`.
-function Files::__set_reassembly_buffer%(file_id: string, max: count%): bool
+function Files::__set_reassembly_buffer%(file_id: string, max: count, max_blocks: count%): bool
 	%{
-	bool result = zeek::file_mgr->SetReassemblyBuffer(file_id->CheckString(), max);
-	return zeek::val_mgr->Bool(result);
+	return zeek::file_mgr->SetReassemblyBuffer(file_id->CheckString(), max, max_blocks);
 	%}
 
 ## :zeek:see:`Files::enable_analyzer`.
 function Files::__enable_analyzer%(tag: Files::Tag%) : bool
 	%{
-	auto c = zeek::file_mgr->Lookup(tag->AsEnumVal());
+	auto c = zeek::file_mgr->Lookup(tag->AsEnumVal(), false);
 
 	if ( ! c )
-		return zeek::val_mgr->False();
+		return false;
 
 	c->SetEnabled(true);
-	return zeek::val_mgr->True();
+	return true;
 	%}
 
 ## :zeek:see:`Files::disable_analyzer`.
 function Files::__disable_analyzer%(tag: Files::Tag%) : bool
 	%{
-	auto c = zeek::file_mgr->Lookup(tag->AsEnumVal());
+	auto c = zeek::file_mgr->Lookup(tag->AsEnumVal(), false);
 
 	if ( ! c )
-		return zeek::val_mgr->False();
+		return false;
 
 	c->SetEnabled(false);
-	return zeek::val_mgr->True();
+	return true;
 	%}
 
 ## :zeek:see:`Files::analyzer_enabled`.
 function Files::__analyzer_enabled%(tag: Files::Tag%) : bool
 	%{
 	auto c = zeek::file_mgr->Lookup(tag->AsEnumVal());
-	return zeek::val_mgr->Bool(c && c->Enabled());
+	return c && c->Enabled();
 	%}
 
 ## :zeek:see:`Files::add_analyzer`.
@@ -74,11 +72,10 @@ function Files::__add_analyzer%(file_id: string, tag: Files::Tag, args: any%): b
 	%{
 	using zeek::BifType::Record::Files::AnalyzerArgs;
 	auto rv = args->AsRecordVal()->CoerceTo(AnalyzerArgs);
-	bool result = zeek::file_mgr->AddAnalyzer(
+	return zeek::file_mgr->AddAnalyzer(
 	     file_id->CheckString(),
 	     zeek::file_mgr->GetComponentTag(tag),
 	     std::move(rv));
-	return zeek::val_mgr->Bool(result);
 	%}
 
 ## :zeek:see:`Files::remove_analyzer`.
@@ -86,34 +83,28 @@ function Files::__remove_analyzer%(file_id: string, tag: Files::Tag, args: any%)
 	%{
 	using zeek::BifType::Record::Files::AnalyzerArgs;
 	auto rv = args->AsRecordVal()->CoerceTo(AnalyzerArgs);
-	bool result = zeek::file_mgr->RemoveAnalyzer(
+	return zeek::file_mgr->RemoveAnalyzer(
 		file_id->CheckString(),
 		zeek::file_mgr->GetComponentTag(tag),
 		std::move(rv));
-	return zeek::val_mgr->Bool(result);
 	%}
 
 ## :zeek:see:`Files::stop`.
 function Files::__stop%(file_id: string%): bool
 	%{
-	bool result = zeek::file_mgr->IgnoreFile(file_id->CheckString());
-	return zeek::val_mgr->Bool(result);
+	return zeek::file_mgr->IgnoreFile(file_id->CheckString());
 	%}
 
 ## :zeek:see:`Files::analyzer_name`.
 function Files::__analyzer_name%(tag: Files::Tag%) : string
 	%{
-	const auto& n = zeek::file_mgr->GetComponentName(zeek::IntrusivePtr{zeek::NewRef{}, tag->AsEnumVal()});
-	return zeek::make_intrusive<zeek::StringVal>(n);
+	return zeek::file_mgr->GetComponentNameVal(zeek::IntrusivePtr{zeek::NewRef{}, tag->AsEnumVal()});
 	%}
 
 ## :zeek:see:`Files::file_exists`.
 function Files::__file_exists%(fuid: string%): bool
 	%{
-	if ( zeek::file_mgr->LookupFile(fuid->CheckString()) != nullptr )
-		return zeek::val_mgr->True();
-	else
-		return zeek::val_mgr->False();
+	return zeek::file_mgr->LookupFile(fuid->CheckString()) != nullptr;
 	%}
 
 ## :zeek:see:`Files::lookup_file`.

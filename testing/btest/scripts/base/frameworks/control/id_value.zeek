@@ -1,3 +1,7 @@
+# Can't use this test for -O gen-C++ because of multiple simultaneous
+# Zeek runs.
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+
 # @TEST-PORT: BROKER_PORT
 #
 # @TEST-EXEC: btest-bg-run controllee  ZEEKPATH=$ZEEKPATH:.. zeek -b %INPUT only-for-controllee frameworks/control/controllee Broker::default_port=$BROKER_PORT
@@ -5,16 +9,18 @@
 # @TEST-EXEC: btest-bg-wait 30
 # @TEST-EXEC: btest-diff controller/.stdout
 
+@load frameworks/cluster/backend/broker
+
 @load base/frameworks/control
 
 # This value shouldn't ever be printed to the controllers stdout.
 const test_var = "Original value" &redef;
 
-@TEST-START-FILE only-for-controllee.zeek
+# @TEST-START-FILE only-for-controllee.zeek
 # This is only loaded on the controllee, but it's sent to the controller 
 # and should be printed there.
 redef test_var = "This is the value from the controllee";
-@TEST-END-FILE
+# @TEST-END-FILE
 
 event Control::id_value_response(id: string, val: string)
 	{

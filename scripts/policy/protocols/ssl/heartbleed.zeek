@@ -1,4 +1,4 @@
-##! Detect the TLS heartbleed attack. See http://heartbleed.com for more.
+##! Detect the TLS heartbleed attack. See https://heartbleed.com for more.
 
 @load base/protocols/ssl
 @load base/frameworks/notice
@@ -18,7 +18,7 @@ export {
 	};
 }
 
-# Do not disable analyzers after detection - otherwhise we will not notice
+# Do not disable analyzers after detection - otherwise we will not notice
 # encrypted attacks.
 redef SSL::disable_analyzer_after_detection=F;
 
@@ -79,7 +79,7 @@ event zeek_init()
 	min_lengths += [$cipher=/_RC2_CBC_40_MD5$/, $min_length=40];
 	}
 
-event ssl_heartbeat(c: connection, is_orig: bool, length: count, heartbeat_type: count, payload_length: count, payload: string)
+event ssl_heartbeat(c: connection, is_client: bool, length: count, heartbeat_type: count, payload_length: count, payload: string)
 	{
 	if ( ! c?$ssl )
 		return;
@@ -91,36 +91,36 @@ event ssl_heartbeat(c: connection, is_orig: bool, length: count, heartbeat_type:
 		if ( payload_length > checklength )
 			{
 			c$ssl$heartbleed_detected = T;
-			NOTICE([$note=Heartbleed::SSL_Heartbeat_Attack,
-				$msg=fmt("An TLS heartbleed attack was detected! Record length %d. Payload length %d", length, payload_length),
-				$conn=c,
-				$identifier=cat(c$uid, length, payload_length)
-				]);
+			NOTICE(Notice::Info($note=Heartbleed::SSL_Heartbeat_Attack,
+			                    $msg=fmt("An TLS heartbleed attack was detected! Record length %d. Payload length %d", length, payload_length),
+			                    $conn=c,
+			                    $identifier=cat(c$uid, length, payload_length)
+			                    ));
 			}
-		else if ( is_orig )
+		else if ( is_client )
 			{
-			NOTICE([$note=Heartbleed::SSL_Heartbeat_Attack,
-				$msg=fmt("Heartbeat request before encryption. Probable Scan without exploit attempt. Message length: %d. Payload length: %d", length, payload_length),
-				$conn=c,
-				$n=length,
-				$identifier=cat(c$uid, length)
-				]);
+			NOTICE(Notice::Info($note=Heartbleed::SSL_Heartbeat_Attack,
+			                    $msg=fmt("Heartbeat request before encryption. Probable Scan without exploit attempt. Message length: %d. Payload length: %d", length, payload_length),
+			                    $conn=c,
+			                    $n=length,
+			                    $identifier=cat(c$uid, length)
+			                    ));
 			}
 		}
 
 	if ( heartbeat_type == 2 && c$ssl$heartbleed_detected )
 		{
-			NOTICE([$note=Heartbleed::SSL_Heartbeat_Attack_Success,
-				$msg=fmt("An TLS heartbleed attack detected before was probably exploited. Message length: %d. Payload length: %d", length, payload_length),
-				$conn=c,
-				$identifier=c$uid
-				]);
+			NOTICE(Notice::Info($note=Heartbleed::SSL_Heartbeat_Attack_Success,
+			                    $msg=fmt("An TLS heartbleed attack detected before was probably exploited. Message length: %d. Payload length: %d", length, payload_length),
+			                    $conn=c,
+			                    $identifier=c$uid
+			                    ));
 		}
 	}
 
-event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
+event ssl_encrypted_heartbeat(c: connection, is_client: bool, length: count)
 	{
-	if ( is_orig )
+	if ( is_client )
 		++c$ssl$originator_heartbeats;
 	else
 		++c$ssl$responder_heartbeats;
@@ -128,43 +128,43 @@ event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
 	local duration = network_time() - c$start_time;
 
 	if ( c$ssl$enc_appdata_packages == 0 )
-			NOTICE([$note=SSL_Heartbeat_Attack,
-				$msg=fmt("Heartbeat before ciphertext. Probable attack or scan. Length: %d, is_orig: %d", length, is_orig),
-				$conn=c,
-				$n=length,
-				$identifier=fmt("%s%s", c$uid, "early")
-				]);
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Attack,
+			                    $msg=fmt("Heartbeat before ciphertext. Probable attack or scan. Length: %d, is_client: %d", length, is_client),
+			                    $conn=c,
+			                    $n=length,
+			                    $identifier=fmt("%s%s", c$uid, "early")
+			                    ));
 	else if ( duration < 1min )
-			NOTICE([$note=SSL_Heartbeat_Attack,
-				$msg=fmt("Heartbeat within first minute. Possible attack or scan. Length: %d, is_orig: %d, time: %s", length, is_orig, duration),
-				$conn=c,
-				$n=length,
-				$identifier=fmt("%s%s", c$uid, "early")
-				]);
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Attack,
+			                    $msg=fmt("Heartbeat within first minute. Possible attack or scan. Length: %d, is_client: %d, time: %s", length, is_client, duration),
+			                    $conn=c,
+			                    $n=length,
+			                    $identifier=fmt("%s%s", c$uid, "early")
+			                    ));
 
 	if ( c$ssl$originator_heartbeats > c$ssl$responder_heartbeats + 3 )
-			NOTICE([$note=SSL_Heartbeat_Many_Requests,
-				$msg=fmt("More than 3 heartbeat requests without replies from server. Possible attack. Client count: %d, server count: %d", c$ssl$originator_heartbeats, c$ssl$responder_heartbeats),
-				$conn=c,
-				$n=(c$ssl$originator_heartbeats-c$ssl$responder_heartbeats),
-				$identifier=fmt("%s%d", c$uid, c$ssl$responder_heartbeats/1000) # re-throw every 1000 heartbeats
-				]);
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Many_Requests,
+			                    $msg=fmt("More than 3 heartbeat requests without replies from server. Possible attack. Client count: %d, server count: %d", c$ssl$originator_heartbeats, c$ssl$responder_heartbeats),
+			                    $conn=c,
+			                    $n=(c$ssl$originator_heartbeats-c$ssl$responder_heartbeats),
+			                    $identifier=fmt("%s%d", c$uid, c$ssl$responder_heartbeats/1000) # re-throw every 1000 heartbeats
+			                    ));
 
 	if ( c$ssl$responder_heartbeats > c$ssl$originator_heartbeats + 3 )
-			NOTICE([$note=SSL_Heartbeat_Many_Requests,
-				$msg=fmt("Server sending more heartbeat responses than requests seen. Possible attack. Client count: %d, server count: %d", c$ssl$originator_heartbeats, c$ssl$responder_heartbeats),
-				$conn=c,
-				$n=(c$ssl$responder_heartbeats-c$ssl$originator_heartbeats),
-				$identifier=fmt("%s%d", c$uid, c$ssl$responder_heartbeats/1000) # re-throw every 1000 heartbeats
-				]);
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Many_Requests,
+			                    $msg=fmt("Server sending more heartbeat responses than requests seen. Possible attack. Client count: %d, server count: %d", c$ssl$originator_heartbeats, c$ssl$responder_heartbeats),
+			                    $conn=c,
+			                    $n=(c$ssl$responder_heartbeats-c$ssl$originator_heartbeats),
+			                    $identifier=fmt("%s%d", c$uid, c$ssl$responder_heartbeats/1000) # re-throw every 1000 heartbeats
+			                    ));
 
-	if ( is_orig && length < 19 )
-			NOTICE([$note=SSL_Heartbeat_Odd_Length,
-				$msg=fmt("Heartbeat message smaller than minimum required length. Probable attack or scan. Message length: %d. Cipher: %s. Time: %f", length, c$ssl$cipher, duration),
-				$conn=c,
-				$n=length,
-				$identifier=fmt("%s-weak-%d", c$uid, length)
-				]);
+	if ( is_client && length < 19 )
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Odd_Length,
+			                    $msg=fmt("Heartbeat message smaller than minimum required length. Probable attack or scan. Message length: %d. Cipher: %s. Time: %f", length, c$ssl$cipher, duration),
+			                    $conn=c,
+			                    $n=length,
+			                    $identifier=fmt("%s-weak-%d", c$uid, length)
+			                    ));
 
 	# Examine request lengths based on used cipher...
 	local min_length_choice: vector of min_length;
@@ -179,12 +179,12 @@ event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
 			{
 			if ( length < min_length_choice[i]$min_length )
 				{
-				NOTICE([$note=SSL_Heartbeat_Odd_Length,
-					$msg=fmt("Heartbeat message smaller than minimum required length. Probable attack. Message length: %d. Required length: %d. Cipher: %s. Cipher match: %s", length, min_length_choice[i]$min_length, c$ssl$cipher, min_length_choice[i]$cipher),
-					$conn=c,
-					$n=length,
-					$identifier=fmt("%s-weak-%d", c$uid, length)
-					]);
+				NOTICE(Notice::Info($note=SSL_Heartbeat_Odd_Length,
+				                    $msg=fmt("Heartbeat message smaller than minimum required length. Probable attack. Message length: %d. Required length: %d. Cipher: %s. Cipher match: %s", length, min_length_choice[i]$min_length, c$ssl$cipher, min_length_choice[i]$cipher),
+				                    $conn=c,
+				                    $n=length,
+				                    $identifier=fmt("%s-weak-%d", c$uid, length)
+				                    ));
 				}
 
 			break;
@@ -192,7 +192,7 @@ event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
 
 		}
 
-	if ( is_orig )
+	if ( is_client )
 		{
 		if ( c$ssl?$last_responder_heartbeat_request_size )
 			{
@@ -207,12 +207,12 @@ event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
 		{
 		if ( c$ssl?$last_originator_heartbeat_request_size && c$ssl$last_originator_heartbeat_request_size < length )
 			{
-			NOTICE([$note=SSL_Heartbeat_Attack_Success,
-				$msg=fmt("An encrypted TLS heartbleed attack was probably detected! First packet client record length %d, first packet server record length %d. Time: %f",
-					c$ssl$last_originator_heartbeat_request_size, length, duration),
-				$conn=c,
-				$identifier=c$uid # only throw once per connection
-				]);
+			NOTICE(Notice::Info($note=SSL_Heartbeat_Attack_Success,
+			                    $msg=fmt("An encrypted TLS heartbleed attack was probably detected! First packet client record length %d, first packet server record length %d. Time: %f",
+			                    c$ssl$last_originator_heartbeat_request_size, length, duration),
+			                    $conn=c,
+			                    $identifier=c$uid # only throw once per connection
+			                    ));
 			}
 
 		else if ( ! c$ssl?$last_originator_heartbeat_request_size )
@@ -223,13 +223,13 @@ event ssl_encrypted_heartbeat(c: connection, is_orig: bool, length: count)
 		}
 	}
 
-event ssl_encrypted_data(c: connection, is_orig: bool, record_version: count, content_type: count, length: count)
+event ssl_encrypted_data(c: connection, is_client: bool, record_version: count, content_type: count, length: count)
 	{
 	if ( !c?$ssl )
 		return;
 
 	if ( content_type == SSL::HEARTBEAT )
-		event ssl_encrypted_heartbeat(c, is_orig, length);
+		event ssl_encrypted_heartbeat(c, is_client, length);
 	else if ( (content_type == SSL::APPLICATION_DATA) && (length > 0) )
 		{
 		++c$ssl$enc_appdata_packages;

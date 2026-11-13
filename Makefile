@@ -2,14 +2,27 @@
 # A simple static wrapper for a number of standard Makefile targets,
 # mostly just forwarding to build/Makefile. This is provided only for
 # convenience and supports only a subset of what CMake's Makefile
-# offers. For more, execute that one directly. 
+# offers. For more, execute that one directly.
 #
 
 BUILD=build
+PYTHON ?= python3
 REPO=$$(cd $(CURDIR) && basename $$(git config --get remote.origin.url | sed 's/^[^:]*://g'))
-VERSION_FULL=$(REPO)-$$(cd $(CURDIR) && cat VERSION)
-VERSION_MIN=$(REPO)-$$(cd $(CURDIR) && cat VERSION)-minimal
+VERSION_FULL=$(REPO)-$$(cd $(CURDIR) && $(PYTHON) tools/get-version.py --source .)
 GITDIR=$$(test -f .git && echo $$(cut -d" " -f2 .git) || echo .git)
+REALPATH=$$($$(realpath --relative-to=$(shell pwd) . >/dev/null 2>&1) && echo 'realpath' || echo 'grealpath')
+
+# Paths to exclude from the distribution tarball. These are not exercised by
+# the top-level Zeek build (test frameworks, standalone-only dependencies,
+# duplicate vendored copies).
+DIST_EXCLUDE = \
+	auxil/broker/auxil/prometheus-cpp/3rdparty/googletest \
+	auxil/prometheus-cpp/3rdparty/googletest \
+	auxil/rapidjson/thirdparty/gtest \
+	auxil/spicy/3rdparty/benchmark \
+	auxil/spicy/3rdparty/justrx/3rdparty/benchmark \
+	auxil/spicy/3rdparty/libunistd \
+	auxil/spicy/3rdparty/vcpkg
 
 all: configured
 	$(MAKE) -C $(BUILD) $@
@@ -32,20 +45,26 @@ docclean:
 livehtml:
 	$(MAKE) -C doc $@
 
+# The COPYFILE_DISABLE flag used in the tar commands below is an undocumented feature
+# of the tar binary on macOS. It causes tar to avoid including any of the special files
+# that macOS litters around the repository directory, such as ._ resource files, none
+# of which should be included in the distribution packages.
 dist:
+	@$(PYTHON) tools/get-version.py --source . >/dev/null
 	@test -e ../$(VERSION_FULL) && rm -ri ../$(VERSION_FULL) || true
 	@cp -R . ../$(VERSION_FULL)
-	@for i in . $$(git submodule foreach -q --recursive realpath --relative-to=$$(pwd) .); do ((cd ../$(VERSION_FULL)/$$i && test -f .git && cp -R $(GITDIR) .gitnew && rm -f .git && mv .gitnew .git && sed -i.bak -e 's#[[:space:]]*worktree[[:space:]]*=[[:space:]]*.*##g' .git/config) || true); done
-	@for i in . $$(git submodule foreach -q --recursive realpath --relative-to=$$(pwd) .); do (cd ../$(VERSION_FULL)/$$i && git reset -q --hard && git clean -ffdxq); done
+	@for i in . $$(git submodule foreach -q --recursive $(REALPATH) --relative-to=$$(pwd) .); do ((cd ../$(VERSION_FULL)/$$i && test -f .git && cp -R $(GITDIR) .gitnew && rm -f .git && mv .gitnew .git && sed -i.bak -e 's#[[:space:]]*worktree[[:space:]]*=[[:space:]]*.*##g' .git/config) || true); done
+	@for i in . $$(git submodule foreach -q --recursive $(REALPATH) --relative-to=$$(pwd) .); do (cd ../$(VERSION_FULL)/$$i && git reset -q --hard && git clean -ffdxq); done
+	@$(PYTHON) tools/get-version.py --source . --output ../$(VERSION_FULL)/VERSION
 	@(cd ../$(VERSION_FULL) && find . -name \.git\* | xargs rm -rf)
+	@(cd ../$(VERSION_FULL) && find . -name \.idea -type d | xargs rm -rf)
+	@(cd ../$(VERSION_FULL) && find . -maxdepth 1 -name build\* | xargs rm -rf)
+	@for i in $(DIST_EXCLUDE); do rm -rf ../$(VERSION_FULL)/$$i; done
+	@$(PYTHON) ./ci/collect-repo-info.py --only-git > ../$(VERSION_FULL)/repo-info.json
 	@mv ../$(VERSION_FULL) .
-	@tar -czf $(VERSION_FULL).tar.gz $(VERSION_FULL)
+	@COPYFILE_DISABLE=true tar -czf $(VERSION_FULL).tar.gz $(VERSION_FULL)
 	@echo Package: $(VERSION_FULL).tar.gz
-	@mv $(VERSION_FULL) $(VERSION_MIN)
-	@(cd $(VERSION_MIN) && for i in auxil/*; do rm -rf $$i/*; done)
-	@tar -czf $(VERSION_MIN).tar.gz $(VERSION_MIN)
-	@echo Package: $(VERSION_MIN).tar.gz
-	@rm -rf $(VERSION_MIN)
+	@rm -rf $(VERSION_FULL)
 
 distclean:
 	rm -rf $(BUILD)

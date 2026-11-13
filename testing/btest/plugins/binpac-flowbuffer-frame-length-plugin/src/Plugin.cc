@@ -1,5 +1,6 @@
-#include "plugin/Plugin.h"
-#include "analyzer/Component.h"
+#include "zeek/plugin/Plugin.h"
+
+#include "zeek/analyzer/Component.h"
 
 #include "FOO.h"
 
@@ -7,18 +8,16 @@ namespace btest::plugin::Foo_FOO {
 
 class Plugin : public zeek::plugin::Plugin {
 public:
-	zeek::plugin::Configuration Configure()
-		{
-		AddComponent(new zeek::analyzer::Component("FOO",
-		             btest::analyzer::FOO::FOO_Analyzer::InstantiateAnalyzer));
+    zeek::plugin::Configuration Configure() {
+        AddComponent(new zeek::analyzer::Component("FOO", btest::analyzer::FOO::FOO_Analyzer::InstantiateAnalyzer));
 
-		zeek::plugin::Configuration config;
-		config.name = "FOO::Foo";
-		config.description = "Foo Analyzer analyzer";
-		config.version.major = 1;
-		config.version.minor = 0;
-		return config;
-		}
+        zeek::plugin::Configuration config;
+        config.name = "FOO::Foo";
+        config.description = "Foo Analyzer analyzer";
+        config.version.major = 1;
+        config.version.minor = 0;
+        return config;
+    }
 } plugin;
 
-}
+} // namespace btest::plugin::Foo_FOO

@@ -1,7 +1,13 @@
 %include ../asn1/asn1.pac
 
+
+# The protocol specifies some 32-bit variable-length data fields for the
+# key and cert material. This value caps the size of these to help prevent
+# excessive buffering and integer overflows in BinPAC. This is 256 KB.
+let MAX_DATA_LENGTH: uint32 = 262144;
+
 type TPKT(is_orig: bool) = record {
-	version:  uint8;
+	version:  uint8 &enforce(version == 3);
 	reserved: uint8;
 	tpkt_len: uint16;
 
@@ -30,7 +36,8 @@ type DT_Data = record {
 	tpdu_number:              uint8;
 	# multiple octet variant of the ASN.1 type field, should handle this better.
 	application_defined_type: uint8;
-	application_type:         uint8;
+	application_type:         uint8
+		&enforce(application_type != 0x65 || $context.connection.accept_client_connect_initial());
 
 	data: case application_type of {
 		0x65    -> client: Client_Header; # 0x65 is a client
@@ -74,25 +81,34 @@ type Data_Block = record {
 # Client X.224
 ######################################################################
 
+type RDP_Connect_Request_cookie = record {
+	cookie_value:          RE/[^\x0d]*/;
+	cookie_terminator:     RE/\x0d\x0a/;
+} &byteorder=littleendian;
+
 type Connect_Request(cotp: COTP) = record {
 	destination_reference: uint16;
 	source_reference:      uint16;
 	flow_control:          uint8;
-	cookie_mstshash:       RE/Cookie: mstshash\=/;
-	cookie_value:          RE/[^\x0d]*/;
-	cookie_terminator:     RE/\x0d\x0a/;
+	cookie_mstshash:       RE/(Cookie: mstshash\=)?/;
+	# Cookie is optional as per
+	# https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/18a27ef9-6f9a-4501-b000-94b1fe3c2c10
+	switch1: case (sizeof(cookie_mstshash) > 0 ) of {
+		0       -> none1:          empty;
+		default -> cookie:         RDP_Connect_Request_cookie;
+	};
 	# Terrifying little case statement to figure out if there
 	# is any data left in the COTP structure.
-	switch1:   case (offsetof(switch1) + 2 - cotp.cotp_len - 1) of {
-		0       -> none:        empty;
-		default -> rdp_neg_req: RDP_Negotiation_Request;
+	switch2:   case (offsetof(switch2) + 2 - cotp.cotp_len - 1) of {
+		0       -> none2:          empty;
+		default -> rdp_neg_req:    RDP_Negotiation_Request;
 	};
 } &byteorder=littleendian;
 
 type RDP_Negotiation_Request = record {
 	type:                uint8;
 	flags:               uint8;
-	length:              uint16; # must be set to 8
+	length:              uint16 &enforce(length == 8); # must be set to 8
 	requested_protocols: uint32;
 } &let {
 	PROTOCOL_RDP:       bool = requested_protocols & 0x00;
@@ -127,7 +143,7 @@ type Connect_Confirm_Record = record {
 
 type RDP_Negotiation_Response = record {
 	flags:               uint8;
-	length:              uint16; # must be set to 8
+	length:              uint16 &enforce(length==8); # must be set to 8
 	selected_protocol:   uint32;
 } &let {
 	# Seems to be SSL encrypted (maybe CredSSP also?)
@@ -226,7 +242,7 @@ type Client_Security_Data = record {
 } &byteorder=littleendian;
 
 type Client_Network_Data = record {
-	channel_count: uint32;
+	channel_count: uint32 &enforce(channel_count <= 31);
 	channel_def_array: Client_Channel_Def[channel_count];
 } &byteorder=littleendian;
 
@@ -310,11 +326,13 @@ type Server_Network_Data = record {
 	channel_count:  uint16;
 } &byteorder=littleendian;
 
+# See MS-RDPBCGR Section 2.2.1.4.3 for reasoning for the &enforce value on
+# the server_random_length field.
 type Server_Security_Data = record {
 	encryption_method:      uint32;
 	encryption_level:       uint32;
-	server_random_length:   uint32;
-	server_cert_length:     uint32;
+	server_random_length:   uint32 &enforce((encryption_level == 0 && encryption_method == 0 && server_random_length == 0) || (server_random_length == 0x20));
+	server_cert_length:     uint32 &enforce(server_random_length <= MAX_DATA_LENGTH);
 	server_random:          bytestring &length=server_random_length;
 	server_certificate:     Server_Certificate &length=server_cert_length;
 } &let {
@@ -348,19 +366,19 @@ type Server_Proprietary_Cert(cert: Server_Certificate) = record {
 
 type Public_Key_Blob = record {
 	magic:           bytestring &length=4;
-	key_length:      uint32;
+	key_length:      uint32 &enforce(key_length <= MAX_DATA_LENGTH);
 	bit_length:      uint32;
 	public_exponent: uint32;
 	modulus:         bytestring &length=key_length;
 } &byteorder=littleendian;
 
 type X509 = record {
-	num_of_certs: uint32;
+	num_of_certs: uint32 &enforce(num_of_certs <= 1000);
 	certs: X509_Cert_Data[num_of_certs];
 } &byteorder=littleendian;
 
 type X509_Cert_Data = record {
-	cert_len: uint32;
+	cert_len: uint32 &enforce(cert_len <= MAX_DATA_LENGTH);
 	cert: bytestring &length=cert_len;
 } &byteorder=littleendian;
 
@@ -368,13 +386,24 @@ refine connection RDP_Conn += {
 
 	%member{
 		bool is_encrypted_;
+		bool client_connect_initial_seen_;
 		uint32 encryption_method_;
 	%}
 
 	%init{
 		is_encrypted_ = false;
+		client_connect_initial_seen_ = false;
 		encryption_method_ = 0;
 	%}
+
+	function accept_client_connect_initial(): bool
+		%{
+		if ( client_connect_initial_seen_ )
+			return false;
+
+		client_connect_initial_seen_ = true;
+		return true;
+		%}
 
 	function go_encrypted(method: uint32): bool
 		%{

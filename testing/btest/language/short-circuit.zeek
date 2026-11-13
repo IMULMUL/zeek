@@ -1,5 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -45,4 +46,3 @@ event zeek_init()
 	res = f_func() || t_func();
 	test_case("|| operator (eval. both operands)", res == T && ct == 3 );
 }
-

@@ -7,8 +7,8 @@ export {
 	};
 
 	const statuses: table[count] of StatusCode = {
-		[0x00000000] = [$id="SUCCESS", $desc="The operation completed successfully."],
-	} &redef &default=function(i: count):StatusCode { local unknown=fmt("unknown-%d", i); return [$id=unknown, $desc=unknown]; };
+		[0x00000000] = StatusCode($id="SUCCESS", $desc="The operation completed successfully."),
+	} &redef &default=function(i: count):StatusCode { local unknown=fmt("unknown-%d", i); return StatusCode($id=unknown, $desc=unknown); };
 
 	## Heuristic detection of named pipes when the pipe
 	## mapping isn't seen. This variable is defined in
@@ -112,7 +112,7 @@ export {
 	const rpc_sub_cmds: table[string] of rpc_cmd_table = {
 		["4b324fc8-1670-01d3-1278-5a47bf6ee188"] = srv_cmds,
 		["6bffd098-a112-3610-9833-46c3f87e345a"] = wksta_cmds,
-	} &redef &default=function(i: string):rpc_cmd_table { return table() &default=function(j: string):string { return fmt("unknown-uuid-%s", j); }; };
+	} &redef &default=function(i: string):rpc_cmd_table { return table() &default=function(j: count):string { return fmt("unknown-uuid-%d", j); }; };
 
 }
 
@@ -192,7 +192,7 @@ export {
 		[0xD8] = "READ_BULK",
 		[0xD9] = "WRITE_BULK",
 		[0xDA] = "WRITE_BULK_DATA",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	const trans2_sub_commands: table[count] of string = {
 		[0x00] = "OPEN2",
@@ -212,7 +212,7 @@ export {
 		[0x0E] = "SESSION_SETUP",
 		[0x10] = "GET_DFS_REFERRAL",
 		[0x11] = "REPORT_DFS_INCONSISTENCY",
-	} &default=function(i: count):string { return fmt("unknown-trans2-sub-cmd-%d", i); };
+	} &redef &default=function(i: count):string { return fmt("unknown-trans2-sub-cmd-%d", i); };
 
 	const trans_sub_commands: table[count] of string = {
 		[0x01] = "SET_NMPIPE_STATE",
@@ -226,7 +226,7 @@ export {
 		[0x37] = "WRITE_NMPIPE",
 		[0x53] = "WAIT_NMPIPE",
 		[0x54] = "CALL_NMPIPE",
-	} &default=function(i: count):string { return fmt("unknown-trans-sub-cmd-%d", i); };
+	} &redef &default=function(i: count):string { return fmt("unknown-trans-sub-cmd-%d", i); };
 }
 
 module SMB2;
@@ -252,7 +252,7 @@ export {
 		[16] = "QUERY_INFO",
 		[17] = "SET_INFO",
 		[18] = "OPLOCK_BREAK"
-	} &default=function(i: count): string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count): string { return fmt("unknown-%d", i); };
 
 	const dialects: table[count] of string = {
 		[0x0202] = "2.0.2",
@@ -261,11 +261,11 @@ export {
 		[0x0302] = "3.0.2",
 		[0x0311] = "3.1.1",
 		[0x02FF] = "2.1+",
-	} &default=function(i: count): string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count): string { return fmt("unknown-%d", i); };
 
 	const share_types: table[count] of string = {
 		[1] = "DISK",
 		[2] = "PIPE",
 		[3] = "PRINT",
-	} &default=function(i: count): string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count): string { return fmt("unknown-%d", i); };
 }

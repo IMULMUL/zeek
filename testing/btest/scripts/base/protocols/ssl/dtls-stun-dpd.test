@@ -1,10 +1,11 @@
+# @TEST-REQUIRES: ! have-spicy-ssl  # DTLS is not supported in Spicy SSL yet
 # @TEST-EXEC: zeek -b -r $TRACES/tls/webrtc-stun.pcap %INPUT
 # @TEST-EXEC: btest-diff ssl.log
-# @TEST-EXEC: touch dpd.log
-# @TEST-EXEC: btest-diff dpd.log
+# @TEST-EXEC: touch analyzer.log
+# @TEST-EXEC: btest-diff analyzer.log
+# @TEST-EXEC: btest-diff .stdout
 
 @load base/protocols/ssl
-@load base/frameworks/dpd
 
 redef SSL::log_include_client_certificate_subject_issuer = T;
 redef SSL::log_include_server_certificate_subject_issuer = T;
@@ -14,3 +15,7 @@ event ssl_client_hello(c: connection, version: count, record_version: count, pos
 	print version, client_random, session_id, ciphers;
 	}
 
+event ssl_extension(c: connection, is_client: bool, code: count, val: string)
+	{
+	print is_client, code;
+	}

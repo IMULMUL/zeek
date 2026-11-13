@@ -1,14 +1,13 @@
 # @TEST-EXEC: btest-bg-run zeek zeek -b ../dirtest.zeek
-# @TEST-EXEC: $SCRIPTS/wait-for-file zeek/next1 10 || (btest-bg-wait -k 1 && false)
-# @TEST-EXEC: touch testdir/newone
+# @TEST-EXEC: $SCRIPTS/wait-for-file zeek/next1 20 || (btest-bg-wait -k 1 && false)
 # @TEST-EXEC: rm testdir/bye
+# @TEST-EXEC: touch testdir/newone
 # @TEST-EXEC: $SCRIPTS/wait-for-file zeek/next2 10 || (btest-bg-wait -k 1 && false)
 # @TEST-EXEC: touch testdir/bye
 # @TEST-EXEC: btest-bg-wait 20
-# @TEST-EXEC: touch testdir/newone
 # @TEST-EXEC: btest-diff zeek/.stdout
 
-@TEST-START-FILE dirtest.zeek
+# @TEST-START-FILE dirtest.zeek
 
 @load base/utils/dir
 redef exit_only_after_terminate = T;
@@ -52,16 +51,16 @@ event zeek_init()
 	Dir::monitor("../testdir", new_file, .25sec);
 	}
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE testdir/hi
+# @TEST-START-FILE testdir/hi
 123
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE testdir/howsitgoing
+# @TEST-START-FILE testdir/howsitgoing
 abc
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE testdir/bye
+# @TEST-START-FILE testdir/bye
 !@#
-@TEST-END-FILE
+# @TEST-END-FILE

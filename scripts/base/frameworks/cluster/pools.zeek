@@ -18,18 +18,20 @@ export {
 		site_id: count;
 		## Whether the node is currently alive and can receive work.
 		alive: bool &default=F;
+		## The pre-computed result from Cluster::node_topic
+		topic: string;
 	};
 
 	## A pool specification.
 	type PoolSpec: record {
 		## A topic string that can be used to reach all nodes within a pool.
-		topic: string &default = "";
+		topic: string;
 		## The type of nodes that are contained within the pool.
-		node_type: Cluster::NodeType &default = Cluster::PROXY;
+		node_type: Cluster::NodeType;
 		## The maximum number of nodes that may belong to the pool.
 		## If not set, then all available nodes will be added to the pool,
 		## else the cluster framework will automatically limit the pool
-		## membership according to the threshhold.
+		## membership according to the threshold.
 		max_nodes: count &optional;
 		## Whether the pool requires exclusive access to nodes.  If true,
 		## then *max_nodes* nodes will not be assigned to any other pool.
@@ -43,7 +45,7 @@ export {
 	## A pool used for distributing data/work among a set of cluster nodes.
 	type Pool: record {
 		## The specification of the pool that was used when registering it.
-		spec: PoolSpec &default = PoolSpec();
+		spec: PoolSpec;
 		## Nodes in the pool, indexed by their name (e.g. "manager").
 		nodes: PoolNodeTable &default = PoolNodeTable();
 		## A list of nodes in the pool in a deterministic order.
@@ -172,7 +174,7 @@ function hrw_topic(pool: Pool, key: any): string
 
 	local site = HashHRW::get_site(pool$hrw_pool, key);
 	local pn: PoolNode = site$user_data;
-	return Cluster::node_topic(pn$name);
+	return pn$topic;
 	}
 
 function rr_topic(pool: Pool, key: string): string
@@ -198,7 +200,7 @@ function rr_topic(pool: Pool, key: string): string
 
 		if ( pn$alive )
 			{
-			rval = Cluster::node_topic(pn$name);
+			rval = pn$topic;
 			break;
 			}
 
@@ -246,7 +248,7 @@ event Cluster::node_down(name: string, id: string) &priority=10
 
 function site_id_in_pool(pool: Pool, site_id: count): bool
 	{
-	for ( i, pn in pool$nodes )
+	for ( _, pn in pool$nodes )
 		{
 		if ( pn$site_id == site_id )
 			return T;
@@ -276,7 +278,7 @@ function init_pool_node(pool: Pool, name: string): bool
 		else
 			{
 			local pn = PoolNode($name=name, $alias=alias, $site_id=site_id,
-			                    $alive=Cluster::node == name);
+			                    $alive=Cluster::node == name, $topic=Cluster::node_topic(name));
 			pool$nodes[name] = pn;
 			pool$node_list += pn;
 
@@ -344,7 +346,7 @@ function pool_sorter(a: Pool, b: Pool): int
 	return strcmp(a$spec$topic, b$spec$topic);
 	}
 
-# Needs to execute before the zeek_init in setup-connections
+# Needs to execute before the zeek_init in setup-subscriptions
 event zeek_init() &priority=-5
 	{
 	if ( ! Cluster::is_enabled() )

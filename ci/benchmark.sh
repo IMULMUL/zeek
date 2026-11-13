@@ -5,23 +5,18 @@ ZEEK_BENCHMARK_ENDPOINT="/zeek"
 # Setting this causes any command failures to immediately cause the script to fail.
 set -e
 
-# Don't do this unless the user has access to the encrypted variables. This will
-# basically exclude any PR that doesn't come from the main zeek repo.
-if [ "${CIRRUS_USER_PERMISSION}" != "admin" -a "${CIRRUS_USER_PERMISSION}" != "write" ]; then
-    echo "Benchmarks are skipped for repositories outside of the main Zeek project"
+# Skip running benchmarks for jobs from forks, third-parties, or non-Circle builds.
+if [[ ${ZEEK_CI_INTERNAL_BUILD:-0} != 1 || "${CIRCLE_PROJECT_REPONAME}" != "zeek" ]]; then
+    echo "Benchmarking skipped for jobs from forks"
     exit 0
 fi
 
-if [ "${CIRRUS_REPO_FULL_NAME}" != "zeek/zeek" ]; then
-    echo "Benchmarks skipped for non-zeek repo"
-    exit 0
-fi
-
-BUILD_URL="https://api.cirrus-ci.com/v1/artifact/build/${CIRRUS_BUILD_ID}/${CIRRUS_TASK_NAME}/upload_binary/build.tgz"
+# Something like https://output.circle-artifacts.com/output/job/597ae3bd-be02-4fe2-8e83-0c0ea5aeaa17/artifacts/0/install.tgz. This will return a 302. The requestor needs to follow the redirect.
+BUILD_URL="https://output.circle-artifacts.com/output/job/${CIRCLE_WORKFLOW_JOB_ID}/artifacts/0/install.tgz"
 
 # Generate an md5 hash of the build file. We can do this here because the path to the
 # file still exists from the prior scripts.
-BUILD_HASH=$(sha256sum build.tgz | awk '{print $1}')
+BUILD_HASH=$(sha256sum ${ZEEK_CI_WORKING_DIR}/install.tgz | awk '{print $1}')
 
 # Generate an HMAC digest for the path plus a timestamp to send as an authentication
 # header. Openssl outputs a hex string here so there's no need to base64 encode it.
@@ -30,19 +25,42 @@ HMAC_DIGEST=$(echo "${ZEEK_BENCHMARK_ENDPOINT}-${TIMESTAMP}-${BUILD_HASH}" | ope
 
 TARGET="https://${ZEEK_BENCHMARK_HOST}:${ZEEK_BENCHMARK_PORT}${ZEEK_BENCHMARK_ENDPOINT}"
 
+REPO_VERSION=$(python3 ./tools/get-version.py --source .)
 # Turn this back off because we want to be able to capture the output from curl if
 # it fails.
 set +e
 
-# Make a request to the benchmark host.
-RESULTS=$(curl -sS --stderr - --fail --insecure -X POST -H "Zeek-HMAC: ${HMAC_DIGEST}" -H "Zeek-HMAC-Timestamp: ${TIMESTAMP}" "${TARGET}?branch=${CIRRUS_BRANCH}&build=${BUILD_URL}&build_hash=${BUILD_HASH}&commit=${CIRRUS_CHANGE_IN_REPO}")
+# Make a request to the benchmark host. A couple of notes:
+# 1. cirrus_task_name maps the CircleCI task names into the format we used on Cirrus
+#    just to keep them consistent with existing data.
+# 2. cirrus_pr reduces just to the PR number from the URL in $CIRCLE_PULL_REQUEST.
+#    Circle has $CIRCLE_PR_NUMBER also, but it's only filled in for PRs from forks
+#    and not for PRs from the main repo.
+curl -sS -G --stderr - --fail --insecure -X POST \
+    -o "${ZEEK_CI_WORKING_DIR}/benchmark-${TIMESTAMP}.log" \
+    -H "Zeek-HMAC: ${HMAC_DIGEST}" \
+    -H "Zeek-HMAC-Timestamp: ${TIMESTAMP}" \
+    --data-urlencode "branch=${CIRCLE_BRANCH}" \
+    --data-urlencode "build=${BUILD_URL}" \
+    --data-urlencode "build_hash=${BUILD_HASH}" \
+    --data-urlencode "commit=${CIRCLE_SHA1}" \
+    --data-urlencode "cirrus_repo_owner=${CIRCLE_PROJECT_USERNAME}" \
+    --data-urlencode "cirrus_repo_name=${CIRCLE_PROJECT_REPONAME}" \
+    --data-urlencode "cirrus_task_id=${CIRCLE_WORKFLOW_JOB_ID}" \
+    --data-urlencode "cirrus_task_name=$(echo ${CIRCLE_JOB} | sed 's/ubuntu-24\./ubuntu24_/' | tr '-' '_')" \
+    --data-urlencode "cirrus_build_id=${CIRCLE_BUILD_NUM}" \
+    --data-urlencode "cirrus_pr=$(echo ${CIRCLE_PULL_REQUEST} | awk -F/ '{print $NF}')" \
+    --data-urlencode "repo_version=${REPO_VERSION}" \
+    "${TARGET}"
+
 STATUS=$?
 
 # If we got a bad status back from the host, we want to make sure to mask the host
 # and port from the output.
 if [ $STATUS -ne 0 ]; then
-    RESULTS=$(echo "${RESULTS}" | sed "s/${ZEEK_BENCHMARK_HOST}/<secret>/g" | sed "s/:${ZEEK_BENCHMARK_PORT}/:<secret>/g")
+    cat ${ZEEK_CI_WORKING_DIR}/benchmark-${TIMESTAMP}.log | sed "s/${ZEEK_BENCHMARK_HOST}/<secret>/g" | sed "s/:${ZEEK_BENCHMARK_PORT}/:<secret>/g"
+else
+    cat ${ZEEK_CI_WORKING_DIR}/benchmark-${TIMESTAMP}.log
 fi
 
-echo "$RESULTS"
 exit $STATUS

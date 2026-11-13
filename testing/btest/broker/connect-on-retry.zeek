@@ -1,3 +1,5 @@
+# @TEST-GROUP: broker
+#
 # @TEST-PORT: BROKER_PORT
 #
 # @TEST-EXEC: btest-bg-run recv "zeek -b ../recv.zeek >recv.out"
@@ -7,7 +9,7 @@
 # @TEST-EXEC: btest-diff recv/recv.out
 # @TEST-EXEC: btest-diff send/send.out
 
-@TEST-START-FILE send.zeek
+# @TEST-START-FILE send.zeek
 
 # Using btest's environment settings for connect/listen retry of 1sec.
 redef exit_only_after_terminate = T;
@@ -19,13 +21,12 @@ global ping: event(msg: string, c: count);
 event zeek_init()
     {
     Broker::subscribe("zeek/event/my_topic");
-    Broker::auto_publish("zeek/event/my_topic", ping);
     Broker::peer("127.0.0.1", to_port(getenv("BROKER_PORT")));
     }
 
 function send_event()
     {
-    event ping("my-message", ++event_count);
+    Broker::publish("zeek/event/my_topic", ping, "my-message", ++event_count);
     }
 
 event Broker::peer_added(endpoint: Broker::EndpointInfo, msg: string)
@@ -46,10 +47,10 @@ event pong(msg: string, n: count)
     send_event();
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
 
-@TEST-START-FILE recv.zeek
+# @TEST-START-FILE recv.zeek
 
 redef exit_only_after_terminate = T;
 
@@ -61,15 +62,14 @@ global auto_handler: event(msg: string, c: count);
 global pong: event(msg: string, c: count);
 
 event delayed_listen()
-	{
+        {
         Broker::listen("127.0.0.1", to_port(getenv("BROKER_PORT")));
-	}
+        }
 
 event zeek_init()
         {
         Broker::subscribe("zeek/event/my_topic");
-        Broker::auto_publish("zeek/event/my_topic", pong);
-	schedule 5secs { delayed_listen() };
+        schedule 5secs { delayed_listen() };
         }
 
 event Broker::peer_added(endpoint: Broker::EndpointInfo, msg: string)
@@ -94,7 +94,7 @@ event ping(msg: string, n: count)
                 return;
                 }
 
-	event pong(msg, n);
+        Broker::publish("zeek/event/my_topic", pong, msg, n);
         }
 
-@TEST-END-FILE
+# @TEST-END-FILE

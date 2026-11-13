@@ -44,7 +44,7 @@ function want_pp() : bool
 		&& (mail_dest != "" || mail_dest_pretty_printed != ""));
 	}
 
-# Opens and intializes the output file.
+# Opens and initializes the output file.
 function pp_open()
 	{
 	if ( pp_alarms_open )
@@ -102,9 +102,9 @@ event zeek_init()
 
 	# This replaces the standard non-pretty-printing filter.
 	Log::add_filter(Notice::ALARM_LOG,
-			[$name="alarm-mail", $writer=Log::WRITER_NONE,
-			 $interv=Log::default_mail_alarms_interval,
-			 $postprocessor=pp_postprocessor]);
+			Log::Filter($name="alarm-mail", $writer=Log::WRITER_NONE,
+			            $interv=Log::default_mail_alarms_interval,
+			            $postprocessor=pp_postprocessor));
 	}
 
 hook notice(n: Notice::Info) &priority=-5
@@ -170,9 +170,6 @@ function pretty_print_alarm(out: file, n: Info)
 	local h1 = 0.0.0.0;
 	local h2 = 0.0.0.0;
 
-	local orig_p = "";
-	local resp_p = "";
-
 	if ( n?$id )
 		{
 		h1 = n$id$orig_h;
@@ -212,7 +209,7 @@ function pretty_print_alarm(out: file, n: Info)
 		return;
 		}
 
-	when ( local h1name = lookup_addr(h1) )
+	when [out, n, h1, h2, line1, line2, line3] ( local h1name = lookup_addr(h1) )
 		{
 		if ( h2 == 0.0.0.0 )
 			{
@@ -220,7 +217,7 @@ function pretty_print_alarm(out: file, n: Info)
 			return;
 			}
 
-		when ( local h2name = lookup_addr(h2) )
+		when [out, n, h1, h2, line1, line2, line3, h1name] ( local h2name = lookup_addr(h2) )
 			{
 			do_msg(out, n, line1, line2, line3, h1, h1name, h2, h2name);
 			return;
@@ -240,7 +237,7 @@ function pretty_print_alarm(out: file, n: Info)
 			return;
 			}
 
-		when ( local h2name_ = lookup_addr(h2) )
+		when [out, n, h1, h2, line1, line2, line3] ( local h2name_ = lookup_addr(h2) )
 			{
 			do_msg(out, n, line1, line2, line3, h1,  "(dns timeout)", h2, h2name_);
 			return;

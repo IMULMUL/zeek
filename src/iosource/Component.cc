@@ -2,158 +2,127 @@
 
 #include "zeek/iosource/Component.h"
 
+#include <algorithm>
+
 #include "zeek/Desc.h"
 #include "zeek/Reporter.h"
+#include "zeek/Type.h"
 
-namespace zeek::iosource
-	{
+namespace zeek::iosource {
 
-Component::Component(const std::string& name) : plugin::Component(plugin::component::IOSOURCE, name)
-	{
-	}
+Component::Component(const std::string& name) : plugin::Component(plugin::component::IOSOURCE, name) {}
 
-Component::Component(plugin::component::Type type, const std::string& name)
-	: plugin::Component(type, name)
-	{
-	}
+Component::Component(plugin::component::Type type, const std::string& name) : plugin::Component(type, name) {}
 
-Component::~Component() { }
+PktSrcComponent::PktSrcComponent(const std::string& arg_name, const std::string& arg_prefix, InputType arg_type,
+                                 factory_callback arg_factory, std::vector<uint32_t> arg_magic_nums)
+    : Component(plugin::component::PKTSRC, arg_name),
+      type(arg_type),
+      factory(arg_factory),
+      magic_nums(std::move(arg_magic_nums)) {
+    util::tokenize_string(arg_prefix, ":", &prefixes);
+}
 
-PktSrcComponent::PktSrcComponent(const std::string& arg_name, const std::string& arg_prefix,
-                                 InputType arg_type, factory_callback arg_factory)
-	: Component(plugin::component::PKTSRC, arg_name)
-	{
-	util::tokenize_string(arg_prefix, ":", &prefixes);
-	type = arg_type;
-	factory = arg_factory;
-	}
+const std::vector<std::string>& PktSrcComponent::Prefixes() const { return prefixes; }
 
-PktSrcComponent::~PktSrcComponent() { }
+bool PktSrcComponent::HandlesPrefix(const std::string& prefix) const {
+    return std::ranges::find(prefixes, prefix) != prefixes.end();
+}
 
-const std::vector<std::string>& PktSrcComponent::Prefixes() const
-	{
-	return prefixes;
-	}
+bool PktSrcComponent::HandlesMagicNumber(uint32_t magic_num) const {
+    return std::ranges::find(magic_nums, magic_num) != magic_nums.end();
+}
 
-bool PktSrcComponent::HandlesPrefix(const std::string& prefix) const
-	{
-	for ( std::vector<std::string>::const_iterator i = prefixes.begin(); i != prefixes.end(); i++ )
-		{
-		if ( *i == prefix )
-			return true;
-		}
+bool PktSrcComponent::DoesLive() const { return type == LIVE || type == BOTH; }
 
-	return false;
-	}
+bool PktSrcComponent::DoesTrace() const { return type == TRACE || type == BOTH; }
 
-bool PktSrcComponent::DoesLive() const
-	{
-	return type == LIVE || type == BOTH;
-	}
+PktSrcComponent::factory_callback PktSrcComponent::Factory() const { return factory; }
 
-bool PktSrcComponent::DoesTrace() const
-	{
-	return type == TRACE || type == BOTH;
-	}
+void PktSrcComponent::DoDescribe(ODesc* d) const {
+    Component::DoDescribe(d);
 
-PktSrcComponent::factory_callback PktSrcComponent::Factory() const
-	{
-	return factory;
-	}
+    std::string prefs;
 
-void PktSrcComponent::DoDescribe(ODesc* d) const
-	{
-	Component::DoDescribe(d);
+    for ( const auto& pfx : prefixes ) {
+        if ( ! prefs.empty() )
+            prefs += ", ";
 
-	std::string prefs;
+        prefs += '"' + pfx + '"';
+    }
 
-	for ( std::vector<std::string>::const_iterator i = prefixes.begin(); i != prefixes.end(); i++ )
-		{
-		if ( prefs.size() )
-			prefs += ", ";
+    d->Add("interface prefix");
+    if ( prefixes.size() > 1 )
+        d->Add("es");
 
-		prefs += '"' + *i + '"';
-		}
+    d->Add(" ");
+    d->Add(prefs);
 
-	d->Add("interface prefix");
-	if ( prefixes.size() > 1 )
-		d->Add("es");
+    if ( ! magic_nums.empty() ) {
+        d->Add("; magic number");
+        if ( magic_nums.size() > 1 )
+            d->Add("s");
 
-	d->Add(" ");
-	d->Add(prefs);
-	d->Add("; supports ");
+        d->Add(" ");
+        for ( auto it = magic_nums.begin(); it != magic_nums.end(); ++it ) {
+            if ( it != magic_nums.begin() )
+                d->Add(", ");
+            d->Add(util::fmt("0x%08x", *it));
+        }
+    }
 
-	switch ( type )
-		{
-		case LIVE:
-			d->Add("live input");
-			break;
+    d->Add("; supports ");
 
-		case TRACE:
-			d->Add("trace input");
-			break;
+    switch ( type ) {
+        case LIVE: d->Add("live input"); break;
 
-		case BOTH:
-			d->Add("live and trace input");
-			break;
+        case TRACE: d->Add("trace input"); break;
 
-		default:
-			reporter->InternalError("unknown PkrSrc type");
-		}
-	}
+        case BOTH: d->Add("live and trace input"); break;
+
+        default: reporter->InternalError("unknown PkrSrc type");
+    }
+}
 
 PktDumperComponent::PktDumperComponent(const std::string& name, const std::string& arg_prefix,
                                        factory_callback arg_factory)
-	: plugin::Component(plugin::component::PKTDUMPER, name)
-	{
-	util::tokenize_string(arg_prefix, ":", &prefixes);
-	factory = arg_factory;
-	}
+    : plugin::Component(plugin::component::PKTDUMPER, name) {
+    util::tokenize_string(arg_prefix, ":", &prefixes);
+    factory = arg_factory;
+}
 
-PktDumperComponent::~PktDumperComponent() { }
+PktDumperComponent::factory_callback PktDumperComponent::Factory() const { return factory; }
 
-PktDumperComponent::factory_callback PktDumperComponent::Factory() const
-	{
-	return factory;
-	}
+const std::vector<std::string>& PktDumperComponent::Prefixes() const { return prefixes; }
 
-const std::vector<std::string>& PktDumperComponent::Prefixes() const
-	{
-	return prefixes;
-	}
+bool PktDumperComponent::HandlesPrefix(const std::string& prefix) const {
+    for ( const auto& pfx : prefixes ) {
+        if ( pfx == prefix )
+            return true;
+    }
 
-bool PktDumperComponent::HandlesPrefix(const std::string& prefix) const
-	{
-	for ( std::vector<std::string>::const_iterator i = prefixes.begin(); i != prefixes.end(); i++ )
-		{
-		if ( *i == prefix )
-			return true;
-		}
+    return false;
+}
 
-	return false;
-	}
+void PktDumperComponent::DoDescribe(ODesc* d) const {
+    plugin::Component::DoDescribe(d);
 
-void PktDumperComponent::DoDescribe(ODesc* d) const
-	{
-	plugin::Component::DoDescribe(d);
+    std::string prefs;
 
-	std::string prefs;
+    for ( const auto& pfx : prefixes ) {
+        if ( ! prefs.empty() )
+            prefs += ", ";
 
-	for ( std::vector<std::string>::const_iterator i = prefixes.begin(); i != prefixes.end(); i++ )
-		{
-		if ( prefs.size() )
-			prefs += ", ";
+        prefs += '"' + pfx + '"';
+    }
 
-		prefs += '"' + *i + '"';
-		}
+    d->Add("dumper prefix");
 
-	d->Add("dumper prefix");
+    if ( prefixes.size() > 1 )
+        d->Add("es");
 
-	if ( prefixes.size() > 1 )
-		d->Add("es");
+    d->Add(": ");
+    d->Add(prefs);
+}
 
-	d->Add(": ");
-	d->Add(prefs);
-	}
-
-	} // namespace zeek::iosource
+} // namespace zeek::iosource

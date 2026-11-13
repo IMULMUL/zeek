@@ -2,482 +2,435 @@
 
 #include "zeek/input/readers/ascii/Ascii.h"
 
-#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
-#include <sstream>
+#include <algorithm>
+#include <cerrno>
 
+#include "zeek/input/InputFile.h"
 #include "zeek/input/readers/ascii/ascii.bif.h"
 #include "zeek/threading/SerialTypes.h"
+#include "zeek/threading/formatters/Ascii.h"
 
 using namespace std;
 using zeek::threading::Field;
 using zeek::threading::Value;
 
-namespace zeek::input::reader::detail
-	{
+namespace zeek::input::reader::detail {
 
-FieldMapping::FieldMapping(const string& arg_name, const TypeTag& arg_type, int arg_position)
-	: name(arg_name), type(arg_type), subtype(TYPE_ERROR)
-	{
-	position = arg_position;
-	secondary_position = -1;
-	present = true;
-	}
+FieldMapping::FieldMapping(string arg_name, const TypeTag& arg_type, int arg_position)
+    : name(std::move(arg_name)), type(arg_type), subtype(TYPE_ERROR), position(arg_position) {
+    secondary_position = -1;
+    present = true;
+}
 
-FieldMapping::FieldMapping(const string& arg_name, const TypeTag& arg_type,
-                           const TypeTag& arg_subtype, int arg_position)
-	: name(arg_name), type(arg_type), subtype(arg_subtype)
-	{
-	position = arg_position;
-	secondary_position = -1;
-	present = true;
-	}
+FieldMapping::FieldMapping(string arg_name, const TypeTag& arg_type, const TypeTag& arg_subtype, int arg_position)
+    : name(std::move(arg_name)), type(arg_type), subtype(arg_subtype), position(arg_position) {
+    secondary_position = -1;
+    present = true;
+}
 
 FieldMapping::FieldMapping(const FieldMapping& arg)
-	: name(arg.name), type(arg.type), subtype(arg.subtype), present(arg.present)
-	{
-	position = arg.position;
-	secondary_position = arg.secondary_position;
-	}
+    : name(arg.name), type(arg.type), subtype(arg.subtype), present(arg.present) {
+    position = arg.position;
+    secondary_position = arg.secondary_position;
+}
 
-FieldMapping FieldMapping::subType()
-	{
-	return FieldMapping(name, subtype, position);
-	}
+FieldMapping FieldMapping::subType() { return {name, subtype, position}; }
 
-Ascii::Ascii(ReaderFrontend* frontend) : ReaderBackend(frontend)
-	{
-	mtime = 0;
-	ino = 0;
-	fail_on_file_problem = false;
-	fail_on_invalid_lines = false;
-	}
+FieldMapping& FieldMapping::operator=(const FieldMapping& arg) {
+    if ( this == &arg )
+        return *this;
 
-Ascii::~Ascii() { }
+    name = arg.name;
+    type = arg.type;
+    subtype = arg.subtype;
+    present = arg.present;
+    position = arg.position;
+    secondary_position = arg.secondary_position;
 
-void Ascii::DoClose() { }
+    return *this;
+}
 
-bool Ascii::DoInit(const ReaderInfo& info, int num_fields, const Field* const* fields)
-	{
-	StopWarningSuppression();
+Ascii::Ascii(ReaderFrontend* frontend) : ReaderBackend(frontend) {
+    mtime = 0;
+    ino = 0;
+    fail_on_file_problem = false;
+    fail_on_invalid_lines = false;
+}
 
-	separator.assign((const char*)BifConst::InputAscii::separator->Bytes(),
-	                 BifConst::InputAscii::separator->Len());
+void Ascii::DoClose() { read_location.reset(); }
 
-	set_separator.assign((const char*)BifConst::InputAscii::set_separator->Bytes(),
-	                     BifConst::InputAscii::set_separator->Len());
+bool Ascii::DoInit(const ReaderInfo& info, int num_fields, const Field* const* fields) {
+    StopWarningSuppression();
 
-	empty_field.assign((const char*)BifConst::InputAscii::empty_field->Bytes(),
-	                   BifConst::InputAscii::empty_field->Len());
+    separator.assign(reinterpret_cast<const char*>(BifConst::InputAscii::separator->Bytes()),
+                     BifConst::InputAscii::separator->Len());
 
-	unset_field.assign((const char*)BifConst::InputAscii::unset_field->Bytes(),
-	                   BifConst::InputAscii::unset_field->Len());
+    set_separator.assign(reinterpret_cast<const char*>(BifConst::InputAscii::set_separator->Bytes()),
+                         BifConst::InputAscii::set_separator->Len());
 
-	fail_on_invalid_lines = BifConst::InputAscii::fail_on_invalid_lines;
-	fail_on_file_problem = BifConst::InputAscii::fail_on_file_problem;
+    empty_field.assign(reinterpret_cast<const char*>(BifConst::InputAscii::empty_field->Bytes()),
+                       BifConst::InputAscii::empty_field->Len());
 
-	path_prefix.assign((const char*)BifConst::InputAscii::path_prefix->Bytes(),
-	                   BifConst::InputAscii::path_prefix->Len());
+    unset_field.assign(reinterpret_cast<const char*>(BifConst::InputAscii::unset_field->Bytes()),
+                       BifConst::InputAscii::unset_field->Len());
 
-	// Set per-filter configuration options.
-	for ( ReaderInfo::config_map::const_iterator i = info.config.begin(); i != info.config.end();
-	      i++ )
-		{
-		if ( strcmp(i->first, "separator") == 0 )
-			separator.assign(i->second);
+    fail_on_invalid_lines = BifConst::InputAscii::fail_on_invalid_lines;
+    fail_on_file_problem = BifConst::InputAscii::fail_on_file_problem;
 
-		else if ( strcmp(i->first, "set_separator") == 0 )
-			set_separator.assign(i->second);
+    path_prefix.assign(reinterpret_cast<const char*>(BifConst::InputAscii::path_prefix->Bytes()),
+                       BifConst::InputAscii::path_prefix->Len());
 
-		else if ( strcmp(i->first, "empty_field") == 0 )
-			empty_field.assign(i->second);
+    // Set per-filter configuration options.
+    for ( const auto& [k, v] : info.config ) {
+        if ( strcmp(k, "separator") == 0 )
+            separator.assign(v);
 
-		else if ( strcmp(i->first, "unset_field") == 0 )
-			unset_field.assign(i->second);
+        else if ( strcmp(k, "set_separator") == 0 )
+            set_separator.assign(v);
 
-		else if ( strcmp(i->first, "fail_on_invalid_lines") == 0 )
-			fail_on_invalid_lines = (strncmp(i->second, "T", 1) == 0);
+        else if ( strcmp(k, "empty_field") == 0 )
+            empty_field.assign(v);
 
-		else if ( strcmp(i->first, "fail_on_file_problem") == 0 )
-			fail_on_file_problem = (strncmp(i->second, "T", 1) == 0);
-		}
+        else if ( strcmp(k, "unset_field") == 0 )
+            unset_field.assign(v);
 
-	if ( separator.size() != 1 )
-		Error("separator length has to be 1. Separator will be truncated.");
+        else if ( strcmp(k, "fail_on_invalid_lines") == 0 )
+            fail_on_invalid_lines = (strncmp(v, "T", 1) == 0);
 
-	if ( set_separator.size() != 1 )
-		Error("set_separator length has to be 1. Separator will be truncated.");
+        else if ( strcmp(k, "fail_on_file_problem") == 0 )
+            fail_on_file_problem = (strncmp(v, "T", 1) == 0);
+    }
 
-	threading::formatter::Ascii::SeparatorInfo sep_info(separator, set_separator, unset_field,
-	                                                    empty_field);
-	formatter = unique_ptr<threading::Formatter>(new threading::formatter::Ascii(this, sep_info));
+    if ( separator.size() != 1 )
+        Error("separator length has to be 1. Separator will be truncated.");
 
-	return DoUpdate();
-	}
+    if ( set_separator.size() != 1 )
+        Error("set_separator length has to be 1. Separator will be truncated.");
 
-bool Ascii::OpenFile()
-	{
-	if ( file.is_open() )
-		return true;
+    threading::formatter::Ascii::SeparatorInfo sep_info(separator, set_separator, unset_field, empty_field);
+    formatter = unique_ptr<threading::Formatter>(new threading::formatter::Ascii(this, sep_info));
 
-	// Handle path-prefixing. See similar logic in Binary::DoInit().
-	fname = Info().source;
+    return DoUpdate();
+}
 
-	if ( fname.front() != '/' && ! path_prefix.empty() )
-		{
-		string path = path_prefix;
-		std::size_t last = path.find_last_not_of('/');
+bool Ascii::OpenFile() {
+    if ( file.is_open() )
+        return true;
 
-		if ( last == string::npos ) // Nothing but slashes -- weird but ok...
-			path = "/";
-		else
-			path.erase(last + 1);
+    // Handle path-prefixing. See similar logic in Binary::DoInit().
+    fname = Info().source;
 
-		fname = path + "/" + fname;
-		}
+    if ( ! is_absolute_path(fname) && ! path_prefix.empty() ) {
+        std::size_t last = path_prefix.find_last_not_of('/');
 
-	file.open(fname);
+        string path;
+        if ( last == string::npos ) // Nothing but slashes -- weird but ok...
+            path = "/";
+        else
+            path = path_prefix.substr(0, last + 1);
 
-	if ( ! file.is_open() )
-		{
-		FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s", fname.c_str()), true);
+        fname = Fmt("%s/%s", path.c_str(), fname.c_str());
+    }
 
-		return ! fail_on_file_problem;
-		}
+    file.open(fname);
 
-	if ( ReadHeader(false) == false )
-		{
-		FailWarn(fail_on_file_problem,
-		         Fmt("Init: cannot open %s; problem reading file header", fname.c_str()), true);
+    if ( ! file.is_open() ) {
+        FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s", fname.c_str()), true);
 
-		file.close();
-		return ! fail_on_file_problem;
-		}
+        return false;
+    }
 
-	StopWarningSuppression();
-	return true;
-	}
+    if ( ReadHeader(false) == false ) {
+        FailWarn(fail_on_file_problem, Fmt("Init: cannot open %s; problem reading file header", fname.c_str()), true);
 
-bool Ascii::ReadHeader(bool useCached)
-	{
-	// try to read the header line...
-	string line;
-	map<string, uint32_t> ifields;
+        file.close();
+        return false;
+    }
 
-	if ( ! useCached )
-		{
-		if ( ! GetLine(line) )
-			{
-			FailWarn(fail_on_file_problem,
-			         Fmt("Could not read input data file %s; first line could not be read",
-			             fname.c_str()),
-			         true);
-			return false;
-			}
+    if ( ! read_location ) {
+        read_location = LocationPtr(new zeek::detail::Location());
+        read_location->SetFile(util::copy_string(fname.c_str(), fname.size()));
+    }
 
-		headerline = line;
-		}
+    StopWarningSuppression();
+    return true;
+}
 
-	else
-		line = headerline;
+bool Ascii::ReadHeader(bool useCached) {
+    // try to read the header line...
+    string line;
 
-	// construct list of field names.
-	istringstream splitstream(line);
-	int pos = 0;
-	while ( splitstream )
-		{
-		string s;
-		if ( ! getline(splitstream, s, separator[0]) )
-			break;
+    if ( ! useCached ) {
+        if ( ! GetLine(line) ) {
+            FailWarn(fail_on_file_problem,
+                     Fmt("Could not read input data file %s; first line could not be read", fname.c_str()), true);
+            return false;
+        }
 
-		ifields[s] = pos;
-		pos++;
-		}
+        headerline = line;
+    }
 
-	// printf("Updating fields from description %s\n", line.c_str());
-	columnMap.clear();
+    else
+        line = headerline;
 
-	for ( int i = 0; i < NumFields(); i++ )
-		{
-		const Field* field = Fields()[i];
+    // construct list of field names.
+    auto ifields = util::split(std::move(line), separator[0]);
 
-		map<string, uint32_t>::iterator fit = ifields.find(field->name);
-		if ( fit == ifields.end() )
-			{
-			if ( field->optional )
-				{
-				// we do not really need this field. mark it as not present and always send an undef
-				// back.
-				FieldMapping f(field->name, field->type, field->subtype, -1);
-				f.present = false;
-				columnMap.push_back(f);
-				continue;
-				}
+    // printf("Updating fields from description %s\n", line.c_str());
+    columnMap.clear();
 
-			FailWarn(fail_on_file_problem,
-			         Fmt("Did not find requested field %s in input data file %s.", field->name,
-			             fname.c_str()),
-			         true);
+    const auto* fields = Fields();
 
-			return false;
-			}
+    for ( int i = 0; i < NumFields(); i++ ) {
+        const Field* field = fields[i];
 
-		FieldMapping f(field->name, field->type, field->subtype, ifields[field->name]);
+        auto fit = std::ranges::find(ifields, field->name);
+        if ( fit == ifields.end() ) {
+            if ( field->optional ) {
+                // we do not really need this field. mark it as not present and always send an undef
+                // back.
+                FieldMapping f(field->name, field->type, field->subtype, -1);
+                f.present = false;
+                columnMap.push_back(f);
+                continue;
+            }
 
-		if ( field->secondary_name && strlen(field->secondary_name) != 0 )
-			{
-			map<string, uint32_t>::iterator fit2 = ifields.find(field->secondary_name);
-			if ( fit2 == ifields.end() )
-				{
-				FailWarn(fail_on_file_problem,
-				         Fmt("Could not find requested port type field %s in input data file %s.",
-				             field->secondary_name, fname.c_str()),
-				         true);
+            FailWarn(fail_on_file_problem,
+                     Fmt("Did not find requested field %s in input data file %s.", field->name, fname.c_str()), true);
 
-				return false;
-				}
+            return false;
+        }
 
-			f.secondary_position = ifields[field->secondary_name];
-			}
+        int index = static_cast<int>(std::distance(ifields.begin(), fit));
+        FieldMapping f(field->name, field->type, field->subtype, index);
 
-		columnMap.push_back(f);
-		}
+        if ( field->secondary_name && strlen(field->secondary_name) != 0 ) {
+            auto fit2 = std::ranges::find(ifields, field->secondary_name);
+            if ( fit2 == ifields.end() ) {
+                FailWarn(fail_on_file_problem,
+                         Fmt("Could not find requested port type field %s in input data file %s.",
+                             field->secondary_name, fname.c_str()),
+                         true);
 
-	// well, that seems to have worked...
-	return true;
-	}
+                return false;
+            }
 
-bool Ascii::GetLine(string& str)
-	{
-	while ( getline(file, str) )
-		{
-		if ( ! str.size() )
-			continue;
+            f.secondary_position = static_cast<int>(std::distance(ifields.begin(), fit2));
+        }
 
-		if ( str.back() == '\r' ) // deal with \r\n by removing \r
-			str.pop_back();
+        columnMap.push_back(f);
+    }
 
-		if ( str[0] != '#' )
-			return true;
+    // well, that seems to have worked...
+    return true;
+}
 
-		if ( (str.length() > 8) && (str.compare(0, 7, "#fields") == 0) && (str[7] == separator[0]) )
-			{
-			str = str.substr(8);
-			return true;
-			}
-		}
+bool Ascii::GetLine(string& str) {
+    while ( getline(file, str) ) {
+        if ( read_location ) {
+            read_location->IncrementLine();
+        }
 
-	return false;
-	}
+        if ( str.empty() )
+            continue;
+
+        if ( str.back() == '\r' ) // deal with \r\n by removing \r
+            str.pop_back();
+
+        if ( str[0] != '#' )
+            return true;
+
+        if ( (str.length() > 8) && str.starts_with("#fields") && (str[7] == separator[0]) ) {
+            str = str.substr(8);
+            return true;
+        }
+    }
+
+    return false;
+}
 
 // read the entire file and send appropriate thingies back to InputMgr
-bool Ascii::DoUpdate()
-	{
-	if ( ! OpenFile() )
-		return ! fail_on_file_problem;
+bool Ascii::DoUpdate() {
+    if ( ! OpenFile() )
+        return ! fail_on_file_problem;
 
-	switch ( Info().mode )
-		{
-		case MODE_REREAD:
-			{
-			// check if the file has changed
-			struct stat sb;
-			if ( stat(fname.c_str(), &sb) == -1 )
-				{
-				FailWarn(fail_on_file_problem, Fmt("Could not get stat for %s", fname.c_str()),
-				         true);
+    if ( read_location )
+        read_location->SetLine(0);
 
-				file.close();
-				return ! fail_on_file_problem;
-				}
+    switch ( Info().mode ) {
+        case MODE_REREAD: {
+            // check if the file has changed
+            struct stat sb;
+            if ( stat(fname.c_str(), &sb) == -1 ) {
+                FailWarn(fail_on_file_problem, Fmt("Could not get stat for %s", fname.c_str()), true);
 
-			if ( sb.st_ino == ino && sb.st_mtime == mtime )
-				// no change
-				return true;
+                file.close();
+                return ! fail_on_file_problem;
+            }
 
-			// Warn again in case of trouble if the file changes. The comparison to 0
-			// is to suppress an extra warning that we'd otherwise get on the initial
-			// inode assignment.
-			if ( ino != 0 )
-				StopWarningSuppression();
+            file_ino_t current_ino = reliable_inode(fname.c_str(), sb.st_ino);
 
-			mtime = sb.st_mtime;
-			ino = sb.st_ino;
-			// File changed. Fall through to re-read.
-			}
+            if ( current_ino == ino && sb.st_mtime == mtime ) {
+                // no change
+                return true;
+            }
 
-		case MODE_MANUAL:
-		case MODE_STREAM:
-			{
-			// dirty, fix me. (well, apparently after trying seeking, etc
-			// - this is not that bad)
-			if ( file.is_open() )
-				{
-				if ( Info().mode == MODE_STREAM )
-					{
-					file.clear(); // remove end of file evil bits
-					if ( ! ReadHeader(true) )
-						{
-						return ! fail_on_file_problem; // header reading failed
-						}
+            // Warn again in case of trouble if the file changes. The comparison to 0
+            // is to suppress an extra warning that we'd otherwise get on the initial
+            // inode assignment.
+            if ( ino != 0 )
+                StopWarningSuppression();
 
-					break;
-					}
+            mtime = sb.st_mtime;
+            ino = current_ino;
+            // File changed. Fall through to re-read.
+        }
 
-				file.close();
-				}
+        case MODE_MANUAL:
+        case MODE_STREAM: {
+            // dirty, fix me. (well, apparently after trying seeking, etc
+            // - this is not that bad)
+            if ( file.is_open() ) {
+                if ( Info().mode == MODE_STREAM ) {
+                    file.clear(); // remove end of file evil bits
+                    if ( ! ReadHeader(true) ) {
+                        return ! fail_on_file_problem; // header reading failed
+                    }
 
-			OpenFile();
+                    break;
+                }
 
-			break;
-			}
+                file.close();
+            }
 
-		default:
-			assert(false);
-		}
+            OpenFile();
 
-	string line;
+            break;
+        }
 
-	file.sync();
+        default: assert(false);
+    }
 
-	while ( GetLine(line) )
-		{
-		// split on tabs
-		bool error = false;
-		istringstream splitstream(line);
+    string line;
 
-		map<int, string> stringfields;
-		int pos = 0;
-		while ( splitstream )
-			{
-			string s;
-			if ( ! getline(splitstream, s, separator[0]) )
-				break;
+    file.sync();
 
-			stringfields[pos] = s;
-			pos++;
-			}
+    while ( GetLine(line) ) {
+        // split on tabs
+        bool error = false;
+        auto stringfields = util::split(line, separator[0]);
 
-		pos--; // for easy comparisons of max element.
+        // This needs to be a signed value or the comparisons below will fail.
+        int pos = static_cast<int>(stringfields.size() - 1);
 
-		Value** fields = new Value*[NumFields()];
+        Value** fields = new Value*[NumFields()];
 
-		int fpos = 0;
-		for ( vector<FieldMapping>::iterator fit = columnMap.begin(); fit != columnMap.end();
-		      fit++ )
-			{
+        int fpos = 0;
+        for ( const auto& fit : columnMap ) {
+            if ( ! fit.present ) {
+                // add non-present field
+                fields[fpos] = new Value(fit.type, false);
+                if ( read_location )
+                    fields[fpos]->SetFileLineNumber(read_location->FirstLine());
+                fpos++;
+                continue;
+            }
 
-			if ( ! fit->present )
-				{
-				// add non-present field
-				fields[fpos] = new Value((*fit).type, false);
-				fpos++;
-				continue;
-				}
+            assert(fit.position >= 0);
 
-			assert(fit->position >= 0);
+            if ( fit.position > pos || fit.secondary_position > pos ) {
+                FailWarn(fail_on_invalid_lines,
+                         Fmt("Not enough fields in line '%s' of %s. Found "
+                             "%d fields, want positions %d and %d",
+                             line.c_str(), fname.c_str(), pos, fit.position, fit.secondary_position),
+                         ! fail_on_invalid_lines);
 
-			if ( (*fit).position > pos || (*fit).secondary_position > pos )
-				{
-				FailWarn(fail_on_invalid_lines, Fmt("Not enough fields in line '%s' of %s. Found "
-				                                    "%d fields, want positions %d and %d",
-				                                    line.c_str(), fname.c_str(), pos,
-				                                    (*fit).position, (*fit).secondary_position));
+                if ( fail_on_invalid_lines ) {
+                    for ( int i = 0; i < fpos; i++ )
+                        delete fields[i];
 
-				if ( fail_on_invalid_lines )
-					{
-					for ( int i = 0; i < fpos; i++ )
-						delete fields[i];
+                    delete[] fields;
 
-					delete[] fields;
+                    return false;
+                }
+                else {
+                    error = true;
+                    break;
+                }
+            }
 
-					return false;
-					}
-				else
-					{
-					error = true;
-					break;
-					}
-				}
+            Value* val = formatter->ParseValue(stringfields[fit.position], fit.name, fit.type, fit.subtype);
+            if ( ! val ) {
+                Warning(Fmt("Could not convert line '%s' of %s to Val. Ignoring line.", line.c_str(), fname.c_str()));
+                error = true;
+                break;
+            }
 
-			Value* val = formatter->ParseValue(stringfields[(*fit).position], (*fit).name,
-			                                   (*fit).type, (*fit).subtype);
+            if ( read_location )
+                val->SetFileLineNumber(read_location->FirstLine());
 
-			if ( ! val )
-				{
-				Warning(Fmt("Could not convert line '%s' of %s to Val. Ignoring line.",
-				            line.c_str(), fname.c_str()));
-				error = true;
-				break;
-				}
+            if ( fit.secondary_position != -1 ) {
+                // we have a port definition :)
+                assert(val->type == TYPE_PORT);
+                val->val.port_val.proto = formatter->ParseProto(stringfields[fit.secondary_position]);
+            }
 
-			if ( (*fit).secondary_position != -1 )
-				{
-				// we have a port definition :)
-				assert(val->type == TYPE_PORT);
-				//	Error(Fmt("Got type %d != PORT with secondary position!", val->type));
+            fields[fpos] = val;
 
-				val->val.port_val.proto = formatter->ParseProto(
-					stringfields[(*fit).secondary_position]);
-				}
+            fpos++;
+        }
 
-			fields[fpos] = val;
+        if ( error ) {
+            // Encountered non-fatal error, ignoring line. But
+            // first, delete all successfully read fields and the
+            // array structure.
 
-			fpos++;
-			}
+            for ( int i = 0; i < fpos; i++ )
+                delete fields[i];
 
-		if ( error )
-			{
-			// Encountered non-fatal error, ignoring line. But
-			// first, delete all successfully read fields and the
-			// array structure.
+            delete[] fields;
+            continue;
+        }
+        // If there's no error, then it makes sense to report the next error.
+        else
+            StopWarningSuppression();
 
-			for ( int i = 0; i < fpos; i++ )
-				delete fields[i];
+        assert(fpos == NumFields());
 
-			delete[] fields;
-			continue;
-			}
+        if ( Info().mode == MODE_STREAM )
+            Put(fields);
+        else
+            SendEntry(fields);
+    }
 
-		// printf("fpos: %d, second.num_fields: %d\n", fpos, (*it).second.num_fields);
-		assert(fpos == NumFields());
+    if ( Info().mode != MODE_STREAM )
+        EndCurrentSend();
 
-		if ( Info().mode == MODE_STREAM )
-			Put(fields);
-		else
-			SendEntry(fields);
-		}
+    StopWarningSuppression();
+    return true;
+}
 
-	if ( Info().mode != MODE_STREAM )
-		EndCurrentSend();
+bool Ascii::DoHeartbeat(double network_time, double current_time) {
+    if ( ! OpenFile() )
+        return ! fail_on_file_problem;
 
-	return true;
-	}
+    switch ( Info().mode ) {
+        case MODE_MANUAL:
+            // yay, we do nothing :)
+            break;
 
-bool Ascii::DoHeartbeat(double network_time, double current_time)
-	{
-	if ( ! OpenFile() )
-		return ! fail_on_file_problem;
+        case MODE_REREAD:
+        case MODE_STREAM:
+            Update(); // Call Update, not DoUpdate, because Update
+                      // checks the "disabled" flag.
+            break;
 
-	switch ( Info().mode )
-		{
-		case MODE_MANUAL:
-			// yay, we do nothing :)
-			break;
+        default: assert(false);
+    }
 
-		case MODE_REREAD:
-		case MODE_STREAM:
-			Update(); // Call Update, not DoUpdate, because Update
-			          // checks the "disabled" flag.
-			break;
+    return true;
+}
 
-		default:
-			assert(false);
-		}
-
-	return true;
-	}
-
-	} // namespace zeek::input::reader::detail
+} // namespace zeek::input::reader::detail

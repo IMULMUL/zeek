@@ -1,5 +1,5 @@
 # @TEST-EXEC-FAIL: zeek -b %INPUT >out 2>&1
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff out
+# @TEST-EXEC: btest-diff-remove-abspath out
 
 type MySet: set[port];
 
@@ -42,6 +42,13 @@ event zeek_init()
 event zeek_init()
     {
     local lea: MySet = set(1003); # type clash
+    }
+
+# local, indefinite index type
+event zeek_init()
+    {
+    # This used to generate a fatal error.
+    local lii = set(vector());
     }
 
 type MyRecord: record {

@@ -2,247 +2,368 @@
 
 #pragma once
 
+#include "zeek/zeek-config.h"
+
+#include <arpa/nameser.h>
+#include <netdb.h>
 #include <list>
 #include <map>
-#include <queue>
 #include <utility>
+#include <variant>
 
 #include "zeek/EventHandler.h"
 #include "zeek/IPAddr.h"
-#include "zeek/List.h"
 #include "zeek/iosource/IOSource.h"
 #include "zeek/util.h"
 
-namespace zeek
-	{
+// These are defined in ares headers but we don't want to have to include
+// those headers here and create install dependencies on them.
+struct ares_channeldata;
+using ares_channel = struct ares_channeldata*;
 
-class EventHandler;
-class RecordType;
+namespace zeek {
 class Val;
 class ListVal;
 class TableVal;
+class StringVal;
+class RecordVal;
 
-template <class T> class IntrusivePtr;
+template<class T>
+class IntrusivePtr;
 using ValPtr = IntrusivePtr<Val>;
 using ListValPtr = IntrusivePtr<ListVal>;
 using TableValPtr = IntrusivePtr<TableVal>;
+using StringValPtr = IntrusivePtr<StringVal>;
+using RecordValPtr = IntrusivePtr<RecordVal>;
 
-	} // namespace zeek
+namespace telemetry {
+class Gauge;
+class Counter;
+using GaugePtr = std::shared_ptr<Gauge>;
+using CounterPtr = std::shared_ptr<Counter>;
+} // namespace telemetry
 
-// Defined in nb_dns.h
-struct nb_dns_info;
-struct nb_dns_result;
+} // namespace zeek
 
-namespace zeek::detail
-	{
-
-class DNS_Mgr_Request;
-using DNS_mgr_request_list = PList<DNS_Mgr_Request>;
-
+namespace zeek::detail {
 class DNS_Mapping;
+using DNS_MappingPtr = std::shared_ptr<DNS_Mapping>;
+class DNS_Request;
 
-enum DNS_MgrMode
-	{
-	DNS_PRIME, // used to prime the cache
-	DNS_FORCE, // internal error if cache miss
-	DNS_DEFAULT, // lookup names as they're requested
-	DNS_FAKE, // don't look up names, just return dummy results
-	};
+enum DNS_MgrMode : uint8_t {
+    DNS_PRIME,   // used to prime the cache
+    DNS_FORCE,   // internal error if cache miss
+    DNS_DEFAULT, // lookup names as they're requested
+    DNS_FAKE,    // don't look up names, just return dummy results
+};
 
-// Number of seconds we'll wait for a reply.
-#define DNS_TIMEOUT 5
-
-class DNS_Mgr final : public iosource::IOSource
-	{
+class DNS_Mgr : public iosource::IOSource {
 public:
-	explicit DNS_Mgr(DNS_MgrMode mode);
-	~DNS_Mgr() override;
+    /**
+     * Base class for callback handling for asynchronous lookups.
+     */
+    class LookupCallback {
+    public:
+        virtual ~LookupCallback() = default;
 
-	void InitPostScript();
-	void Flush();
+        /**
+         * Called when an address lookup finishes.
+         *
+         * @param name The resulting name from the lookup.
+         */
+        virtual void Resolved(const std::string& name) {};
 
-	// Looks up the address or addresses of the given host, and returns
-	// a set of addr.
-	TableValPtr LookupHost(const char* host);
+        /**
+         * Called when a name lookup finishes.
+         *
+         * @param addrs A table of the resulting addresses from the lookup.
+         */
+        virtual void Resolved(TableValPtr addrs) {};
 
-	ValPtr LookupAddr(const IPAddr& addr);
+        /**
+         * Generic callback method for all request types.
+         *
+         * @param val A Val containing the data from the query.
+         */
+        virtual void Resolved(ValPtr data, int request_type) {}
 
-	// Define the directory where to store the data.
-	void SetDir(const char* arg_dir) { dir = util::copy_string(arg_dir); }
+        /**
+         * Called when a timeout request occurs.
+         */
+        virtual void Timeout() = 0;
+    };
 
-	void Verify();
-	void Resolve();
-	bool Save();
+    explicit DNS_Mgr(DNS_MgrMode mode);
+    ~DNS_Mgr() override;
 
-	const char* LookupAddrInCache(const IPAddr& addr);
-	TableValPtr LookupNameInCache(const std::string& name);
-	const char* LookupTextInCache(const std::string& name);
+    /**
+     * Finalizes the source when it's being closed.
+     */
+    void Done() override;
 
-	// Support for async lookups.
-	class LookupCallback
-		{
-	public:
-		LookupCallback() { }
-		virtual ~LookupCallback() { }
+    /**
+     * Finalizes the manager initialization. This should be called only after all
+     * of the scripts have been parsed at startup.
+     */
+    void InitPostScript();
 
-		virtual void Resolved(const char* name){};
-		virtual void Resolved(TableVal* addrs){};
-		virtual void Timeout() = 0;
-		};
+    /**
+     * Attempts to process one more round of requests and then flushes the
+     * mapping caches.
+     */
+    void Flush();
 
-	void AsyncLookupAddr(const IPAddr& host, LookupCallback* callback);
-	void AsyncLookupName(const std::string& name, LookupCallback* callback);
-	void AsyncLookupNameText(const std::string& name, LookupCallback* callback);
+    /**
+     * Looks up the address(es) of a given host and returns a set of addresses.
+     * This is a shorthand method for doing A/AAAA requests. This is a
+     * synchronous request and will block until the request completes or times
+     * out.
+     *
+     * @param host The hostname to lookup an address for.
+     * @return A set of addresses for the host.
+     */
+    TableValPtr LookupHost(const std::string& host);
 
-	struct Stats
-		{
-		unsigned long requests; // These count only async requests.
-		unsigned long successful;
-		unsigned long failed;
-		unsigned long pending;
-		unsigned long cached_hosts;
-		unsigned long cached_addresses;
-		unsigned long cached_texts;
-		};
+    /**
+     * Looks up the hostname of a given address. This is a shorthand method for
+     * doing PTR requests. This is a synchronous request and will block until
+     * the request completes or times out.
+     *
+     * @param host The addr to lookup a hostname for.
+     * @return The hostname for the address.
+     */
+    StringValPtr LookupAddr(const IPAddr& addr);
 
-	void GetStats(Stats* stats);
+    /**
+     * Performs a generic request to the DNS server. This is a synchronous
+     * request and will block until the request completes or times out.
+     *
+     * @param name The name or address to make a request for. If this is an
+     * address it should be in arpa format (x.x.x.x.in-addr.arpa or x-*.ip6.arpa).
+     * Note that calling LookupAddr for PTR requests does this conversion
+     * automatically.
+     * @param request_type The type of request to make. This should be one of
+     * the type values defined in arpa/nameser.h or ares_nameser.h.
+     * @return The requested data.
+     */
+    ValPtr Lookup(const std::string& name, int request_type);
 
-	void Terminate();
+    /**
+     * Looks up the address(es) of a given host. This is a shorthand method
+     * for doing A/AAAA requests. This is an asynchronous request. The
+     * response will be handled via the provided callback object.
+     *
+     * @param host The hostname to lookup an address for.
+     * @param callback A callback object for handling the response.
+     */
+    void LookupHost(const std::string& host, LookupCallback* callback);
+
+    /**
+     * Looks up the hostname of a given address. This is a shorthand method for
+     * doing PTR requests. This is an asynchronous request. The response will
+     * be handled via the provided callback object.
+     *
+     * @param host The addr to lookup a hostname for.
+     * @param callback A callback object for handling the response.
+     */
+    void LookupAddr(const IPAddr& addr, LookupCallback* callback);
+
+    /**
+     * Looks up the text entries for a given address. This is a shorthand method for doing
+     * TXT requests. This is an asynchronous request. The response will be handled via the
+     * provided callback object.
+     *
+     * @param name The name or address to make a request for. If this is an
+     * address it should be in arpa format (x.x.x.x.in-addr.arpa or x-*.ip6.arpa).
+     * @param callback A callback object for handling the response.
+     */
+    void LookupText(const std::string& host, LookupCallback* callback) { Lookup(host, ns_t_txt, callback); }
+
+    /**
+     * Performs a generic request to the DNS server. This is an asynchronous
+     * request. The response will be handled via the provided callback
+     * object.
+     *
+     * @param name The name or address to make a request for. If this is an
+     * address it should be in arpa format (x.x.x.x.in-addr.arpa or x-*.ip6.arpa).
+     * Note that calling LookupAddr for PTR requests does this conversion
+     * automatically.
+     * @param request_type The type of request to make. This should be one of
+     * the type values defined in arpa/nameser.h or ares_nameser.h.
+     * @param callback A callback object for handling the response.
+     */
+    void Lookup(const std::string& name, int request_type, LookupCallback* callback);
+
+    /**
+     * Sets the directory where to store DNS data when Save() is called.
+     */
+    void SetDir(const std::string& arg_dir) { dir = arg_dir; }
+
+    /**
+     * Waits for responses to become available or a timeout to occur,
+     * and handles any responses.
+     */
+    void Resolve();
+
+    /**
+     * Saves the current name and address caches to disk.
+     */
+    bool Save();
+
+    struct CachedStats {
+        unsigned long hosts = 0;
+        unsigned long addresses = 0;
+        unsigned long texts = 0;
+        unsigned long total = 0;
+    };
+
+    struct Stats {
+        unsigned long requests = 0; // These count only async requests.
+        unsigned long successful = 0;
+        unsigned long failed = 0;
+        unsigned long pending = 0;
+        CachedStats cached;
+    };
+
+    /**
+     * Returns the current statistics for the DNS_Manager.
+     *
+     * @param stats A pointer to a stats object to return the data in.
+     */
+    void GetStats(Stats* stats);
+
+    /**
+     * Adds a result from a request to the caches. This is public so that the
+     * callback methods can call it from outside of the DNS_Mgr class.
+     *
+     * @param dr The request associated with the result.
+     * @param h A hostent structure containing the actual result data.
+     * @param ttl A ttl value contained in the response from the server.
+     * @param merge A flag for whether these results should be merged into
+     * an existing mapping. If false, AddResult will attempt to replace the
+     * existing mapping with the new data and delete the old mapping.
+     */
+    void AddResult(DNS_Request* dr, struct hostent* h, uint32_t ttl, bool merge = false);
+
+    /**
+     * Returns an empty set of addresses, used in various error cases and during
+     * cache priming.
+     */
+    static TableValPtr empty_addr_set();
+
+    /**
+     * Returns the full path to the file used to store the DNS cache.
+     */
+    std::string CacheFile() const { return cache_name; }
+
+    /**
+     * Used by the c-ares socket call back to register/unregister a socket file descriptor.
+     */
+    void RegisterSocket(int fd, bool read, bool write);
+
+    ares_channel& GetChannel() { return channel; }
 
 protected:
-	friend class LookupCallback;
-	friend class DNS_Mgr_Request;
+    friend class LookupCallback;
+    friend class DNS_Request;
 
-	void Event(EventHandlerPtr e, DNS_Mapping* dm);
-	void Event(EventHandlerPtr e, DNS_Mapping* dm, ListValPtr l1, ListValPtr l2);
-	void Event(EventHandlerPtr e, DNS_Mapping* old_dm, DNS_Mapping* new_dm);
+    StringValPtr LookupAddrInCache(const IPAddr& addr, bool cleanup_expired = false, bool check_failed = false);
+    TableValPtr LookupNameInCache(const std::string& name, bool cleanup_expired = false, bool check_failed = false);
+    StringValPtr LookupOtherInCache(const std::string& name, int request_type, bool cleanup_expired = false);
 
-	ValPtr BuildMappingVal(DNS_Mapping* dm);
+    // Finish the request if we have a result.  If not, time it out if
+    // requested.
+    void CheckAsyncAddrRequest(const IPAddr& addr, bool timeout);
+    void CheckAsyncHostRequest(const std::string& host, bool timeout);
+    void CheckAsyncOtherRequest(const std::string& host, bool timeout, int request_type);
 
-	void AddResult(DNS_Mgr_Request* dr, struct nb_dns_result* r);
-	void CompareMappings(DNS_Mapping* prev_dm, DNS_Mapping* new_dm);
-	ListValPtr AddrListDelta(ListVal* al1, ListVal* al2);
-	void DumpAddrList(FILE* f, ListVal* al);
+    void Event(EventHandlerPtr e, const DNS_MappingPtr& dm);
+    void Event(EventHandlerPtr e, const DNS_MappingPtr& dm, ListValPtr l1, ListValPtr l2);
+    void Event(EventHandlerPtr e, const DNS_MappingPtr& old_dm, DNS_MappingPtr new_dm);
 
-	using HostMap = std::map<std::string, std::pair<DNS_Mapping*, DNS_Mapping*>>;
-	using AddrMap = std::map<IPAddr, DNS_Mapping*>;
-	using TextMap = std::map<std::string, DNS_Mapping*>;
-	void LoadCache(FILE* f);
-	void Save(FILE* f, const AddrMap& m);
-	void Save(FILE* f, const HostMap& m);
+    RecordValPtr BuildMappingVal(const DNS_MappingPtr& dm);
 
-	// Selects on the fd to see if there is an answer available (timeout
-	// is secs). Returns 0 on timeout, -1 on EINTR or other error, and 1
-	// if answer is ready.
-	int AnswerAvailable(int timeout);
+    void CompareMappings(const DNS_MappingPtr& prev_dm, const DNS_MappingPtr& new_dm);
+    ListValPtr AddrListDelta(ListValPtr al1, ListValPtr al2);
 
-	// Issue as many queued async requests as slots are available.
-	void IssueAsyncRequests();
+    using MappingKey = std::variant<IPAddr, std::pair<int, std::string>>;
+    using MappingMap = std::map<MappingKey, DNS_MappingPtr>;
+    void LoadCache(const std::string& path);
+    void Save(FILE* f, const MappingMap& m);
 
-	// Finish the request if we have a result.  If not, time it out if
-	// requested.
-	void CheckAsyncAddrRequest(const IPAddr& addr, bool timeout);
-	void CheckAsyncHostRequest(const char* host, bool timeout);
-	void CheckAsyncTextRequest(const char* host, bool timeout);
+    // Issue as many queued async requests as slots are available.
+    void IssueAsyncRequests();
 
-	// IOSource interface.
-	void Process() override;
-	void InitSource() override;
-	const char* Tag() override { return "DNS_Mgr"; }
-	double GetNextTimeout() override;
+    // IOSource interface.
+    void Process() override;
+    void ProcessFd(int fd, int flags) override;
+    void InitSource() override;
+    const char* Tag() override { return "DNS_Mgr"; }
+    double GetNextTimeout() override;
 
-	DNS_MgrMode mode;
+    void UpdateCachedStats(bool force);
 
-	HostMap host_mappings;
-	AddrMap addr_mappings;
-	TextMap text_mappings;
+    DNS_MgrMode mode;
 
-	DNS_mgr_request_list requests;
+    MappingMap all_mappings;
 
-	nb_dns_info* nb_dns;
-	char* cache_name;
-	char* dir; // directory in which cache_name resides
+    std::string cache_name;
+    std::string dir; // directory in which cache_name resides
 
-	bool did_init;
-	int asyncs_pending;
+    bool did_init = false;
 
-	RecordTypePtr dm_rec;
+    RecordTypePtr dm_rec;
 
-	using CallbackList = std::list<LookupCallback*>;
+    ares_channel channel{};
 
-	struct AsyncRequest
-		{
-		double time;
-		IPAddr host;
-		std::string name;
-		CallbackList callbacks;
-		bool is_txt;
-		bool processed;
+    using CallbackList = std::list<LookupCallback*>;
 
-		AsyncRequest() : time(0.0), is_txt(false), processed(false) { }
+    struct AsyncRequest {
+        double time = 0.0;
+        IPAddr addr;
+        std::string host;
+        CallbackList callbacks;
+        int type = 0;
+        bool processed = false;
 
-		bool IsAddrReq() const { return name.empty(); }
+        AsyncRequest(std::string host, int request_type) : host(std::move(host)), type(request_type) {}
+        AsyncRequest(const IPAddr& addr);
 
-		void Resolved(const char* name)
-			{
-			for ( CallbackList::iterator i = callbacks.begin(); i != callbacks.end(); ++i )
-				{
-				(*i)->Resolved(name);
-				delete *i;
-				}
-			callbacks.clear();
-			processed = true;
-			}
+        void Resolved(const std::string& name);
+        void Resolved(TableValPtr addrs);
+        void Timeout();
+    };
 
-		void Resolved(TableVal* addrs)
-			{
-			for ( CallbackList::iterator i = callbacks.begin(); i != callbacks.end(); ++i )
-				{
-				(*i)->Resolved(addrs);
-				delete *i;
-				}
-			callbacks.clear();
-			processed = true;
-			}
+    struct AsyncRequestCompare {
+        bool operator()(const AsyncRequest* a, const AsyncRequest* b) { return a->time > b->time; }
+    };
 
-		void Timeout()
-			{
-			for ( CallbackList::iterator i = callbacks.begin(); i != callbacks.end(); ++i )
-				{
-				(*i)->Timeout();
-				delete *i;
-				}
-			callbacks.clear();
-			processed = true;
-			}
-		};
+    using AsyncRequestMap = std::map<MappingKey, AsyncRequest*>;
+    AsyncRequestMap asyncs;
 
-	using AsyncRequestAddrMap = std::map<IPAddr, AsyncRequest*>;
-	AsyncRequestAddrMap asyncs_addrs;
+    using QueuedList = std::list<AsyncRequest*>;
+    QueuedList asyncs_queued;
 
-	using AsyncRequestNameMap = std::map<std::string, AsyncRequest*>;
-	AsyncRequestNameMap asyncs_names;
+    telemetry::CounterPtr num_requests_metric;
+    telemetry::CounterPtr successful_metric;
+    telemetry::CounterPtr failed_metric;
+    telemetry::GaugePtr asyncs_pending_metric;
 
-	using AsyncRequestTextMap = std::map<std::string, AsyncRequest*>;
-	AsyncRequestTextMap asyncs_texts;
+    telemetry::GaugePtr cached_hosts_metric;
+    telemetry::GaugePtr cached_addresses_metric;
+    telemetry::GaugePtr cached_texts_metric;
 
-	using QueuedList = std::list<AsyncRequest*>;
-	QueuedList asyncs_queued;
+    double last_cached_stats_update = 0;
+    CachedStats last_cached_stats;
 
-	struct AsyncRequestCompare
-		{
-		bool operator()(const AsyncRequest* a, const AsyncRequest* b) { return a->time > b->time; }
-		};
+    int asyncs_pending = 0;
 
-	using TimeoutQueue =
-		std::priority_queue<AsyncRequest*, std::vector<AsyncRequest*>, AsyncRequestCompare>;
-	TimeoutQueue asyncs_timeouts;
+    std::set<int> socket_fds;
+    std::set<int> write_socket_fds;
 
-	unsigned long num_requests;
-	unsigned long successful;
-	unsigned long failed;
-	};
+    bool shutting_down = false;
+};
 
-extern DNS_Mgr* dns_mgr;
+ZEEK_EXTERN_DATA DNS_Mgr* dns_mgr;
 
-	} // namespace zeek::detail
+} // namespace zeek::detail

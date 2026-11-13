@@ -102,15 +102,22 @@
 
    :Type: :zeek:type:`record`
 
-      field1: :zeek:type:`count`
-         Counts something.
 
-      field2: :zeek:type:`bool`
-         Toggles something.
+   .. zeek:field:: field1 :zeek:type:`count`
 
-      field_ext: :zeek:type:`string` :zeek:attr:`&optional`
-         Document the extending field like this.
-         Or here, like this.
+      Counts something.
+
+
+   .. zeek:field:: field2 :zeek:type:`bool`
+
+      Toggles something.
+
+
+   .. zeek:field:: field_ext :zeek:type:`string` :zeek:attr:`&optional`
+
+      Document the extending field like this.
+      Or here, like this.
+
 
    General documentation for a type "SimpleRecord" goes here.
    The way fields can be documented is similar to what's already seen
@@ -121,19 +128,28 @@
 
    :Type: :zeek:type:`record`
 
-      field1: :zeek:type:`count`
-         Counts something.
 
-      field2: :zeek:type:`bool`
-         Toggles something.
+   .. zeek:field:: field1 :zeek:type:`count`
 
-      field3: :zeek:type:`ZeekygenExample::SimpleRecord`
-         Zeekygen automatically tracks types
-         and cross-references are automatically
-         inserted in to generated docs.
+      Counts something.
 
-      msg: :zeek:type:`string` :zeek:attr:`&default` = ``"blah"`` :zeek:attr:`&optional`
-         Attributes are self-documenting.
+
+   .. zeek:field:: field2 :zeek:type:`bool`
+
+      Toggles something.
+
+
+   .. zeek:field:: field3 :zeek:type:`ZeekygenExample::SimpleRecord`
+
+      Zeekygen automatically tracks types
+      and cross-references are automatically
+      inserted into generated docs.
+
+
+   .. zeek:field:: msg :zeek:type:`string` :zeek:attr:`&default` = ``"blah"`` :zeek:attr:`&optional`
+
+      Attributes are self-documenting.
+
    :Attributes: :zeek:attr:`&redef`
 
    General documentation for a type "ComplexRecord" goes here.
@@ -143,11 +159,15 @@
 
    :Type: :zeek:type:`record`
 
-      ts: :zeek:type:`time` :zeek:attr:`&log`
 
-      uid: :zeek:type:`string` :zeek:attr:`&log`
+   .. zeek:field:: ts :zeek:type:`time` :zeek:attr:`&log`
 
-      status: :zeek:type:`count` :zeek:attr:`&log` :zeek:attr:`&optional`
+
+   .. zeek:field:: uid :zeek:type:`string` :zeek:attr:`&log`
+
+
+   .. zeek:field:: status :zeek:type:`count` :zeek:attr:`&log` :zeek:attr:`&optional`
+
 
    An example record to be used with a logging stream.
    Nothing special about it.  If another script redefs this type
@@ -210,14 +230,14 @@
    Give more details about "a_function" here.
    Separating the documentation of the params/return values with
    empty comments is optional, but improves readability of script.
-   
 
-   :tag: Function arguments can be described
+
+   :param tag: Function arguments can be described
         like this.
-   
 
-   :msg: Another param.
-   
+
+   :param msg: Another param.
+
 
    :returns: Describe the return type here.
 
@@ -228,18 +248,19 @@
 
    Summarize "an_event" here.
    Give more details about "an_event" here.
-   
+
    ZeekygenExample::a_function should not be confused as a parameter
    in the generated docs, but it also doesn't generate a cross-reference
    link.  Use the see role instead: :zeek:see:`ZeekygenExample::a_function`.
-   
 
-   :name: Describe the argument here.
+
+   :param name: Describe the argument here.
 
 .. zeek:id:: ZeekygenExample::function_without_proto
    :source-code: zeekygen/example.zeek 176 184
 
    :Type: :zeek:type:`function` (tag: :zeek:type:`string`) : :zeek:type:`string`
+   :Attributes: :zeek:attr:`&is_used`
 
 
 .. zeek:type:: ZeekygenExample::PrivateRecord
@@ -247,8 +268,11 @@
 
    :Type: :zeek:type:`record`
 
-      field1: :zeek:type:`bool`
 
-      field2: :zeek:type:`count`
+   .. zeek:field:: field1 :zeek:type:`bool`
+
+
+   .. zeek:field:: field2 :zeek:type:`count`
+
 
 

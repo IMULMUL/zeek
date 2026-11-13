@@ -9,6 +9,9 @@ export {
 	## The SSH protocol logging stream identifier.
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for SSH.
+	const ports = { 22/tcp } &redef;
+
 	## A default logging policy hook for the stream.
 	global log_policy: Log::PolicyHook;
 
@@ -24,11 +27,12 @@ export {
 		## client and server version strings are unset, malformed or incompatible
 		## so no common version can be extracted. If no version can be extracted
 		## even though both client and server versions are set a weird
-		## will be generated.
+		## will be generated. Version strings whose protocol version does not start
+		## with 1 are treated as version 2.
 		version:         count        &log &optional;
 		## Authentication result (T=success, F=failure, unset=unknown)
 		auth_success:    bool         &log &optional;
-		## The number of authentication attemps we observed. There's always
+		## The number of authentication attempts we observed. There's always
 		## at least one, since some servers might support no authentication at all.
 		## It's important to note that not all of these are failures, since
 		## some servers require two-factor auth (e.g. password AND pubkey)
@@ -52,8 +56,9 @@ export {
 		kex_alg:         string       &log &optional;
 		## The server host key's algorithm
 		host_key_alg:    string       &log &optional;
-		## The server's key fingerprint
-		host_key:        string       &log &optional;
+		## The server's key fingerprint, in the format that `ssh-keygen -l` would output.
+		## For example, a sha256 fingerprint will look like `SHA256:<fingerprint>`.
+		host_key_fingerprint: string       &log &optional;
 	};
 
 	## The set of compression algorithms. We can't accurately determine
@@ -125,7 +130,7 @@ redef record Info += {
 	# Store capabilities from the first host for
 	# comparison with the second (internal use)
 	capabilities: Capabilities &optional;
-	## Analzyer ID
+	## Analyzer ID
 	analyzer_id: count         &optional;
 };
 
@@ -133,13 +138,10 @@ redef record connection += {
 	ssh: Info &optional;
 };
 
-const ports = { 22/tcp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
 	Analyzer::register_for_ports(Analyzer::ANALYZER_SSH, ports);
-	Log::create_stream(SSH::LOG, [$columns=Info, $ev=log_ssh, $path="ssh", $policy=log_policy]);
+	Log::create_stream(SSH::LOG, Log::Stream($columns=Info, $ev=log_ssh, $path="ssh", $policy=log_policy));
 	}
 
 function set_session(c: connection)
@@ -174,27 +176,31 @@ function set_version(c: connection)
 
 	if ( |c$ssh$client| > 4 && |c$ssh$server| > 4 )
 		{
-		if ( c$ssh$client[4] == "1" && c$ssh$server[4] == "2" )
+		# Version not starting with 1 is assumed to be 2
+		local client_major = c$ssh$client[4] == "1" ? "1" : "2";
+		local server_major = c$ssh$server[4] == "1" ? "1" : "2";
+
+		if ( client_major == "1" && server_major == "2" )
 			{
 			# SSH199 vs SSH2 -> 2
 			if ( ( |c$ssh$client| > 7 ) && ( c$ssh$client[6] == "9" ) && ( c$ssh$client[7] == "9" ) )
 				c$ssh$version = 2;
 			# SSH1 vs SSH2 -> Undefined
 			else
-				Reporter::conn_weird("SSH_version_mismatch", c, fmt("%s vs %s", c$ssh$server, c$ssh$client));
+				Reporter::conn_weird("SSH_version_mismatch", c, fmt("%s vs %s", c$ssh$server, c$ssh$client), "SSH");
 				return;
 			}
-		else if ( c$ssh$client[4] == "2" && c$ssh$server[4] == "1" )
+		else if ( client_major == "2" && server_major == "1" )
 			{
 			# SSH2 vs SSH199 -> 2
 			if ( ( |c$ssh$server| > 7 ) && ( c$ssh$server[6] == "9" ) && ( c$ssh$server[7] == "9" ) )
 				c$ssh$version = 2;
 			else
 				# SSH2 vs SSH1 -> Undefined
-				Reporter::conn_weird("SSH_version_mismatch", c, fmt("%s vs %s", c$ssh$server, c$ssh$client));
+				Reporter::conn_weird("SSH_version_mismatch", c, fmt("%s vs %s", c$ssh$server, c$ssh$client), "SSH");
 				return;
 			}
-		else if ( c$ssh$client[4] == "1" && c$ssh$server[4] == "1" )
+		else if ( client_major == "1" && server_major == "1" )
 			{
 			# SSH1 vs SSH199 -> 1
 			if ( ( |c$ssh$server| > 7 ) && ( c$ssh$server[6] == "9" ) && ( c$ssh$server[7] == "9" ) )
@@ -212,7 +218,7 @@ function set_version(c: connection)
 				}
 			}
 		# SSH2 vs SSH2
-		else if (c$ssh$client[4] == "2" && c$ssh$server[4] == "2" )
+		else if (client_major == "2" && server_major == "2" )
 			{
 			c$ssh$version = 2;
 			}
@@ -220,7 +226,7 @@ function set_version(c: connection)
 		return;
 		}
 
-	Reporter::conn_weird("SSH_cannot_determine_version", c, fmt("%s vs %s", c$ssh$server, c$ssh$client));
+	Reporter::conn_weird("SSH_cannot_determine_version", c, fmt("%s vs %s", c$ssh$server, c$ssh$client), "SSH");
 	}
 
 event ssh_server_version(c: connection, version: string)
@@ -249,7 +255,7 @@ event ssh_auth_attempted(c: connection, authenticated: bool) &priority=5
 	c$ssh$auth_success = authenticated;
 	c$ssh$auth_attempts += 1;
 
-	if ( authenticated && disable_analyzer_after_detection )
+	if ( authenticated && disable_analyzer_after_detection && c$ssh?$analyzer_id )
 		disable_analyzer(c$id, c$ssh$analyzer_id);
 	}
 
@@ -266,10 +272,11 @@ event ssh_auth_attempted(c: connection, authenticated: bool) &priority=-5
 # Determine the negotiated algorithm
 function find_alg(client_algorithms: vector of string, server_algorithms: vector of string): string
 	{
-	for ( i in client_algorithms )
-		for ( j in server_algorithms )
-			if ( client_algorithms[i] == server_algorithms[j] )
-				return client_algorithms[i];
+	local server_algorithms_set = server_algorithms as set[string];
+	for ( _, client_algorithm in client_algorithms )
+		if ( client_algorithm in server_algorithms_set )
+			return client_algorithm;
+
 	return "Algorithm negotiation failed";
 	}
 
@@ -347,19 +354,19 @@ event ssh_auth_failed(c: connection) &priority=-5
 	event ssh_auth_result(c, F, c$ssh$auth_attempts);
 	}
 
-event ssh_server_host_key(c: connection, hash: string) &priority=5
+event ssh_server_host_key_fingerprint(c: connection, fingerprint: string) &priority=5
 	{
 	if ( ! c?$ssh )
 		return;
 
-	c$ssh$host_key = hash;
+	c$ssh$host_key_fingerprint = fingerprint;
 	}
 
-event analyzer_confirmation(c: connection, atype: AllAnalyzers::Tag, aid: count) &priority=20
+event analyzer_confirmation_info(atype: AllAnalyzers::Tag, info: AnalyzerConfirmationInfo) &priority=20
 	{
 	if ( atype == Analyzer::ANALYZER_SSH )
 		{
-		set_session(c);
-		c$ssh$analyzer_id = aid;
+		set_session(info$c);
+		info$c$ssh$analyzer_id = info$aid;
 		}
 	}

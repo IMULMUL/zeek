@@ -11,6 +11,7 @@ export {
 	const DTLSv10 = 0xFEFF;
 	# DTLSv11 does not exist
 	const DTLSv12 = 0xFEFD;
+	const DTLSv13 = 0xFEFC;
 
 	## Mapping between the constants and string values for SSL/TLS versions.
 	const version_strings: table[count] of string = {
@@ -21,8 +22,9 @@ export {
 		[TLSv12] = "TLSv12",
 		[TLSv13] = "TLSv13",
 		[DTLSv10] = "DTLSv10",
-		[DTLSv12] = "DTLSv12"
-	} &default=function(i: count):string
+		[DTLSv12] = "DTLSv12",
+		[DTLSv13] = "DTLSv13"
+	} &redef &default=function(i: count):string
 		{
 		if ( i/0xFF == 0x7F ) # TLS 1.3 draft
 		  return fmt("TLSv13-draft%d", i % 0x7F );
@@ -36,6 +38,9 @@ export {
 	const HANDSHAKE = 22;
 	const APPLICATION_DATA = 23;
 	const HEARTBEAT = 24;
+	const TLS12_CID = 25; # RFC 9146
+	const TLS13_ACK = 26; # RFC 9147
+	const RETURN_ROUTABILITY_CHECK = 26; # draft-ietf-tls-dtls-rrc-20
 	const V2_ERROR = 300;
 	const V2_CLIENT_HELLO = 301;
 	const V2_CLIENT_MASTER_KEY = 302;
@@ -47,8 +52,8 @@ export {
 	const SERVER_HELLO        = 2;
 	const HELLO_VERIFY_REQUEST = 3; # RFC 6347
 	const SESSION_TICKET      = 4; # RFC 5077
-	const HELLO_RETRY_REQUEST = 6; # draft-ietf-tls-tls13-16
-	const ENCRYPTED_EXTENSIONS = 8; # draft-ietf-tls-tls13-16
+	const HELLO_RETRY_REQUEST = 6; # draft-ietf-tls-tls13-16 - moved to extension in final RFC
+	const ENCRYPTED_EXTENSIONS = 8; # RFC 8446
 	const CERTIFICATE         = 11;
 	const SERVER_KEY_EXCHANGE = 12;
 	const CERTIFICATE_REQUEST = 13;
@@ -59,17 +64,25 @@ export {
 	const CERTIFICATE_URL     = 21; # RFC 3546
 	const CERTIFICATE_STATUS  = 22; # RFC 3546
 	const SUPPLEMENTAL_DATA   = 23; # RFC 4680
-	const KEY_UPDATE          = 24; # draft-ietf-tls-tls13-16
+	const KEY_UPDATE          = 24; # RFC 8446
+	const COMPRESSED_CERTIFICATE = 25; # RFC 8879
+	const EKT_KEY = 26; # RFC 8870
+
 
 	## Mapping between numeric codes and human readable strings for alert
 	## levels.
 	const alert_levels: table[count] of string = {
 		[1] = "warning",
 		[2] = "fatal",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	## Mapping between numeric codes and human readable strings for hash
 	## algorithms.
+	##
+	## Use only for TLS 1.2 and below; starting with TLS 1.3
+	## the interpretation of these values changed; use
+	## `TLS SignatureScheme <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme>`_
+	## for TLS 1.3.
 	const hash_algorithms: table[count] of string = {
 		[0] = "none",
 		[1] = "md5",
@@ -79,10 +92,15 @@ export {
 		[5] = "sha384",
 		[6] = "sha512",
 		[8] = "Intrinsic",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+	} &default=function(i: count):string { return fmt("unknown-%d", i); } &deprecated="Remove in 9.1: The SSL::hash_algorithms table is not used by Zeek itself and outdated with TLS 1.3.";
 
 	## Mapping between numeric codes and human readable strings for signature
 	## algorithms.
+	##
+	## Use only for TLS 1.2 and below; starting with TLS 1.3
+	## the interpretation of these values changed; use
+	## `TLS SignatureScheme <https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme>`_
+	## for TLS 1.3.
 	const signature_algorithms: table[count] of string = {
 		[0] = "anonymous",
 		[1] = "rsa",
@@ -98,7 +116,7 @@ export {
 		[11] = "rsa_pss_sha512",
 		[64] = "gostr34102012_256",
 		[65] = "gostr34102012_256",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+	} &default=function(i: count):string { return fmt("unknown-%d", i); } &deprecated="Remove in 9.1: The SSL::signature_algorithms table is not used by Zeek itself and outdated with TLS 1.3.";
 
 	## Mapping between numeric codes and human readable strings for alert
 	## descriptions.
@@ -134,12 +152,15 @@ export {
 		[113] = "bad_certificate_status_response",
 		[114] = "bad_certificate_hash_value",
 		[115] = "unknown_psk_identity",
+		[116] = "certificate_required", # RFC 8446
+		[117] = "general_error", # draft-ietf-tls-rfc8446bis-14
 		[120] = "no_application_protocol",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+		[121] = "ech_required", # RFC 9849
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	# Map SSL Extension values to consts for easier readability of code.
 	# More information can be found here:
-	# http://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xml
+	# https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xml
 	const SSL_EXTENSION_SERVER_NAME = 0;
 	const SSL_EXTENSION_MAX_FRAGMENT_LENGTH = 1;
 	const SSL_EXTENSION_CLIENT_CERTIFICATE_URL = 2;
@@ -166,7 +187,20 @@ export {
 	const SSL_EXTENSION_EXTENDED_MASTER_SECRET = 23;
 	const SSL_EXTENSION_TOKEN_BINDING = 24;
 	const SSL_EXTENSION_CACHED_INFO = 25;
+	const SSL_EXTENSION_TLS_LTS = 26;
+	const SSL_EXTENSION_COMPRESS_CERTIFICATE = 27;
+	const SSL_EXTENSION_RECORD_SIZE_LIMIT = 28;
+	const SSL_EXTENSION_PWD_PROTECT = 29;
+	const SSL_EXTENSION_PWD_CLEAR = 30;
+	const SSL_EXTENSION_PASSWORD_SALT = 31;
+	const SSL_EXTENSION_TICKET_PINNING = 32;
+	const SSL_EXTENSION_TLS_CERT_WITH_EXTERN_PSK = 33;
+	const SSL_EXTENSION_DELEGATED_CREDENTIAL = 34;
 	const SSL_EXTENSION_SESSIONTICKET_TLS = 35;
+	const SSL_EXTENSION_TLMSP = 36;
+	const SSL_EXTENSION_TLMSP_PROXYING = 37;
+	const SSL_EXTENSION_TLMSP_DELEGATE = 38;
+	const SSL_EXTENSION_SUPPORTED_EKT_CIPHERS = 39;
 	const SSL_EXTENSION_KEY_SHARE_OLD = 40;
 	const SSL_EXTENSION_PRE_SHARED_KEY = 41;
 	const SSL_EXTENSION_EARLY_DATA = 42;
@@ -180,22 +214,31 @@ export {
 	const SSL_EXTENSION_SIGNATURE_ALGORITHMS_CERT = 50;
 	const SSL_EXTENSION_KEY_SHARE = 51;
 	const SSL_EXTENSION_TRANSPARENCY_INFO = 52;
-	const SSL_EXTENSION_CONNECTION_ID = 53;
+	const SSL_EXTENSION_CONNECTION_ID_DEPRECATED = 53;
+	const SSL_EXTENSION_CONNECTION_ID = 54;
 	const SSL_EXTENSION_EXTERNAL_ID_HASH = 55;
 	const SSL_EXTENSION_EXTERNAL_SESSION_ID = 56;
 	const SSL_EXTENSION_QUIC_TRANSPORT_PARAMETERS = 57;
+	const SSL_EXTENSION_TICKET_REQUEST = 58;
+	const SSL_EXTENSION_DNSSEC_CHAIN = 59;
+	const SSL_EXTENSION_SEQUENCE_NUMBER_ENCRYPTION_ALGORITHMS = 60;
+	const SSL_EXTENSION_RRC = 61;
+	const SSL_EXTENSION_TLS_FLAGS = 62;
 	const SSL_EXTENSION_NEXT_PROTOCOL_NEGOTIATION = 13172;
 	const SSL_EXTENSION_ORIGIN_BOUND_CERTIFICATES = 13175;
 	const SSL_EXTENSION_ENCRYPTED_CLIENT_CERTIFICATES = 13180;
+	const SSL_EXTENSION_APPLICATION_SETTING = 17513;
 	const SSL_EXTENSION_CHANNEL_ID = 30031;
 	const SSL_EXTENSION_CHANNEL_ID_NEW = 30032;
 	const SSL_EXTENSION_PADDING_TEMP = 35655;
+	const SSL_EXTENSION_ECH_OUTER_EXTENSION = 64768;
+	const SSL_EXTENSION_ENCRYPTED_CLIENT_HELLO = 65037;
 	const SSL_EXTENSION_RENEGOTIATION_INFO = 65281;
 
 	## Mapping between numeric codes and human readable strings for SSL/TLS
 	## extensions.
 	# More information can be found here:
-	# http://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xml
+	# https://www.iana.org/assignments/tls-extensiontype-values/tls-extensiontype-values.xml
 	const extensions: table[count] of string = {
 		[0] = "server_name",
 		[1] = "max_fragment_length",
@@ -223,7 +266,20 @@ export {
 		[23] = "extended_master_secret",
 		[24] = "token_binding", # temporary till 2017-03-06 - draft-ietf-tokbind-negotiation
 		[25] = "cached_info",
+		[26] = "tls_lts", # draft-gutmann-tls-lts
+		[27] = "compress_certificate", # RFC8879
+		[28] = "record_size_limit", # RFC8449
+		[29] = "pwd_protect", # RFC8492
+		[30] = "pwd_clear", # RFC8492
+		[31] = "password_salt", # RFC8492
+		[32] = "ticket_pinning", # RFC8672
+		[33] = "tls_cert_with_extern_psk", # RFC8773
+		[34] = "delegated_credential", # RFC9345
 		[35] = "SessionTicket TLS",
+		[36] = "TLMSP", # ETSI TS 103 523-2
+		[37] = "TLMSP_proxying", # ETSI TS 103 523-2
+		[38] = "TLMSP_delegate", # ETSI TS 103 523-2
+		[39] = "supported_ekt_ciphers", # RFC8870
 		[40] = "key_share_old", # new for TLS 1.3, used in some of the drafts. Did not make it into the RFC. Was used for extended_random before.
 		[41] = "pre_shared_key", # new for 1.3, see RFC 8446
 		[42] = "early_data", # new for 1.3, see RFC 8446
@@ -236,22 +292,48 @@ export {
 		[49] = "post_handshake_auth", # new for 1.3, see RFC 8446
 		[50] = "signature_algorithms_cert", # new for 1.3, see RFC 8446
 		[51] = "key_share", # new for 1.3, see RFC 8446
-		[52] = "transparency_info", # temporary - draft-ietf-trans-rfc6962-bis-34
-		[53] = "connection_id", # temporary -d draft-ietf-tls-dtls-connection-id
-		[55] = "external_id_hash", # temporary - RFC-ietf-mmusic-sdp-uks-07
-		[56] = "external_session_id", # temporary - RFC-ietf-mmusic-sdp-uks-07
-		[57] = "quic_transport_parameters", # temporary - draft-ietf-quic-tls-32
+		[52] = "transparency_info", # RFC9162
+		[53] = "connection_id_deprecated", # RFC9146
+		[54] = "connection_id", # RFC9146
+		[55] = "external_id_hash", # RFC8844
+		[56] = "external_session_id", # RFC8844
+		[57] = "quic_transport_parameters", # RFC9001
+		[58] = "ticket_request", # RFC9149
+		[59] = "dnssec_chain", # RFC9102
+		[60] = "sequence_number_encryption_algorithms", # draft-pismenny-tls-dtls-plaintext-sequence-number-01
+		[61] = "rrc", # draft-ietf-tls-dtls-rrc-30
+		[62] = "tls_flags", # draft-ietf-tls-tlsflags-14
 		[13172] = "next_protocol_negotiation",
 		[13175] = "origin_bound_certificates",
 		[13180] = "encrypted_client_certificates",
+		[17513] = "application_setting", # draft-vvv-tls-alps-01.html
 		[30031] = "channel_id",
 		[30032] = "channel_id_new",
 		[35655] = "padding",
-		[65281] = "renegotiation_info"
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+		[64768] = "ech_outer_extensions", # RFC 9849 - should only appear in encrypted inner client hello
+		[65037] = "encrypted_client_hello", # RFC 9849
+		[65281] = "renegotiation_info",
+		# GREASE values - rfc8701
+		[2570] = "grease_0x0A0A",
+		[6682] = "grease_0x1A1A",
+		[10794] = "grease_0x2A2A",
+		[14906] = "grease_0x3A3A",
+		[19018] = "grease_0x4A4A",
+		[23130] = "grease_0x5A5A",
+		[27242] = "grease_0x6A6A",
+		[31354] = "grease_0x7A7A",
+		[35466] = "grease_0x8A8A",
+		[39578] = "grease_0x9A9A",
+		[43690] = "grease_0xAAAA",
+		[47802] = "grease_0xBABA",
+		[51914] = "grease_0xCACA",
+		[56026] = "grease_0xDADA",
+		[60138] = "grease_0xEAEA",
+		[64250] = "grease_0xFAFA"
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	## Mapping between numeric codes and human readable string for SSL/TLS elliptic curves.
-	# See http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
+	# See https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
 	const ec_curves: table[count] of string = {
 		[1] = "sect163k1", # 1-23 are TLS 1.3 obsoleted
 		[2] = "sect163r1",
@@ -281,26 +363,65 @@ export {
 		[26] = "brainpoolP256r1", # 26-28 are TLS 1.3 obsoleted
 		[27] = "brainpoolP384r1",
 		[28] = "brainpoolP512r1",
-		# Temporary till 2017-01-09 - draft-ietf-tls-rfc4492bis
-		[29] = "x25519", # TLS 1.3 valid
-		[30] = "x448", # TLS 1.3 valid
+		[29] = "x25519", # RFC8446, RFC8422, TLS 1.3 valid
+		[30] = "x448", # RFC8446, RFC8422, TLS 1.3 valid
+		[31] = "brainpoolP256r1tls13", # RFC8734
+		[32] = "brainpoolP384r1tls13", # RFC8734
+		[33] = "brainpoolP512r1tls13", # RFC8734
+		[34] = "GC256A", # RFC9189
+		[35] = "GC256B", # RFC9189
+		[36] = "GC256C", # RFC9189
+		[37] = "GC256D", # RFC9189
+		[38] = "GC512A", # RFC9189
+		[39] = "GC512B", # RFC9189
+		[40] = "GC512C", # RFC9189
+		[41] = "curveSM2", # RFC8998
 		# draft-ietf-tls-negotiated-ff-dhe-10
 		[256] = "ffdhe2048", # 256-260 are TLS 1.3 valid
 		[257] = "ffdhe3072",
 		[258] = "ffdhe4096",
 		[259] = "ffdhe6144",
 		[260] = "ffdhe8192",
+		# draft-connolly-tls-mlkem-key-agreement-03
+		[512] = "MLKEM512",
+		[513] = "MLKEM768",
+		[514] = "MLKEM1024",
+		# draft-kwiatkowski-tls-ecdhe-mlkem-03
+		[4587] = "SecP256r1MLKEM768", # draft-ietf-tls-ecdhe-mlkem-04
+		[4588] = "X25519MLKEM768", # draft-ietf-tls-ecdhe-mlkem-04
+		[4589] = "SecP384r1MLKEM1024", # draft-ietf-tls-ecdhe-mlkem-04
+		[4590] = "curveSM2MLKEM768", # draft-yang-tls-hybrid-sm2-mlkem-03
+		[16696] = "CECPQ2", # https://boringssl.googlesource.com/boringssl/+/4ae4fb76c809bfc48a5ab100670395ce404244ce%5E%21/#F4
+		[25497] = "X25519Kyber768Draft00", # draft-tls-westerbaan-xyber768d00-02 - obsolete
+		[25498] = "SecP256r1Kyber768Draft00", # draft-kwiatkowski-tls-ecdhe-kyber-01 - obsolete
 		[0xFF01] = "arbitrary_explicit_prime_curves",
-		[0xFF02] = "arbitrary_explicit_char2_curves"
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+		[0xFF02] = "arbitrary_explicit_char2_curves",
+		# GREASE values - rfc8701
+		[2570] = "grease_0x0A0A",
+		[6682] = "grease_0x1A1A",
+		[10794] = "grease_0x2A2A",
+		[14906] = "grease_0x3A3A",
+		[19018] = "grease_0x4A4A",
+		[23130] = "grease_0x5A5A",
+		[27242] = "grease_0x6A6A",
+		[31354] = "grease_0x7A7A",
+		[35466] = "grease_0x8A8A",
+		[39578] = "grease_0x9A9A",
+		[43690] = "grease_0xAAAA",
+		[47802] = "grease_0xBABA",
+		[51914] = "grease_0xCACA",
+		[56026] = "grease_0xDADA",
+		[60138] = "grease_0xEAEA",
+		[64250] = "grease_0xFAFA"
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	## Mapping between numeric codes and human readable string for SSL/TLS EC point formats.
-	# See http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-9
+	# See https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-9
 	const ec_point_formats: table[count] of string = {
 		[0] = "uncompressed",
 		[1] = "ansiX962_compressed_prime",
 		[2] = "ansiX962_compressed_char2"
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 	# SSLv2
 	const SSLv20_CK_RC4_128_WITH_MD5 = 0x010080;
@@ -475,12 +596,18 @@ export {
 	const TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256 = 0x00C3;
 	const TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256 = 0x00C4;
 	const TLS_DH_ANON_WITH_CAMELLIA_256_CBC_SHA256 = 0x00C5;
-	# draft-ietf-tls-tls13-16
+	# RFC8998
+	const TLS_SM4_GCM_SM3 = 0x00C6;
+	const TLS_SM4_CCM_SM3 = 0x00C7;
+	# RFC8446
 	const TLS_AES_128_GCM_SHA256 = 0x1301;
 	const TLS_AES_256_GCM_SHA384 = 0x1302;
 	const TLS_CHACHA20_POLY1305_SHA256 = 0x1303;
 	const TLS_AES_128_CCM_SHA256 = 0x1304;
 	const TLS_AES_128_CCM_8_SHA256 = 0x1305;
+	# draft-irtf-cfrg-aegis-aead-00
+	const TLS_AEGIS_256_SHA384 = 0x1306;
+	const TLS_AEGIS_128L_SHA256 = 0x1307;
 	# Google...
 	const TLS_CECPQ1_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0x16b7;
 	const TLS_CECPQ1_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = 0x16b8;
@@ -667,6 +794,23 @@ export {
 	const TLS_ECDHE_ECDSA_WITH_AES_256_CCM = 0xC0AD;
 	const TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8 = 0xC0AE;
 	const TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8 = 0xC0AF;
+	# RFC8492
+	const TLS_ECCPWD_WITH_AES_128_GCM_SHA256 = 0xC0B0;
+	const TLS_ECCPWD_WITH_AES_256_GCM_SHA384 = 0xC0B1;
+	const TLS_ECCPWD_WITH_AES_128_CCM_SHA256 = 0xC0B2;
+	const TLS_ECCPWD_WITH_AES_256_CCM_SHA384 = 0xC0B3;
+	# RFC9150
+	const TLS_SHA256_SHA256 = 0xC0B4;
+	const TLS_SHA384_SHA384 = 0xC0B5;
+	# RFC9189
+	const TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC = 0xC100;
+	const TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC = 0xC101;
+	const TLS_GOSTR341112_256_WITH_28147_CNT_IMIT = 0xC102;
+	# RFC9367
+	const TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L = 0xC103;
+	const TLS_GOSTR341112_256_WITH_MAGMA_MGM_L = 0xC104;
+	const TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S = 0xC105;
+	const TLS_GOSTR341112_256_WITH_MAGMA_MGM_S = 0xC106;
 	# draft-agl-tls-chacha20poly1305-02
 	const TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD = 0xCC13;
 	const TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256_OLD = 0xCC14;
@@ -679,11 +823,13 @@ export {
 	const TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAC;
 	const TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAD;
 	const TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256 = 0xCCAE;
-	# draft-ietf-tls-ecdhe-psk-aead-05
+	# draft-ietf-tls-ecdhe-psk-aead-05 - didn't make it into RFC8442 like this
+	const TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256_OLD = 0xD004;
+	# RFC8442
 	const TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256 = 0xD001;
 	const TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384 = 0xD002;
 	const TLS_ECDHE_PSK_WITH_AES_128_CCM_8_SHA256 = 0xD003;
-	const TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256 = 0xD004;
+	const TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256 = 0xD005;
 
 	const SSL_RSA_FIPS_WITH_DES_CBC_SHA = 0xFEFE;
 	const SSL_RSA_FIPS_WITH_3DES_EDE_CBC_SHA = 0xFEFF;
@@ -699,17 +845,16 @@ export {
 	## detecting unknown ciphers and for converting the cipher spec
 	## constants into a human readable format.
 	const cipher_desc: table[count] of string = {
-		[SSLv20_CK_RC4_128_EXPORT40_WITH_MD5] =
-			"SSLv20_CK_RC4_128_EXPORT40_WITH_MD5",
+		# SSLv2
 		[SSLv20_CK_RC4_128_WITH_MD5] = "SSLv20_CK_RC4_128_WITH_MD5",
+		[SSLv20_CK_RC4_128_EXPORT40_WITH_MD5] = "SSLv20_CK_RC4_128_EXPORT40_WITH_MD5",
 		[SSLv20_CK_RC2_128_CBC_WITH_MD5] = "SSLv20_CK_RC2_128_CBC_WITH_MD5",
-		[SSLv20_CK_RC2_128_CBC_EXPORT40_WITH_MD5] =
-			"SSLv20_CK_RC2_128_CBC_EXPORT40_WITH_MD5",
+		[SSLv20_CK_RC2_128_CBC_EXPORT40_WITH_MD5] = "SSLv20_CK_RC2_128_CBC_EXPORT40_WITH_MD5",
 		[SSLv20_CK_IDEA_128_CBC_WITH_MD5] = "SSLv20_CK_IDEA_128_CBC_WITH_MD5",
-		[SSLv20_CK_DES_192_EDE3_CBC_WITH_MD5] =
-			"SSLv20_CK_DES_192_EDE3_CBC_WITH_MD5",
 		[SSLv20_CK_DES_64_CBC_WITH_MD5] = "SSLv20_CK_DES_64_CBC_WITH_MD5",
+		[SSLv20_CK_DES_192_EDE3_CBC_WITH_MD5] = "SSLv20_CK_DES_192_EDE3_CBC_WITH_MD5",
 
+		# TLS
 		[TLS_NULL_WITH_NULL_NULL] = "TLS_NULL_WITH_NULL_NULL",
 		[TLS_RSA_WITH_NULL_MD5] = "TLS_RSA_WITH_NULL_MD5",
 		[TLS_RSA_WITH_NULL_SHA] = "TLS_RSA_WITH_NULL_SHA",
@@ -792,6 +937,7 @@ export {
 		[TLS_DHE_RSA_WITH_AES_256_CBC_SHA256] = "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
 		[TLS_DH_ANON_WITH_AES_128_CBC_SHA256] = "TLS_DH_ANON_WITH_AES_128_CBC_SHA256",
 		[TLS_DH_ANON_WITH_AES_256_CBC_SHA256] = "TLS_DH_ANON_WITH_AES_256_CBC_SHA256",
+		# draft-ietf-tls-openpgp-keys-06
 		[TLS_DHE_DSS_WITH_3DES_EDE_CBC_RMD] = "TLS_DHE_DSS_WITH_3DES_EDE_CBC_RMD",
 		[TLS_DHE_DSS_WITH_AES_128_CBC_RMD] = "TLS_DHE_DSS_WITH_AES_128_CBC_RMD",
 		[TLS_DHE_DSS_WITH_AES_256_CBC_RMD] = "TLS_DHE_DSS_WITH_AES_256_CBC_RMD",
@@ -801,6 +947,7 @@ export {
 		[TLS_RSA_WITH_3DES_EDE_CBC_RMD] = "TLS_RSA_WITH_3DES_EDE_CBC_RMD",
 		[TLS_RSA_WITH_AES_128_CBC_RMD] = "TLS_RSA_WITH_AES_128_CBC_RMD",
 		[TLS_RSA_WITH_AES_256_CBC_RMD] = "TLS_RSA_WITH_AES_256_CBC_RMD",
+		# draft-chudov-cryptopro-cptls-04
 		[TLS_GOSTR341094_WITH_28147_CNT_IMIT] = "TLS_GOSTR341094_WITH_28147_CNT_IMIT",
 		[TLS_GOSTR341001_WITH_28147_CNT_IMIT] = "TLS_GOSTR341001_WITH_28147_CNT_IMIT",
 		[TLS_GOSTR341094_WITH_NULL_GOSTR3411] = "TLS_GOSTR341094_WITH_NULL_GOSTR3411",
@@ -871,16 +1018,26 @@ export {
 		[TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256] = "TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256",
 		[TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256] = "TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256",
 		[TLS_DH_ANON_WITH_CAMELLIA_256_CBC_SHA256] = "TLS_DH_ANON_WITH_CAMELLIA_256_CBC_SHA256",
+		# RFC8998
+		[TLS_SM4_GCM_SM3] = "TLS_SM4_GCM_SM3",
+		[TLS_SM4_CCM_SM3] = "TLS_SM4_CCM_SM3",
+		# RFC8446
 		[TLS_AES_128_GCM_SHA256] = "TLS_AES_128_GCM_SHA256",
 		[TLS_AES_256_GCM_SHA384] = "TLS_AES_256_GCM_SHA384",
 		[TLS_CHACHA20_POLY1305_SHA256] = "TLS_CHACHA20_POLY1305_SHA256",
 		[TLS_AES_128_CCM_SHA256] = "TLS_AES_128_CCM_SHA256",
 		[TLS_AES_128_CCM_8_SHA256] = "TLS_AES_128_CCM_8_SHA256",
+		# draft-irtf-cfrg-aegis-aead-00
+		[TLS_AEGIS_256_SHA384] = "TLS_AEGIS_256_SHA384",
+		[TLS_AEGIS_128L_SHA256] = "TLS_AEGIS_128L_SHA256",
+		# Google...
 		[TLS_CECPQ1_RSA_WITH_CHACHA20_POLY1305_SHA256] = "TLS_CECPQ1_RSA_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_CECPQ1_ECDSA_WITH_CHACHA20_POLY1305_SHA256] = "TLS_CECPQ1_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_CECPQ1_RSA_WITH_AES_256_GCM_SHA384] = "TLS_CECPQ1_RSA_WITH_AES_256_GCM_SHA384",
 		[TLS_CECPQ1_ECDSA_WITH_AES_256_GCM_SHA384] = "TLS_CECPQ1_ECDSA_WITH_AES_256_GCM_SHA384",
+		# draft-bmoeller-tls-downgrade-scsv-01
 		[TLS_FALLBACK_SCSV] = "TLS_FALLBACK_SCSV",
+		# RFC 4492
 		[TLS_ECDH_ECDSA_WITH_NULL_SHA] = "TLS_ECDH_ECDSA_WITH_NULL_SHA",
 		[TLS_ECDH_ECDSA_WITH_RC4_128_SHA] = "TLS_ECDH_ECDSA_WITH_RC4_128_SHA",
 		[TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA] = "TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA",
@@ -940,6 +1097,7 @@ export {
 		[TLS_ECDHE_PSK_WITH_NULL_SHA] = "TLS_ECDHE_PSK_WITH_NULL_SHA",
 		[TLS_ECDHE_PSK_WITH_NULL_SHA256] = "TLS_ECDHE_PSK_WITH_NULL_SHA256",
 		[TLS_ECDHE_PSK_WITH_NULL_SHA384] = "TLS_ECDHE_PSK_WITH_NULL_SHA384",
+		# RFC 6209
 		[TLS_RSA_WITH_ARIA_128_CBC_SHA256] = "TLS_RSA_WITH_ARIA_128_CBC_SHA256",
 		[TLS_RSA_WITH_ARIA_256_CBC_SHA384] = "TLS_RSA_WITH_ARIA_256_CBC_SHA384",
 		[TLS_DH_DSS_WITH_ARIA_128_CBC_SHA256] = "TLS_DH_DSS_WITH_ARIA_128_CBC_SHA256",
@@ -994,6 +1152,7 @@ export {
 		[TLS_RSA_PSK_WITH_ARIA_256_GCM_SHA384] = "TLS_RSA_PSK_WITH_ARIA_256_GCM_SHA384",
 		[TLS_ECDHE_PSK_WITH_ARIA_128_CBC_SHA256] = "TLS_ECDHE_PSK_WITH_ARIA_128_CBC_SHA256",
 		[TLS_ECDHE_PSK_WITH_ARIA_256_CBC_SHA384] = "TLS_ECDHE_PSK_WITH_ARIA_256_CBC_SHA384",
+		# RFC 6367
 		[TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256] = "TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256",
 		[TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384] = "TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384",
 		[TLS_ECDH_ECDSA_WITH_CAMELLIA_128_CBC_SHA256] = "TLS_ECDH_ECDSA_WITH_CAMELLIA_128_CBC_SHA256",
@@ -1036,6 +1195,7 @@ export {
 		[TLS_RSA_PSK_WITH_CAMELLIA_256_CBC_SHA384] = "TLS_RSA_PSK_WITH_CAMELLIA_256_CBC_SHA384",
 		[TLS_ECDHE_PSK_WITH_CAMELLIA_128_CBC_SHA256] = "TLS_ECDHE_PSK_WITH_CAMELLIA_128_CBC_SHA256",
 		[TLS_ECDHE_PSK_WITH_CAMELLIA_256_CBC_SHA384] = "TLS_ECDHE_PSK_WITH_CAMELLIA_256_CBC_SHA384",
+		# RFC 6655
 		[TLS_RSA_WITH_AES_128_CCM] = "TLS_RSA_WITH_AES_128_CCM",
 		[TLS_RSA_WITH_AES_256_CCM] = "TLS_RSA_WITH_AES_256_CCM",
 		[TLS_DHE_RSA_WITH_AES_128_CCM] = "TLS_DHE_RSA_WITH_AES_128_CCM",
@@ -1056,9 +1216,28 @@ export {
 		[TLS_ECDHE_ECDSA_WITH_AES_256_CCM] = "TLS_ECDHE_ECDSA_WITH_AES_256_CCM",
 		[TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8] = "TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8",
 		[TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8] = "TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8",
+		# RFC8492
+		[TLS_ECCPWD_WITH_AES_128_GCM_SHA256] = "TLS_ECCPWD_WITH_AES_128_GCM_SHA256",
+		[TLS_ECCPWD_WITH_AES_256_GCM_SHA384] = "TLS_ECCPWD_WITH_AES_256_GCM_SHA384",
+		[TLS_ECCPWD_WITH_AES_128_CCM_SHA256] = "TLS_ECCPWD_WITH_AES_128_CCM_SHA256",
+		[TLS_ECCPWD_WITH_AES_256_CCM_SHA384] = "TLS_ECCPWD_WITH_AES_256_CCM_SHA384",
+		# RFC9150
+		[TLS_SHA256_SHA256] = "TLS_SHA256_SHA256",
+		[TLS_SHA384_SHA384] = "TLS_SHA384_SHA384",
+		# RFC9189
+		[TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC] = "TLS_GOSTR341112_256_WITH_KUZNYECHIK_CTR_OMAC",
+		[TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC] = "TLS_GOSTR341112_256_WITH_MAGMA_CTR_OMAC",
+		[TLS_GOSTR341112_256_WITH_28147_CNT_IMIT] = "TLS_GOSTR341112_256_WITH_28147_CNT_IMIT",
+		# RFC9367
+		[TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L] = "TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_L",
+		[TLS_GOSTR341112_256_WITH_MAGMA_MGM_L] = "TLS_GOSTR341112_256_WITH_MAGMA_MGM_L",
+		[TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S] = "TLS_GOSTR341112_256_WITH_KUZNYECHIK_MGM_S",
+		[TLS_GOSTR341112_256_WITH_MAGMA_MGM_S] = "TLS_GOSTR341112_256_WITH_MAGMA_MGM_S",
+		# draft-agl-tls-chacha20poly1305-02
 		[TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD] = "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD",
 		[TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256_OLD] = "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256_OLD",
 		[TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD] = "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256_OLD",
+		# RFC 7905
 		[TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256] = "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256] = "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256] = "TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
@@ -1066,10 +1245,14 @@ export {
 		[TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256] = "TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256] = "TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256",
 		[TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256] = "TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256",
+		# draft-ietf-tls-ecdhe-psk-aead-05 - didn't make it into RFC8442 like this
+		[TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256_OLD] = "TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256_OLD",
+		# RFC8442
 		[TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256] = "TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256",
 		[TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384] = "TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384",
 		[TLS_ECDHE_PSK_WITH_AES_128_CCM_8_SHA256] = "TLS_ECDHE_PSK_WITH_AES_128_CCM_8_SHA256",
 		[TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256] = "TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256",
+
 		[SSL_RSA_FIPS_WITH_DES_CBC_SHA] = "SSL_RSA_FIPS_WITH_DES_CBC_SHA",
 		[SSL_RSA_FIPS_WITH_3DES_EDE_CBC_SHA] = "SSL_RSA_FIPS_WITH_3DES_EDE_CBC_SHA",
 		[SSL_RSA_FIPS_WITH_DES_CBC_SHA_2] = "SSL_RSA_FIPS_WITH_DES_CBC_SHA_2",
@@ -1079,6 +1262,23 @@ export {
 		[SSL_RSA_WITH_DES_CBC_MD5] = "SSL_RSA_WITH_DES_CBC_MD5",
 		[SSL_RSA_WITH_3DES_EDE_CBC_MD5] = "SSL_RSA_WITH_3DES_EDE_CBC_MD5",
 		[TLS_EMPTY_RENEGOTIATION_INFO_SCSV] = "TLS_EMPTY_RENEGOTIATION_INFO_SCSV",
-	} &default=function(i: count):string { return fmt("unknown-%d", i); };
+		# GREASE - rfc8701
+		[2570] = "grease_0x0A0A",
+		[6682] = "grease_0x1A1A",
+		[10794] = "grease_0x2A2A",
+		[14906] = "grease_0x3A3A",
+		[19018] = "grease_0x4A4A",
+		[23130] = "grease_0x5A5A",
+		[27242] = "grease_0x6A6A",
+		[31354] = "grease_0x7A7A",
+		[35466] = "grease_0x8A8A",
+		[39578] = "grease_0x9A9A",
+		[43690] = "grease_0xAAAA",
+		[47802] = "grease_0xBABA",
+		[51914] = "grease_0xCACA",
+		[56026] = "grease_0xDADA",
+		[60138] = "grease_0xEAEA",
+		[64250] = "grease_0xFAFA"
+	} &redef &default=function(i: count):string { return fmt("unknown-%d", i); };
 
 }

@@ -1,3 +1,5 @@
+@load base/frameworks/notice/weird
+
 @load ./main
 
 module SMB2;
@@ -5,6 +7,10 @@ module SMB2;
 redef record SMB::CmdInfo += {
 	## Dialects offered by the client.
 	smb2_offered_dialects: index_vec &optional;
+
+	## Keep the create_options in the command for
+	## referencing later.
+	smb2_create_options: count &default=0;
 };
 
 event smb2_message(c: connection, hdr: SMB2::Header, is_orig: bool) &priority=5
@@ -14,9 +20,7 @@ event smb2_message(c: connection, hdr: SMB2::Header, is_orig: bool) &priority=5
 		local state: SMB::State;
 		state$fid_map = table();
 		state$tid_map = table();
-		state$uid_map = table();
 		state$pending_cmds = table();
-		state$pipe_map = table();
 		c$smb_state = state;
 		}
 
@@ -35,16 +39,37 @@ event smb2_message(c: connection, hdr: SMB2::Header, is_orig: bool) &priority=5
 
 	if ( tid > 0 )
 		{
-		if ( smb_state$current_cmd?$referenced_tree )
+		local cc = smb_state$current_cmd;
+
+		if ( cc?$referenced_tree && cc$command == "TREE_CONNECT" )
 			{
-			smb_state$tid_map[tid] = smb_state$current_cmd$referenced_tree;
+			# Always replace an existing tree_id within the
+			# tid_map with a new one from a TREE_CONNECT
+			# response.
+			if ( tid !in smb_state$tid_map )
+				SMB::insert_new_tree_info(c, tid);
+
+			smb_state$tid_map[tid] = cc$referenced_tree;
 			}
+
 		else if ( tid !in smb_state$tid_map )
 			{
-			local tmp_tree = SMB::TreeInfo($uid=c$uid, $id=c$id);
-			smb_state$tid_map[tid] = tmp_tree;
+			SMB::insert_new_tree_info(c, tid);
+
+			if ( cc?$referenced_tree )
+				{
+				# If the pending command already has a referenced
+				# tree, but wasn't in the tid_map, put it into the
+				# map here.
+				# This should only happen for a response to a
+				# TREE_CONNECT command, else something is weird.
+				local addl = fmt("command=%s mid=%s tid=%s", cc$command, mid, tid);
+				Reporter::conn_weird("SMB_new_tid_non_tree_connect_cmd", c, addl, "SMB2");
+				smb_state$tid_map[tid] = cc$referenced_tree;
+				}
 			}
-		smb_state$current_cmd$referenced_tree = smb_state$tid_map[tid];
+
+		cc$referenced_tree = smb_state$tid_map[tid];
 		}
 	else
 		{
@@ -127,6 +152,7 @@ event smb2_create_request(c: connection, hdr: SMB2::Header, request: SMB2::Creat
 		request$filename = "<share_root>";
 
 	c$smb_state$current_file$name = request$filename;
+	c$smb_state$current_cmd$smb2_create_options = request$create_options;
 
 	switch ( c$smb_state$current_tree$share_type )
 		{
@@ -147,23 +173,21 @@ event smb2_create_request(c: connection, hdr: SMB2::Header, request: SMB2::Creat
 
 event smb2_create_response(c: connection, hdr: SMB2::Header, response: SMB2::CreateResponse) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, response$file_id$persistent+response$file_id$volatile);
+	SMB::set_current_file(c, response$file_id$persistent+response$file_id$volatile);
 
-	c$smb_state$current_file$fid = response$file_id$persistent+response$file_id$volatile;
 	c$smb_state$current_file$size = response$size;
 
 	if ( c$smb_state$current_tree?$path )
 		c$smb_state$current_file$path = c$smb_state$current_tree$path;
 
 	# I'm seeing negative data from IPC tree transfers
-	if ( time_to_double(response$times$modified) > 0.0 )
+	if ( response$times$modified as double > 0.0 )
 		c$smb_state$current_file$times = response$times;
 
-	# We can identify the file by its file id now so let's stick it
-	# in the file map.
-	c$smb_state$fid_map[response$file_id$persistent+response$file_id$volatile] = c$smb_state$current_file;
-
-	c$smb_state$current_file = c$smb_state$fid_map[response$file_id$persistent+response$file_id$volatile];
+	# If the create request for this file had FILE_DELETE_ON_CLOSE set and
+	# the response status was success, raise a smb2_file_delete event.
+	if ( hdr$status == 0 && (c$smb_state$current_cmd$smb2_create_options & 0x00001000) != 0 )
+		event smb2_file_delete(c, hdr, response$file_id, T);
 	}
 
 event smb2_create_response(c: connection, hdr: SMB2::Header, response: SMB2::CreateResponse) &priority=-5
@@ -173,7 +197,7 @@ event smb2_create_response(c: connection, hdr: SMB2::Header, response: SMB2::Cre
 
 event smb2_read_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, offset: count, length: count) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	switch ( c$smb_state$current_tree$share_type )
 		{
@@ -199,7 +223,7 @@ event smb2_read_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, o
 
 event smb2_write_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, offset: count, length: count) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	switch ( c$smb_state$current_tree$share_type )
 		{
@@ -230,7 +254,7 @@ event smb2_file_sattr(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, tim
 
 event smb2_file_sattr(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, times: SMB::MACTimes, attrs: SMB2::FileAttrs) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	switch ( c$smb_state$current_tree$share_type )
 		{
@@ -245,7 +269,7 @@ event smb2_file_sattr(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, tim
 
 event smb2_file_rename(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, dst_filename: string) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	if ( c$smb_state$current_file?$name )
 		c$smb_state$current_file$prev_name = c$smb_state$current_file$name;
@@ -270,11 +294,11 @@ event smb2_file_rename(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, ds
 
 event smb2_file_delete(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, delete_pending: bool) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	if ( ! delete_pending )
 		{
-		# This is weird beause it would mean that someone didn't
+		# This is weird because it would mean that someone didn't
 		# set the delete bit in a delete request.
 		return;
 		}
@@ -297,7 +321,7 @@ event smb2_file_delete(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID, de
 
 event smb2_close_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID) &priority=5
 	{
-	SMB::set_current_file(c$smb_state, file_id$persistent+file_id$volatile);
+	SMB::set_current_file(c, file_id$persistent+file_id$volatile);
 
 	switch ( c$smb_state$current_tree$share_type )
 		{
@@ -334,4 +358,23 @@ event smb2_close_request(c: connection, hdr: SMB2::Header, file_id: SMB2::GUID) 
 		# A reporter message is not right...
 		#Reporter::warning("attempting to close an unknown file!");
 		}
+	}
+
+event smb2_discarded_messages_state(c: connection, state: string)
+	{
+	if ( ! c?$smb_state )
+		return;
+
+	local addl = fmt("state=%s fid_map=%s tid_map=%s pending_cmds=%s",
+	                 state, |c$smb_state$fid_map|, |c$smb_state$tid_map|,
+	                 |c$smb_state$pending_cmds|);
+	Reporter::conn_weird("SMB_discarded_messages_state", c, addl, "SMB2");
+
+	if ( ! SMB::enable_clear_script_state )
+		return;
+
+	# Wipe out script-level state for this connection.
+	c$smb_state$fid_map = table();
+	c$smb_state$pending_cmds = table();
+	c$smb_state$tid_map = table();
 	}

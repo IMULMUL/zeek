@@ -2,60 +2,55 @@
 
 #include "zeek/file_analysis/analyzer/hash/Hash.h"
 
-#include <string>
-
 #include "zeek/Event.h"
 #include "zeek/file_analysis/Manager.h"
 #include "zeek/util.h"
 
-namespace zeek::file_analysis::detail
-	{
+namespace zeek::file_analysis::detail {
 
-Hash::Hash(RecordValPtr args, file_analysis::File* file, HashVal* hv, const char* arg_kind)
-	: file_analysis::Analyzer(file_mgr->GetComponentTag(util::to_upper(arg_kind).c_str()),
-                              std::move(args), file),
-	  hash(hv), fed(false), kind(arg_kind)
-	{
-	hash->Init();
-	}
+StringValPtr MD5::kind_val = make_intrusive<StringVal>("md5");
+StringValPtr SHA1::kind_val = make_intrusive<StringVal>("sha1");
+StringValPtr SHA224::kind_val = make_intrusive<StringVal>("sha224");
+StringValPtr SHA256::kind_val = make_intrusive<StringVal>("sha256");
+StringValPtr SHA384::kind_val = make_intrusive<StringVal>("sha384");
+StringValPtr SHA512::kind_val = make_intrusive<StringVal>("sha512");
 
-Hash::~Hash()
-	{
-	Unref(hash);
-	}
+Hash::Hash(RecordValPtr args, file_analysis::File* file, HashVal* hv, StringValPtr arg_kind)
+    : file_analysis::Analyzer(file_mgr->GetComponentTag(util::to_upper(arg_kind->ToStdString())), std::move(args),
+                              file),
+      hash(hv),
+      kind(std::move(arg_kind)) {
+    hash->Init();
+}
 
-bool Hash::DeliverStream(const u_char* data, uint64_t len)
-	{
-	if ( ! hash->IsValid() )
-		return false;
+Hash::~Hash() { Unref(hash); }
 
-	if ( ! fed )
-		fed = len > 0;
+bool Hash::DeliverStream(const u_char* data, uint64_t len) {
+    if ( ! hash->IsValid() )
+        return false;
 
-	hash->Feed(data, len);
-	return true;
-	}
+    if ( ! fed )
+        fed = len > 0;
 
-bool Hash::EndOfFile()
-	{
-	Finalize();
-	return false;
-	}
+    hash->Feed(data, len);
+    return true;
+}
 
-bool Hash::Undelivered(uint64_t offset, uint64_t len)
-	{
-	return false;
-	}
+bool Hash::EndOfFile() {
+    Finalize();
+    return false;
+}
 
-void Hash::Finalize()
-	{
-	if ( ! hash->IsValid() || ! fed )
-		return;
+bool Hash::Undelivered(uint64_t offset, uint64_t len) { return false; }
 
-	if ( ! file_hash )
-		return;
+void Hash::Finalize() {
+    if ( ! hash->IsValid() || ! fed )
+        return;
 
-	event_mgr.Enqueue(file_hash, GetFile()->ToVal(), make_intrusive<StringVal>(kind), hash->Get());
-	}
+    if ( ! file_hash )
+        return;
 
-	} // namespace zeek::file_analysis::detail
+    event_mgr.Enqueue(file_hash, GetFile()->ToVal(), kind, hash->Get());
+}
+
+} // namespace zeek::file_analysis::detail

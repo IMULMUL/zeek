@@ -8,194 +8,173 @@
 #include "zeek/Reporter.h"
 #include "zeek/RunState.h"
 #include "zeek/analyzer/protocol/conn-size/events.bif.h"
-#include "zeek/analyzer/protocol/tcp/TCP.h"
 
-namespace zeek::analyzer::conn_size
-	{
+namespace zeek::analyzer::conn_size {
 
-ConnSize_Analyzer::ConnSize_Analyzer(Connection* c)
-	: Analyzer("CONNSIZE", c), orig_bytes(), resp_bytes(), orig_pkts(), resp_pkts(),
-	  orig_bytes_thresh(), resp_bytes_thresh(), orig_pkts_thresh(), resp_pkts_thresh(),
-	  duration_thresh()
-	{
-	start_time = c->StartTime();
-	}
+std::vector<uint64_t> ConnSize_Analyzer::generic_pkt_thresholds;
 
-ConnSize_Analyzer::~ConnSize_Analyzer() { }
+ConnSize_Analyzer::ConnSize_Analyzer(Connection* c) : Analyzer("CONNSIZE", c) { start_time = c->StartTime(); }
 
-void ConnSize_Analyzer::Init()
-	{
-	Analyzer::Init();
+void ConnSize_Analyzer::Init() {
+    Analyzer::Init();
 
-	orig_bytes = 0;
-	orig_pkts = 0;
-	resp_bytes = 0;
-	resp_pkts = 0;
+    orig_bytes = 0;
+    orig_pkts = 0;
+    resp_bytes = 0;
+    resp_pkts = 0;
 
-	orig_bytes_thresh = 0;
-	orig_pkts_thresh = 0;
-	resp_bytes_thresh = 0;
-	resp_pkts_thresh = 0;
-	}
+    orig_bytes_thresh = 0;
+    orig_pkts_thresh = 0;
+    resp_bytes_thresh = 0;
+    resp_pkts_thresh = 0;
 
-void ConnSize_Analyzer::Done()
-	{
-	Analyzer::Done();
-	}
+    generic_pkt_thresh = 0;
+    generic_pkt_thresh_next_idx = 0;
+    if ( conn_generic_packet_threshold_crossed )
+        NextGenericPacketThreshold();
+}
 
-void ConnSize_Analyzer::ThresholdEvent(EventHandlerPtr f, uint64_t threshold, bool is_orig)
-	{
-	if ( ! f )
-		return;
+void ConnSize_Analyzer::Done() { Analyzer::Done(); }
 
-	EnqueueConnEvent(f, ConnVal(), val_mgr->Count(threshold), val_mgr->Bool(is_orig));
-	}
+void ConnSize_Analyzer::ThresholdEvent(EventHandlerPtr f, uint64_t threshold, bool is_orig) {
+    if ( ! f )
+        return;
 
-void ConnSize_Analyzer::CheckThresholds(bool is_orig)
-	{
-	if ( is_orig )
-		{
-		if ( orig_bytes_thresh && orig_bytes >= orig_bytes_thresh )
-			{
-			ThresholdEvent(conn_bytes_threshold_crossed, orig_bytes_thresh, is_orig);
-			orig_bytes_thresh = 0;
-			}
+    EnqueueConnEvent(f, ConnVal(), val_mgr->Count(threshold), val_mgr->Bool(is_orig));
+}
 
-		if ( orig_pkts_thresh && orig_pkts >= orig_pkts_thresh )
-			{
-			ThresholdEvent(conn_packets_threshold_crossed, orig_pkts_thresh, is_orig);
-			orig_pkts_thresh = 0;
-			}
-		}
-	else
-		{
-		if ( resp_bytes_thresh && resp_bytes >= resp_bytes_thresh )
-			{
-			ThresholdEvent(conn_bytes_threshold_crossed, resp_bytes_thresh, is_orig);
-			resp_bytes_thresh = 0;
-			}
+void ConnSize_Analyzer::NextGenericPacketThreshold() {
+    if ( generic_pkt_thresh_next_idx >= generic_pkt_thresholds.size() ) {
+        generic_pkt_thresh = 0;
+        return;
+    }
 
-		if ( resp_pkts_thresh && resp_pkts >= resp_pkts_thresh )
-			{
-			ThresholdEvent(conn_packets_threshold_crossed, resp_pkts_thresh, is_orig);
-			resp_pkts_thresh = 0;
-			}
-		}
+    generic_pkt_thresh = generic_pkt_thresholds[generic_pkt_thresh_next_idx++];
+}
 
-	if ( duration_thresh != 0 )
-		{
-		if ( (run_state::network_time - start_time) > duration_thresh &&
-		     conn_duration_threshold_crossed )
-			{
-			EnqueueConnEvent(conn_duration_threshold_crossed, ConnVal(),
-			                 make_intrusive<IntervalVal>(duration_thresh), val_mgr->Bool(is_orig));
-			duration_thresh = 0;
-			}
-		}
-	}
+void ConnSize_Analyzer::CheckThresholds(bool is_orig) {
+    if ( generic_pkt_thresh && (orig_pkts + resp_pkts) == generic_pkt_thresh ) {
+        EnqueueConnEvent(conn_generic_packet_threshold_crossed, ConnVal(), val_mgr->Count(generic_pkt_thresh));
+        NextGenericPacketThreshold();
+    }
 
-void ConnSize_Analyzer::DeliverPacket(int len, const u_char* data, bool is_orig, uint64_t seq,
-                                      const IP_Hdr* ip, int caplen)
-	{
-	Analyzer::DeliverPacket(len, data, is_orig, seq, ip, caplen);
+    if ( is_orig ) {
+        if ( orig_bytes_thresh && orig_bytes >= orig_bytes_thresh ) {
+            ThresholdEvent(conn_bytes_threshold_crossed, orig_bytes_thresh, is_orig);
+            orig_bytes_thresh = 0;
+        }
 
-	if ( is_orig )
-		{
-		orig_bytes += ip->TotalLen();
-		orig_pkts++;
-		}
-	else
-		{
-		resp_bytes += ip->TotalLen();
-		resp_pkts++;
-		}
+        if ( orig_pkts_thresh && orig_pkts >= orig_pkts_thresh ) {
+            ThresholdEvent(conn_packets_threshold_crossed, orig_pkts_thresh, is_orig);
+            orig_pkts_thresh = 0;
+        }
+    }
+    else {
+        if ( resp_bytes_thresh && resp_bytes >= resp_bytes_thresh ) {
+            ThresholdEvent(conn_bytes_threshold_crossed, resp_bytes_thresh, is_orig);
+            resp_bytes_thresh = 0;
+        }
 
-	CheckThresholds(is_orig);
-	}
+        if ( resp_pkts_thresh && resp_pkts >= resp_pkts_thresh ) {
+            ThresholdEvent(conn_packets_threshold_crossed, resp_pkts_thresh, is_orig);
+            resp_pkts_thresh = 0;
+        }
+    }
 
-void ConnSize_Analyzer::SetByteAndPacketThreshold(uint64_t threshold, bool bytes, bool orig)
-	{
-	if ( bytes )
-		{
-		if ( orig )
-			orig_bytes_thresh = threshold;
-		else
-			resp_bytes_thresh = threshold;
-		}
-	else
-		{
-		if ( orig )
-			orig_pkts_thresh = threshold;
-		else
-			resp_pkts_thresh = threshold;
-		}
+    if ( duration_thresh != 0 ) {
+        if ( (run_state::network_time - start_time) > duration_thresh && conn_duration_threshold_crossed ) {
+            EnqueueConnEvent(conn_duration_threshold_crossed, ConnVal(), make_intrusive<IntervalVal>(duration_thresh),
+                             val_mgr->Bool(is_orig));
+            duration_thresh = 0;
+        }
+    }
+}
 
-	// Check if threshold is already crossed.
-	CheckThresholds(orig);
-	}
+void ConnSize_Analyzer::DeliverPacket(int len, const u_char* data, bool is_orig, uint64_t seq, const IP_Hdr* ip,
+                                      int caplen) {
+    Analyzer::DeliverPacket(len, data, is_orig, seq, ip, caplen);
 
-uint64_t ConnSize_Analyzer::GetByteAndPacketThreshold(bool bytes, bool orig)
-	{
-	if ( bytes )
-		{
-		if ( orig )
-			return orig_bytes_thresh;
-		else
-			return resp_bytes_thresh;
-		}
-	else
-		{
-		if ( orig )
-			return orig_pkts_thresh;
-		else
-			return resp_pkts_thresh;
-		}
-	}
+    if ( is_orig ) {
+        orig_bytes += ip->TotalLen();
+        orig_pkts++;
+    }
+    else {
+        resp_bytes += ip->TotalLen();
+        resp_pkts++;
+    }
 
-void ConnSize_Analyzer::SetDurationThreshold(double duration)
-	{
-	duration_thresh = duration;
+    CheckThresholds(is_orig);
+}
 
-	// for duration thresholds, it does not matter which direction we check.
-	CheckThresholds(true);
-	}
+void ConnSize_Analyzer::SetByteAndPacketThreshold(uint64_t threshold, bool bytes, bool orig) {
+    if ( bytes ) {
+        if ( orig )
+            orig_bytes_thresh = threshold;
+        else
+            resp_bytes_thresh = threshold;
+    }
+    else {
+        if ( orig )
+            orig_pkts_thresh = threshold;
+        else
+            resp_pkts_thresh = threshold;
+    }
 
-void ConnSize_Analyzer::UpdateConnVal(RecordVal* conn_val)
-	{
-	// RecordType *connection_type is decleared in NetVar.h
-	RecordVal* orig_endp = conn_val->GetFieldAs<RecordVal>("orig");
-	RecordVal* resp_endp = conn_val->GetFieldAs<RecordVal>("resp");
+    // Check if threshold is already crossed.
+    CheckThresholds(orig);
+}
 
-	// endpoint is the RecordType from NetVar.h
-	int pktidx = id::endpoint->FieldOffset("num_pkts");
-	int bytesidx = id::endpoint->FieldOffset("num_bytes_ip");
+uint64_t ConnSize_Analyzer::GetByteAndPacketThreshold(bool bytes, bool orig) {
+    if ( bytes ) {
+        if ( orig )
+            return orig_bytes_thresh;
+        else
+            return resp_bytes_thresh;
+    }
+    else {
+        if ( orig )
+            return orig_pkts_thresh;
+        else
+            return resp_pkts_thresh;
+    }
+}
 
-	if ( pktidx < 0 )
-		reporter->InternalError("'endpoint' record missing 'num_pkts' field");
+void ConnSize_Analyzer::SetDurationThreshold(double duration) {
+    duration_thresh = duration;
 
-	if ( bytesidx < 0 )
-		reporter->InternalError("'endpoint' record missing 'num_bytes_ip' field");
+    // for duration thresholds, it does not matter which direction we check.
+    CheckThresholds(true);
+}
 
-	orig_endp->Assign(pktidx, orig_pkts);
-	orig_endp->Assign(bytesidx, orig_bytes);
-	resp_endp->Assign(pktidx, resp_pkts);
-	resp_endp->Assign(bytesidx, resp_bytes);
+void ConnSize_Analyzer::UpdateConnVal(RecordVal* conn_val) {
+    static const auto& conn_type = zeek::id::find_type<zeek::RecordType>("connection");
+    static const int origidx = conn_type->FieldOffset("orig");
+    static const int respidx = conn_type->FieldOffset("resp");
+    static const auto& endpoint_type = zeek::id::find_type<zeek::RecordType>("endpoint");
+    static const int pktidx = endpoint_type->FieldOffset("num_pkts");
+    static const int bytesidx = endpoint_type->FieldOffset("num_bytes_ip");
 
-	Analyzer::UpdateConnVal(conn_val);
-	}
+    auto* orig_endp = conn_val->GetFieldAs<RecordVal>(origidx);
+    auto* resp_endp = conn_val->GetFieldAs<RecordVal>(respidx);
+    orig_endp->Assign(pktidx, orig_pkts);
+    orig_endp->Assign(bytesidx, orig_bytes);
+    resp_endp->Assign(pktidx, resp_pkts);
+    resp_endp->Assign(bytesidx, resp_bytes);
 
-void ConnSize_Analyzer::FlipRoles()
-	{
-	Analyzer::FlipRoles();
-	uint64_t tmp;
+    Analyzer::UpdateConnVal(conn_val);
+}
 
-	tmp = orig_bytes;
-	orig_bytes = resp_bytes;
-	resp_bytes = tmp;
+void ConnSize_Analyzer::FlipRoles() {
+    Analyzer::FlipRoles();
+    uint64_t tmp;
 
-	tmp = orig_pkts;
-	orig_pkts = resp_pkts;
-	resp_pkts = tmp;
-	}
+    tmp = orig_bytes;
+    orig_bytes = resp_bytes;
+    resp_bytes = tmp;
 
-	} // namespace zeek::analyzer::conn_size
+    tmp = orig_pkts;
+    orig_pkts = resp_pkts;
+    resp_pkts = tmp;
+}
+
+} // namespace zeek::analyzer::conn_size

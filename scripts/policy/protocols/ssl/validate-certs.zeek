@@ -61,39 +61,27 @@ export {
 
 global intermediate_cache: table[string] of vector of opaque of x509;
 
-@if ( Cluster::is_enabled() )
-event zeek_init()
-	{
-	Broker::auto_publish(Cluster::worker_topic, SSL::intermediate_add);
-	Broker::auto_publish(Cluster::manager_topic, SSL::new_intermediate);
-	}
-@endif
-
 function add_to_cache(key: string, value: vector of opaque of x509)
 	{
 	intermediate_cache[key] = value;
 @if ( Cluster::is_enabled() )
-	event SSL::new_intermediate(key, value);
+	Cluster::publish(Cluster::manager_topic, SSL::new_intermediate, key, value);
 @endif
 	}
 
-@if ( Cluster::is_enabled() && Cluster::local_node_type() != Cluster::MANAGER )
 event SSL::intermediate_add(key: string, value: vector of opaque of x509)
 	{
 	intermediate_cache[key] = value;
 	}
-@endif
 
-@if ( Cluster::is_enabled() && Cluster::local_node_type() == Cluster::MANAGER )
 event SSL::new_intermediate(key: string, value: vector of opaque of x509)
 	{
 	if ( key in intermediate_cache )
 		return;
 
 	intermediate_cache[key] = value;
-	event SSL::intermediate_add(key, value);
+	Cluster::publish(Cluster::worker_topic, SSL::intermediate_add, key, value);
 	}
-@endif
 
 function cache_validate(chain: vector of opaque of x509): X509::Result
 	{
@@ -189,9 +177,9 @@ hook ssl_finishing(c: connection) &priority=20
 	if ( result$result_string != "ok" )
 		{
 		local message = fmt("SSL certificate validation failed with (%s)", c$ssl$validation_status);
-		NOTICE([$note=Invalid_Server_Cert, $msg=message,
-		        $sub=c$ssl$cert_chain[0]$x509$certificate$subject, $conn=c,
-		        $fuid=c$ssl$cert_chain[0]$fuid,
-		        $identifier=cat(c$id$resp_h,c$id$resp_p,hash,c$ssl$validation_code)]);
+		NOTICE(Notice::Info($note=Invalid_Server_Cert, $msg=message,
+		                    $sub=c$ssl$cert_chain[0]$x509$certificate$subject, $conn=c,
+		                    $fuid=c$ssl$cert_chain[0]$fuid,
+		                    $identifier=cat(c$id$resp_h,c$id$resp_p,hash,c$ssl$validation_code)));
 		}
 	}

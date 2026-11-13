@@ -33,7 +33,7 @@ static zeek::ValPtr BuildIMSI(const InformationElement* ie)
 	return zeek::val_mgr->Count(ie->imsi()->value());
 	}
 
-static zeek::ValPtr BuildRAI(const InformationElement* ie)
+static zeek::RecordValPtr BuildRAI(const InformationElement* ie)
 	{
 	auto ev = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::gtp_rai);
 	ev->Assign(0, ie->rai()->mcc());
@@ -83,7 +83,7 @@ static zeek::ValPtr BuildTraceType(const InformationElement* ie)
 	return zeek::val_mgr->Count(ie->trace_type()->value());
 	}
 
-zeek::ValPtr BuildEndUserAddr(const InformationElement* ie)
+zeek::RecordValPtr BuildEndUserAddr(const InformationElement* ie)
 	{
 	auto ev = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::gtp_end_user_addr);
 	ev->Assign(0, ie->end_user_addr()->pdp_type_org());
@@ -97,15 +97,19 @@ zeek::ValPtr BuildEndUserAddr(const InformationElement* ie)
 
 		switch ( ie->end_user_addr()->pdp_type_num() ) {
 		case 0x21:
+			if ( len < 4 )
+				break;
 			ev->Assign(2, zeek::make_intrusive<zeek::AddrVal>(
-			  zeek::IPAddr(IPv4, (const uint32*) d, zeek::IPAddr::Network)));
+			  zeek::IPAddr(IPv4, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network)));
 			break;
 		case 0x57:
+			if ( len < 16 )
+				break;
 			ev->Assign(2, zeek::make_intrusive<zeek::AddrVal>(
-			  zeek::IPAddr(IPv6, (const uint32*) d, zeek::IPAddr::Network)));
+			  zeek::IPAddr(IPv6, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network)));
 			break;
 		default:
-			ev->Assign(3, new zeek::String((const u_char*) d, len, false));
+			ev->Assign(3, new zeek::String(static_cast<const u_char*>(d), len, false));
 			break;
 		}
 		}
@@ -115,19 +119,19 @@ zeek::ValPtr BuildEndUserAddr(const InformationElement* ie)
 
 zeek::ValPtr BuildAccessPointName(const InformationElement* ie)
 	{
-	zeek::String* bs = new zeek::String((const u_char*) ie->ap_name()->value().data(),
+	zeek::String* bs = new zeek::String(reinterpret_cast<const u_char*>(ie->ap_name()->value().data()),
 	                                          ie->ap_name()->value().length(), false);
 	return zeek::make_intrusive<zeek::StringVal>(bs);
 	}
 
 zeek::ValPtr BuildProtoConfigOptions(const InformationElement* ie)
 	{
-	const u_char* d = (const u_char*) ie->proto_config_opts()->value().data();
+	const u_char* d = reinterpret_cast<const u_char*>(ie->proto_config_opts()->value().data());
 	int len = ie->proto_config_opts()->value().length();
 	return zeek::make_intrusive<zeek::StringVal>(new zeek::String(d, len, false));
 	}
 
-zeek::ValPtr BuildGSN_Addr(const InformationElement* ie)
+zeek::RecordValPtr BuildGSN_Addr(const InformationElement* ie)
 	{
 	auto ev = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::gtp_gsn_addr);
 
@@ -136,28 +140,28 @@ zeek::ValPtr BuildGSN_Addr(const InformationElement* ie)
 
 	if ( len == 4 )
 		ev->Assign(0, zeek::make_intrusive<zeek::AddrVal>(
-		  zeek::IPAddr(IPv4, (const uint32*) d, zeek::IPAddr::Network)));
+		  zeek::IPAddr(IPv4, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network)));
 	else if ( len == 16 )
 		ev->Assign(0, zeek::make_intrusive<zeek::AddrVal>(
-		  zeek::IPAddr(IPv6, (const uint32*) d, zeek::IPAddr::Network)));
+		  zeek::IPAddr(IPv6, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network)));
 	else
-		ev->Assign(1, new zeek::String((const u_char*) d, len, false));
+		ev->Assign(1, new zeek::String(reinterpret_cast<const u_char*>(d), len, false));
 
 	return ev;
 	}
 
 zeek::ValPtr BuildMSISDN(const InformationElement* ie)
 	{
-	const u_char* d = (const u_char*) ie->msisdn()->value().data();
+	const u_char* d = reinterpret_cast<const u_char*>(ie->msisdn()->value().data());
 	int len = ie->msisdn()->value().length();
 	return zeek::make_intrusive<zeek::StringVal>(new zeek::String(d, len, false));
 	}
 
-zeek::ValPtr BuildQoS_Profile(const InformationElement* ie)
+zeek::RecordValPtr BuildQoS_Profile(const InformationElement* ie)
 	{
 	auto ev = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::gtp_qos_profile);
 
-	const u_char* d = (const u_char*) ie->qos_profile()->data().data();
+	const u_char* d = reinterpret_cast<const u_char*>(ie->qos_profile()->data().data());
 	int len = ie->qos_profile()->data().length();
 
 	ev->Assign(0, ie->qos_profile()->alloc_retention_priority());
@@ -170,24 +174,24 @@ zeek::ValPtr BuildTrafficFlowTemplate(const InformationElement* ie)
 	{
 	const uint8* d = ie->traffic_flow_template()->value().data();
 	int len = ie->traffic_flow_template()->value().length();
-	return zeek::make_intrusive<zeek::StringVal>(new zeek::String((const u_char*) d, len, false));
+	return zeek::make_intrusive<zeek::StringVal>(new zeek::String(reinterpret_cast<const u_char*>(d), len, false));
 	}
 
 zeek::ValPtr BuildTriggerID(const InformationElement* ie)
 	{
 	const uint8* d = ie->trigger_id()->value().data();
 	int len = ie->trigger_id()->value().length();
-	return zeek::make_intrusive<zeek::StringVal>(new zeek::String((const u_char*) d, len, false));
+	return zeek::make_intrusive<zeek::StringVal>(new zeek::String(reinterpret_cast<const u_char*>(d), len, false));
 	}
 
 zeek::ValPtr BuildOMC_ID(const InformationElement* ie)
 	{
 	const uint8* d = ie->omc_id()->value().data();
 	int len = ie->omc_id()->value().length();
-	return zeek::make_intrusive<zeek::StringVal>(new zeek::String((const u_char*) d, len, false));
+	return zeek::make_intrusive<zeek::StringVal>(new zeek::String(reinterpret_cast<const u_char*>(d), len, false));
 	}
 
-zeek::ValPtr BuildPrivateExt(const InformationElement* ie)
+zeek::RecordValPtr BuildPrivateExt(const InformationElement* ie)
 	{
 	auto ev = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::gtp_private_extension);
 
@@ -195,7 +199,7 @@ zeek::ValPtr BuildPrivateExt(const InformationElement* ie)
 	int len = ie->private_ext()->value().length();
 
 	ev->Assign(0, ie->private_ext()->id());
-	ev->Assign(1, new zeek::String((const u_char*) d, len, false));
+	ev->Assign(1, new zeek::String(reinterpret_cast<const u_char*>(d), len, false));
 
 	return ev;
 	}
@@ -220,9 +224,9 @@ zeek::ValPtr BuildChargingGatewayAddr(const InformationElement* ie)
 	const uint8* d = ie->charging_gateway_addr()->value().data();
 	int len = ie->charging_gateway_addr()->value().length();
 	if ( len == 4 )
-		return zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv4, (const uint32*) d, zeek::IPAddr::Network));
+		return zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv4, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network));
 	else if ( len == 16 )
-		return zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv6, (const uint32*) d, zeek::IPAddr::Network));
+		return zeek::make_intrusive<zeek::AddrVal>(zeek::IPAddr(IPv6, reinterpret_cast<const uint32*>(d), zeek::IPAddr::Network));
 	else
 		return nullptr;
 	}
@@ -244,10 +248,8 @@ void CreatePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 	bool second_nsapi = false;
 	bool second_gsn_addr = false;
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_IMSI:
 			rv->Assign(0, BuildIMSI(ie));
@@ -322,7 +324,7 @@ void CreatePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 			rv->Assign(21, BuildPrivateExt(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -342,10 +344,8 @@ void CreatePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 
 	bool second_gsn_addr = false;
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_CAUSE:
 			rv->Assign(0, BuildCause(ie));
@@ -390,7 +390,7 @@ void CreatePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 			rv->Assign(12, BuildPrivateExt(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -410,10 +410,8 @@ void UpdatePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 
 	bool second_gsn_addr = false;
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_IMSI:
 			rv->Assign(0, BuildIMSI(ie));
@@ -467,7 +465,7 @@ void UpdatePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 			rv->Assign(15, BuildEndUserAddr(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -487,10 +485,8 @@ void UpdatePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 
 	bool second_gsn_addr = false;
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_CAUSE:
 			rv->Assign(0, BuildCause(ie));
@@ -526,7 +522,7 @@ void UpdatePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 			rv->Assign(9, BuildPrivateExt(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -537,17 +533,15 @@ void UpdatePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 void DeletePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const GTPv1_Header* pdu)
 	{
 	if ( ! ::gtpv1_delete_pdp_ctx_request )
-	    return;
+		return;
 
 	auto rv = zeek::make_intrusive<zeek::RecordVal>(
 	  zeek::BifType::Record::gtp_delete_pdp_ctx_request_elements);
 
 	const vector<InformationElement *> * v = pdu->delete_pdp_ctx_request();
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_TEARDOWN_IND:
 			rv->Assign(0, BuildTeardownInd(ie));
@@ -559,7 +553,7 @@ void DeletePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 			rv->Assign(2, BuildPrivateExt(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -570,17 +564,15 @@ void DeletePDP_Request(const ZeekPacketAnalyzer& a, zeek::Connection* c, const G
 void DeletePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const GTPv1_Header* pdu)
 	{
 	if ( ! ::gtpv1_delete_pdp_ctx_response )
-	    return;
+		return;
 
 	auto rv = zeek::make_intrusive<zeek::RecordVal>(
 	  zeek::BifType::Record::gtp_delete_pdp_ctx_response_elements);
 
 	const vector<InformationElement *> * v = pdu->delete_pdp_ctx_response();
 
-	for ( size_t i = 0; i < v->size(); ++i )
+	for ( InformationElement* ie : *v )
 		{
-		const InformationElement* ie = (*v)[i];
-
 		switch ( ie->type() ) {
 		case GTPv1::TYPE_CAUSE:
 			rv->Assign(0, BuildCause(ie));
@@ -589,7 +581,7 @@ void DeletePDP_Response(const ZeekPacketAnalyzer& a, zeek::Connection* c, const 
 			rv->Assign(1, BuildPrivateExt(ie));
 			break;
 		default:
-			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", (*v)[i]->type()));
+			a->Weird("gtp_invalid_info_element", nullptr, zeek::util::fmt("%d", ie->type()));
 			break;
 		}
 		}
@@ -665,7 +657,7 @@ flow GTPv1_Flow(is_orig: bool)
 			return false;
 			}
 
-		if ( e && e->LastType() == BifEnum::Tunnel::GTPv1 )
+		if ( e && e->LastType() == zeek::BifEnum::Tunnel::GTPv1 )
 			{
 			// GTP is never tunneled in GTP so, this must be a regular packet
 			violate("GTP-in-GTP", pdu);
@@ -722,13 +714,13 @@ flow GTPv1_Flow(is_orig: bool)
 		ZeekPacket* p = connection()->get_raw_packet();
 		zeek::Connection* c = static_cast<zeek::Connection*>(p->session);
 
-		if ( ${pdu.packet}.length() < (int)sizeof(struct ip) )
+		if ( ${pdu.packet}.length() < static_cast<int>(sizeof(struct ip)) )
 			{
 			violate("Truncated GTPv1", pdu);
 			return false;
 			}
 
-		const struct ip* ip = (const struct ip*) ${pdu.packet}.data();
+		const struct ip* ip = reinterpret_cast<const struct ip*>(${pdu.packet}.data());
 
 		if ( ip->ip_v != 4 && ip->ip_v != 6 )
 			{

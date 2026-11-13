@@ -2,18 +2,67 @@
 # See https://pre-commit.com/hooks.html for more hooks
 #
 repos:
+- repo: local
+  hooks:
+  - id: license
+    name: Check for license headers
+    entry: ./ci/license-header.py
+    language: python
+    files: '\.(h|c|cpp|cc|spicy|evt)$'
+    types: [file]
+    exclude: '^(testing/btest/(Baseline|plugins|spicy|scripts)/.*|testing/builtin-plugins/.*|src/3rdparty/.*|doc/.*)$'
+
+  - id: btest-command-commented
+    name: Check that all BTest command lines are commented out
+    entry: '^\s*@TEST-'
+    language: pygrep
+    files: '^testing/btest/.*$'
+
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v6.0.0
+  hooks:
+  - id: check-added-large-files
+    args: ['--maxkb=200']
+  - id: end-of-file-fixer
+    exclude: '^doc|^testing/btest/Baseline*'
+
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: 'v13.0.0'
+  rev: v20.1.8
   hooks:
   - id: clang-format
+    types_or:
+      - "c"
+      - "c++"
+      - "json"
+    exclude: '^src/3rdparty/.*|^testing/btest/Baseline'
 
 - repo: https://github.com/maxwinterstein/shfmt-py
-  rev: 3.3.1.8
+  rev: v3.12.0.1
   hooks:
     - id: shfmt
       args: ["-w", "-i", "4", "-ci"]
+      exclude: '^testing/btest/tools/systemd-generator/.*\.sh'
 
-- repo: https://github.com/pre-commit/mirrors-yapf
-  rev: v0.31.0
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.12.8
   hooks:
-  - id: yapf
+    - id: ruff-check
+      args: ["--fix"]
+    - id: ruff-format
+
+- repo: https://github.com/aumuell/cmake-format-precommit
+  rev: b0e8f6d30cdc0da7e82dc8f0b560ccdc8c5852aa  # v0.6.13.py3-15
+  hooks:
+  - id: cmake-format
+
+- repo: https://github.com/crate-ci/typos
+  rev: v1.35.3
+  hooks:
+    - id: typos
+      exclude: '^(.typos.toml|src/SmithWaterman.cc|testing/.*|auxil/.*|scripts/base/frameworks/files/magic/.*|scripts/base/protocols/ssl/mozilla-ca-list.zeek|src/3rdparty/.*)$'
+
+- repo: https://github.com/bbannier/spicy-format
+  rev: v0.27.1
+  hooks:
+    - id: spicy-format
+      exclude: '^testing/.*|doc/advanced/devel/spicy/autogen/.*.spicy|src/analyzer/protocol/dhcpv6/dhcpv6.spicy'

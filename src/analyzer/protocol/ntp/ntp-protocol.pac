@@ -1,5 +1,14 @@
 # This is the common part in the header format.
 # See RFC 5905 for details
+enum NTP_Mode {
+	SYMMETRIC_ACTIVE = 1,
+	SYMMETRIC_PASSIVE = 2,
+	CLIENT = 3,
+	SERVER = 4,
+	BROADCAST_SERVER = 5,
+	BROADCAST_CLIENT = 6,
+};
+
 type NTP_PDU(is_orig: bool) = record {
 	# The first byte of the NTP header contains the leap indicator,
 	# the version and the mode
@@ -26,7 +35,7 @@ type NTP_PDU(is_orig: bool) = record {
 } &byteorder=bigendian &exportsourcedata;
 
 # This is the most common type of message, corresponding to modes 1-5
-# This kind of msg are used for normal operation of syncronization
+# This kind of msg are used for normal operation of synchronization
 # See RFC 5905 for details
 type NTP_std_msg = record {
 	stratum:   uint8;
@@ -105,13 +114,19 @@ type NTP_CONTROL_MAC = record {
 type Extension_Field = record {
 	first_byte_ext: uint8;
 	field_type:     uint8;
-	len:            uint16;
+	len:            uint16 &enforce(len >= 16);
 	association_id: uint16;
 	timestamp:      uint32;
 	filestamp:      uint32;
-	value_len:      uint32;
+	# XXX: the len >= 18 is inconsistent with with len >= 16 above,
+	#      but needed to avoid len - 18 underflowing.
+	#
+	#      Extension parsing needs re-work: https://github.com/zeek/zeek/issues/5551
+	#      (Improve NTPv4 extension parsing and introduce dedicated extension event)
+	value_len:      uint32 &enforce(len >= 18 && value_len <= (len - 18u));
 	value:          bytestring &length=value_len;
-	sig_len:        uint32;
+	# XXX: the len >= 22 is inconsistent with with len >= 16 above.
+	sig_len:        uint32 &enforce(len >= 22 && value_len <= (len - 22u));
 	signature:      bytestring &length=sig_len;
 	pad:            padding to (len - offsetof(first_byte_ext));
 } &let {

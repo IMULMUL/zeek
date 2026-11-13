@@ -9,23 +9,26 @@
 
 # The base/ scripts are all loaded by default and not included here.
 
+@load frameworks/analyzer/debug-logging.zeek
+@load frameworks/analyzer/detect-protocols.zeek
+@load frameworks/analyzer/packet-segment-logging.zeek
 # @load frameworks/control/controllee.zeek
 # @load frameworks/control/controller.zeek
-@load frameworks/cluster/agent/__load__.zeek
-@load frameworks/cluster/agent/api.zeek
-@load frameworks/cluster/agent/boot.zeek
-@load frameworks/cluster/agent/config.zeek
-# @load frameworks/cluster/agent/main.zeek
-@load frameworks/cluster/controller/__load__.zeek
-@load frameworks/cluster/controller/api.zeek
-@load frameworks/cluster/controller/boot.zeek
-@load frameworks/cluster/controller/config.zeek
-@load frameworks/cluster/controller/log.zeek
-# @load frameworks/cluster/controller/main.zeek
-@load frameworks/cluster/controller/request.zeek
-@load frameworks/cluster/controller/types.zeek
-@load frameworks/dpd/detect-protocols.zeek
-@load frameworks/dpd/packet-segment-logging.zeek
+@load frameworks/cluster/backend/broker/__load__.zeek
+@load frameworks/cluster/backend/broker/backpressure.zeek
+@load frameworks/cluster/backend/broker/main.zeek
+@load frameworks/cluster/backend/broker/telemetry.zeek
+@ifdef ( Cluster::CLUSTER_BACKEND_ZEROMQ )
+@load frameworks/cluster/backend/zeromq/__load__.zeek
+@load frameworks/cluster/backend/zeromq/options.zeek
+@load frameworks/cluster/backend/zeromq/main.zeek
+@endif
+@load frameworks/cluster/experimental.zeek
+# Loaded via the above through test-all-policy-cluster.test
+# when running as a manager, creates cluster.log entries
+# even in non-cluster mode if loaded like the below.
+# @load frameworks/cluster/nodes-experimental/manager.zeek
+# @load frameworks/cluster/websocket/server.zeek
 @load frameworks/intel/do_notice.zeek
 @load frameworks/intel/do_expire.zeek
 @load frameworks/intel/whitelist.zeek
@@ -37,6 +40,7 @@
 @load frameworks/intel/seen/file-names.zeek
 @load frameworks/intel/seen/http-headers.zeek
 @load frameworks/intel/seen/http-url.zeek
+@load frameworks/intel/seen/manage-event-groups.zeek
 @load frameworks/intel/seen/pubkey-hashes.zeek
 @load frameworks/intel/seen/smb-filenames.zeek
 @load frameworks/intel/seen/smtp-url-extraction.zeek
@@ -51,48 +55,60 @@
 @load frameworks/files/hash-all-files.zeek
 @load frameworks/notice/__load__.zeek
 @load frameworks/notice/actions/drop.zeek
+@load frameworks/notice/community-id.zeek
 @load frameworks/notice/extend-email/hostnames.zeek
-@load files/unified2/__load__.zeek
-@load files/unified2/main.zeek
 @load files/x509/disable-certificate-events-known-certs.zeek
-@load files/x509/log-ocsp.zeek
+@load files/zip/register.zeek
 @load frameworks/packet-filter/shunt.zeek
+# @load frameworks/signatures/iso-9660.zeek
 @load frameworks/software/version-changes.zeek
 @load frameworks/software/vulnerable.zeek
+# @load frameworks/spicy/record-spicy-batch.zeek
+# @load frameworks/spicy/resource-usage.zeek
 @load frameworks/software/windows-version-detection.zeek
-@load integration/barnyard2/__load__.zeek
-@load integration/barnyard2/main.zeek
-@load integration/barnyard2/types.zeek
+@load frameworks/storage/backend/redis/__load__.zeek
+@load frameworks/storage/backend/redis/main.zeek
+@load frameworks/storage/backend/sqlite/__load__.zeek
+@load frameworks/storage/backend/sqlite/main.zeek
+@load frameworks/telemetry/log.zeek
 @load integration/collective-intel/__load__.zeek
 @load integration/collective-intel/main.zeek
 @load misc/capture-loss.zeek
 @load misc/detect-traceroute/__load__.zeek
 @load misc/detect-traceroute/main.zeek
 # @load misc/dump-events.zeek
-@load misc/load-balancing.zeek
 @load misc/loaded-scripts.zeek
 @load misc/profiling.zeek
-@load misc/scan.zeek
 @load misc/stats.zeek
 @load misc/weird-stats.zeek
 @load misc/trim-trace-file.zeek
 @load misc/unknown-protocols.zeek
+# @load misc/systemd-generator.zeek
+@load misc/zeromq-multi-host-auto-setup.zeek
+@load protocols/conn/community-id-logging.zeek
+@load protocols/conn/disable-unknown-ip-proto-support.zeek
+@load protocols/conn/failed-service-logging.zeek
+@load protocols/conn/ip-proto-name-logging.zeek
 @load protocols/conn/known-hosts.zeek
 @load protocols/conn/known-services.zeek
 @load protocols/conn/mac-logging.zeek
+@load protocols/conn/multicast-participants.zeek
 @load protocols/conn/vlan-logging.zeek
+@load protocols/conn/pppoe-session-id-logging.zeek
 @load protocols/conn/weirds.zeek
+#@load frameworks/conn_key/vlan_fivetuple.zeek
 #@load protocols/conn/speculative-service.zeek
 @load protocols/dhcp/msg-orig.zeek
 @load protocols/dhcp/software.zeek
 @load protocols/dhcp/sub-opts.zeek
 @load protocols/dns/auth-addl.zeek
 @load protocols/dns/detect-external-names.zeek
+#@load protocols/dns/disable-opcode-log-fields.zeek
 @load protocols/dns/log-original-query-case.zeek
 @load protocols/ftp/detect-bruteforcing.zeek
 @load protocols/ftp/detect.zeek
 @load protocols/ftp/software.zeek
-@load protocols/http/detect-sqli.zeek
+@load protocols/http/detect-sql-injection.zeek
 @load protocols/http/detect-webapps.zeek
 @load protocols/http/header-names.zeek
 @load protocols/http/software-browser-plugins.zeek
@@ -100,10 +116,9 @@
 @load protocols/http/var-extraction-cookies.zeek
 @load protocols/http/var-extraction-uri.zeek
 @load protocols/krb/ticket-logging.zeek
+@load protocols/krb/md5-ticket-logging.zeek
 @load protocols/modbus/known-masters-slaves.zeek
 @load protocols/modbus/track-memmap.zeek
-@load protocols/mqtt/__load__.zeek
-@load protocols/mqtt/main.zeek
 @load protocols/mysql/software.zeek
 @load protocols/rdp/indicate_ssl.zeek
 @load protocols/smb/log-cmds.zeek
@@ -114,23 +129,27 @@
 @load protocols/ssh/detect-bruteforcing.zeek
 @load protocols/ssh/geo-data.zeek
 @load protocols/ssh/interesting-hostnames.zeek
+@load protocols/ssh/md5-host-key-logging.zeek
 @load protocols/ssh/software.zeek
+@load protocols/ssl/certificate-request-info.zeek
+@load protocols/ssl/decryption.zeek
 @load protocols/ssl/expiring-certs.zeek
-# @load protocols/ssl/extract-certs-pem.zeek
 @load protocols/ssl/heartbleed.zeek
 @load protocols/ssl/known-certs.zeek
 @load protocols/ssl/log-certs-base64.zeek
 @load protocols/ssl/ssl-log-ext.zeek
 @load protocols/ssl/log-hostcerts-only.zeek
-#@load protocols/ssl/notary.zeek
 @load protocols/ssl/validate-certs.zeek
 @load protocols/ssl/validate-ocsp.zeek
 @load protocols/ssl/validate-sct.zeek
 @load protocols/ssl/weak-keys.zeek
-@load tuning/__load__.zeek
-@load tuning/defaults/__load__.zeek
-@load tuning/defaults/extracted_file_limits.zeek
-@load tuning/defaults/packet-fragments.zeek
-@load tuning/defaults/warnings.zeek
 @load tuning/json-logs.zeek
 @load tuning/track-all-assets.zeek
+
+
+# Disable cluster backend by switching to the none backend after loading
+# all the scripts in order to skip initialization of cluster backend that
+# ended up being selected. Cluster backends may keep the IO loop alive once
+# registered due to registering IO sources and loading test-all-policy should
+# not result in such behavior.
+redef Cluster::backend = Cluster::CLUSTER_BACKEND_NONE;

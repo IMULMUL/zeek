@@ -1,8 +1,5 @@
+zeek_add_plugin(
+    PacketAnalyzer IP
+    SOURCES IP.cc IPBasedAnalyzer.cc SessionAdapter.cc Plugin.cc)
 
-include(ZeekPlugin)
-
-include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-
-zeek_plugin_begin(PacketAnalyzer IP)
-zeek_plugin_cc(IP.cc IPBasedAnalyzer.cc SessionAdapter.cc Plugin.cc)
-zeek_plugin_end()
+add_subdirectory(conn_key)

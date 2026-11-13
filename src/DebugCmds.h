@@ -1,9 +1,12 @@
-// Support routines to help deal with Bro debugging commands and
+// See the file "COPYING" in the main distribution directory for copyright.
+
+// Support routines to help deal with Zeek debugging commands and
 // implementation of most commands.
 
 #pragma once
 
-#include <stdlib.h>
+#include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <string>
 #include <vector>
@@ -11,46 +14,44 @@
 // This file is generated during the build.
 #include "DebugCmdConstants.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-class DebugCmdInfo
-	{
+class DebugCmdInfo {
 public:
-	DebugCmdInfo(const DebugCmdInfo& info);
+    DebugCmdInfo(const DebugCmdInfo& info);
 
-	DebugCmdInfo(DebugCmd cmd, const char* const* names, int num_names, bool resume_execution,
-	             const char* const helpstring, bool repeatable);
+    DebugCmdInfo(DebugCmd cmd, const char* const* names, int num_names, bool resume_execution,
+                 const char* const helpstring, bool repeatable);
 
-	DebugCmdInfo() : helpstring(nullptr) { }
+    DebugCmdInfo() : helpstring(nullptr) {}
 
-	int Cmd() const { return cmd; }
-	int NumNames() const { return num_names; }
-	const std::vector<const char*>& Names() const { return names; }
-	bool ResumeExecution() const { return resume_execution; }
-	const char* Helpstring() const { return helpstring; }
-	bool Repeatable() const { return repeatable; }
+    int Cmd() const { return cmd; }
+    int NumNames() const { return num_names; }
+    const std::vector<const char*>& Names() const { return names; }
+    bool ResumeExecution() const { return resume_execution; }
+    const char* Helpstring() const { return helpstring; }
+    bool Repeatable() const { return repeatable; }
 
 protected:
-	DebugCmd cmd;
+    DebugCmd cmd;
 
-	int32_t num_names;
-	std::vector<const char*> names;
-	const char* const helpstring;
+    int32_t num_names;
+    std::vector<const char*> names;
+    const char* const helpstring;
 
-	// Whether executing this should restart execution of the script.
-	bool resume_execution;
+    // Whether executing this should restart execution of the script.
+    bool resume_execution;
 
-	// Does entering a blank line repeat this command?
-	bool repeatable;
-	};
+    // Does entering a blank line repeat this command?
+    bool repeatable;
+};
 
 using DebugCmdInfoQueue = std::deque<DebugCmdInfo*>;
 extern DebugCmdInfoQueue g_DebugCmdInfos;
 
 void init_global_dbg_constants();
 
-#define num_debug_cmds() (static_cast<int>(g_DebugCmdInfos.size()))
+extern int num_debug_cmds();
 
 // Looks up the info record and returns it; if cmd is not found returns 0.
 const DebugCmdInfo* get_debug_cmd_info(DebugCmd cmd);
@@ -67,6 +68,7 @@ int find_all_matching_cmds(const std::string& prefix, const char* array_of_match
 // These functions return <= 0 if failure, > 0 for success.
 // More particular return values are command-specific: see comments w/function.
 
+// NOLINTNEXTLINE(modernize-use-using)
 typedef int DbgCmdFn(DebugCmd cmd, const std::vector<std::string>& args);
 
 DbgCmdFn dbg_cmd_backtrace;
@@ -80,4 +82,4 @@ DbgCmdFn dbg_cmd_info;
 DbgCmdFn dbg_cmd_list;
 DbgCmdFn dbg_cmd_trace;
 
-	} // namespace zeek::detail
+} // namespace zeek::detail

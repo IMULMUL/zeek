@@ -3,7 +3,7 @@ set1, {
 1
 }
 set2, {
-[2, two] 
+[2, two]
 }
 setvector, {
 [one, two]
@@ -12,8 +12,8 @@ setrecord, {
 [a=97, b=B]
 }
 setfunction, {
-foo
-ZAM-code foo 
+foo: function() : void
+ZAM-code foo
 }
 setpattern, {
 /^?(foobar)$?/
@@ -31,8 +31,8 @@ tablerecord, {
 [[a=97, b=B]] = trec
 }
 tablefunction, {
-[foo
-ZAM-code foo ] = tfunc
+[foo: function() : void
+ZAM-code foo] = tfunc
 }
 tablepattern, {
 [/^?(foobar)$?/] = tpat

@@ -81,10 +81,6 @@ export {
 		## reference to the actual connection will be deleted after
 		## applying the notice policy.
 		conn:           connection     &optional;
-		## A shorthand way of giving the uid and id to a notice.  The
-		## reference to the actual connection will be deleted after
-		## applying the notice policy.
-		iconn:          icmp_conn      &optional;
 
 		## A file record if the notice is related to a file.  The
 		## reference to the actual fa_file record will be deleted after
@@ -108,7 +104,7 @@ export {
 		file_desc:      string          &log &optional;
 
 		## The transport protocol. Filled automatically when either
-		## *conn*, *iconn* or *p* is specified.
+		## *conn* or *p* is specified.
 		proto:          transport_proto &log &optional;
 
 		## The :zeek:type:`Notice::Type` of the notice.
@@ -207,7 +203,7 @@ export {
 	## on rotation with :zeek:enum:`Notice::ACTION_ALARM`.
 	##
 	## Note that this is overridden by the ZeekControl MailTo option or by
-	## the `email_dest` field in the :zeek:see:`Notice::Info` record.
+	## the ``email_dest`` field in the :zeek:see:`Notice::Info` record.
 	const mail_dest           = ""                   &redef;
 
 	## Address that emails will be from.
@@ -234,6 +230,19 @@ export {
 		cid:  conn_id &optional; ##< Connection tuple over which file is sent.
 		cuid: string  &optional; ##< Connection UID over which file is sent.
 	};
+
+	## How long to batch suppression information locally before sending
+	## it out within the cluster.
+	##
+	## Setting this prevents workers from sending suppression information for every
+	## individual notice. At high notice and suppression rates, sending individual events
+	## causes a flood of remote events in the cluster. Batching these up for
+	## a short period of time is more efficient. Setting this to `0msec` disables the batching.
+	option suppression_batch_period = 10msec;
+
+	## Maximum number of suppression infos to batch up within :zeek:see:`Notice::suppression_batch_period`.
+	## Setting this to ``0`` disables suppression batching.
+	option suppression_batch_max_size = 50;
 
 	## Creates a record containing a subset of a full :zeek:see:`fa_file` record.
 	##
@@ -276,7 +285,7 @@ export {
 
 	## This event is generated when a notice begins to be suppressed.
 	##
-	## ts: time indicating then when the notice to be suppressed occured.
+	## ts: time indicating then when the notice to be suppressed occurred.
 	##
 	## suppress_for: length of time that this notice should be suppressed.
 	##
@@ -284,18 +293,6 @@ export {
 	##
 	## identifier: The identifier string of the notice that should be suppressed.
 	global begin_suppression: event(ts: time, suppress_for: interval, note: Type, identifier: string);
-
-	## This is an internal event that is used to broadcast the begin_suppression
-	## event over a cluster.
-	##
-	## ts: time indicating then when the notice to be suppressed occured.
-	##
-	## suppress_for: length of time that this notice should be suppressed.
-	##
-	## note: The :zeek:type:`Notice::Type` of the notice.
-	##
-	## identifier: The identifier string of the notice that should be suppressed.
-	global manager_begin_suppression: event(ts: time, suppress_for: interval, note: Type, identifier: string);
 
 	## A function to determine if an event is supposed to be suppressed.
 	##
@@ -372,6 +369,59 @@ function per_notice_suppression_interval(t: table[Notice::Type, string] of time,
 	return suppress_time;
 	}
 
+# Code for batching suppressions on worker nodes before sending them
+# out for distribution.
+type SuppressionInfo: record {
+	ts: time;
+	suppress_for: interval;
+	note: Type;
+	identifier: string;
+};
+
+# A collection of SuppressionInfo records and when they were published.
+type SuppressionBatch: record {
+	ts: time &default=double_to_time(0.0);
+	timer_pending: bool &default=F;
+	infos: vector of SuppressionInfo;
+};
+
+# Internal event for suppression batches.
+global Notice::suppression_batch_internal: event(batch: SuppressionBatch);
+
+# State about suppressions.
+global gbatch = SuppressionBatch();
+
+function suppression_info(n: Notice::Info): SuppressionInfo &is_used
+	{
+	return SuppressionInfo(
+		$ts=n$ts,
+		$suppress_for=n$suppress_for,
+		$note=n$note,
+		$identifier=n$identifier
+	);
+	}
+
+function gbatch_send_and_reset() &is_used
+	{
+	gbatch$ts = network_time();
+	Cluster::publish(
+		Cluster::manager_topic,
+		Notice::suppression_batch_internal,
+		gbatch
+	);
+	gbatch$infos = vector();
+	}
+
+event suppression_batch_timer() &is_used
+	{
+	gbatch$timer_pending = F;
+
+	if ( |gbatch$infos| == 0 )  # might have been flushed due to batch_max_size
+		return;
+
+	gbatch_send_and_reset();
+	}
+
 # This is the internally maintained notice suppression table.  It's
 # indexed on the Notice::Type and the $identifier field from the notice.
 global suppressing: table[Type, string] of time = {}
@@ -397,16 +447,16 @@ function log_mailing_postprocessor(info: Log::RotationInfo): bool
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Notice::LOG, [$columns=Info, $ev=log_notice, $path="notice", $policy=log_policy]);
+	Log::create_stream(Notice::LOG, Log::Stream($columns=Info, $ev=log_notice, $path="notice", $policy=log_policy));
 
-	Log::create_stream(Notice::ALARM_LOG, [$columns=Notice::Info, $path="notice_alarm", $policy=log_policy_alarm]);
+	Log::create_stream(Notice::ALARM_LOG, Log::Stream($columns=Notice::Info, $path="notice_alarm", $policy=log_policy_alarm));
 	# If Zeek is configured for mailing notices, set up mailing for alarms.
 	# Make sure that this alarm log is also output as text so that it can
 	# be packaged up and emailed later.
 	if ( ! reading_traces() && mail_dest != "" )
 		Log::add_filter(Notice::ALARM_LOG,
-		    [$name="alarm-mail", $path="alarm-mail", $writer=Log::WRITER_ASCII,
-		     $interv=24hrs, $postprocessor=log_mailing_postprocessor]);
+		                Log::Filter($name="alarm-mail", $path="alarm-mail", $writer=Log::WRITER_ASCII,
+		                            $interv=24hrs, $postprocessor=log_mailing_postprocessor));
 	}
 
 function email_headers(subject_desc: string, dest: string): string
@@ -538,39 +588,69 @@ hook Notice::notice(n: Notice::Info) &priority=-5
 	     n$suppress_for != 0secs )
 		{
 		event Notice::begin_suppression(n$ts, n$suppress_for, n$note, n$identifier);
+		suppressing[n$note, n$identifier] = n$ts + n$suppress_for;
 @if ( Cluster::is_enabled() && Cluster::local_node_type() != Cluster::MANAGER )
-		event Notice::manager_begin_suppression(n$ts, n$suppress_for, n$note, n$identifier);
+		# Batch suppressions so we do not call Cluster::publish() for
+		# each and every individual suppression. These can be bursty,
+		# particular when workers restart and they build up state.
+		local now = network_time();
+
+		if ( suppression_batch_period == 0sec || suppression_batch_max_size == 0 ||
+			(|gbatch$infos| == 0 && (now - gbatch$ts) >= suppression_batch_period) )
+			{
+			# No batching requested, or nothing yet pending and the
+			# last publish has been more than batch_period ago. Just
+			# publish this one directly. The motivation is to not
+			# start a batch for low-frequency suppressions.
+			gbatch$infos += suppression_info(n);
+			gbatch_send_and_reset();
+			return;
+			}
+
+		gbatch$infos += suppression_info(n);
+
+		if ( |gbatch$infos| == 1 && suppression_batch_max_size > 1 && ! gbatch$timer_pending )
+			{
+			# First entry in a batch starts the timer. If there isn't
+			# one pending yet and we actually intend to batch more than
+			# a single suppression.
+			schedule suppression_batch_period { suppression_batch_timer() };
+			gbatch$timer_pending = T;
+			}
+
+		# Reached the maximum batch size? Send out the batch. This
+		# keeps the timer running which will flush anything that
+		# is added afterward when it expires.
+		if ( |gbatch$infos| >= suppression_batch_max_size )
+			gbatch_send_and_reset();
 @endif
 		}
 	}
 
-event Notice::begin_suppression(ts: time, suppress_for: interval, note: Type,
-								identifier: string)
+# The manager re-publishes the suppression batch to workers and proxies.
+#
+# Once we have established global pubsub, we shouldn't send through the
+# manager anymore.
+@if ( Cluster::is_enabled() && Cluster::local_node_type() == Cluster::MANAGER )
+event Notice::suppression_batch_internal(batch: SuppressionBatch)
+	{
+	Cluster::publish(Cluster::worker_topic, Notice::suppression_batch_internal, batch);
+	Cluster::publish(Cluster::proxy_topic, Notice::suppression_batch_internal, batch);
+	}
+@endif
+
+# All nodes re-raise Notice::begin_suppression() locally from an incoming batch.
+event Notice::suppression_batch_internal(batch: SuppressionBatch)
+	{
+	for ( _, si in batch$infos )
+		event Notice::begin_suppression(si$ts, si$suppress_for, si$note, si$identifier);
+	}
+
+event Notice::begin_suppression(ts: time, suppress_for: interval, note: Type, identifier: string)
 	{
 	local suppress_until = ts + suppress_for;
 	suppressing[note, identifier] = suppress_until;
 	}
-
-@if ( Cluster::is_enabled() && Cluster::local_node_type() == Cluster::MANAGER )
-event zeek_init()
-	{
-	Broker::auto_publish(Cluster::worker_topic, Notice::begin_suppression);
-	Broker::auto_publish(Cluster::proxy_topic, Notice::begin_suppression);
-	}
-
-event Notice::manager_begin_suppression(ts: time, suppress_for: interval, note: Type,
-								identifier: string)
-	{
-	event Notice::begin_suppression(ts, suppress_for, note, identifier);
-	}
-@endif
-
-@if ( Cluster::is_enabled() && Cluster::local_node_type() != Cluster::MANAGER )
-event zeek_init()
-	{
-	Broker::auto_publish(Cluster::manager_topic, Notice::manager_begin_suppression);
-	}
-@endif
 
 function is_being_suppressed(n: Notice::Info): bool
 	{
@@ -583,15 +663,6 @@ function is_being_suppressed(n: Notice::Info): bool
 		return F;
 	}
 
-# Executes a script with all of the notice fields put into the
-# new process' environment as "ZEEK_ARG_<field>" variables.
-function execute_with_notice(cmd: string, n: Notice::Info)
-	{
-	# TODO: fix system calls
-	#local tgs = tags(n);
-	#system_env(cmd, tags);
-	}
-
 function create_file_info(f: fa_file): Notice::FileInfo
 	{
 	local fi: Notice::FileInfo = Notice::FileInfo($fuid = f$id,
@@ -600,11 +671,13 @@ function create_file_info(f: fa_file): Notice::FileInfo
 	if ( f?$info && f$info?$mime_type )
 		fi$mime = f$info$mime_type;
 
-	if ( f?$conns && |f$conns| == 1 )
+	# If a file is transferred over multiple connections, just pick one.
+	if ( f?$conns && |f$conns| > 0 )
 		for ( id, c in f$conns )
 			{
 			fi$cid = id;
 			fi$cuid = c$uid;
+			break;
 			}
 
 	return fi;
@@ -624,8 +697,12 @@ function populate_file_info2(fi: Notice::FileInfo, n: Notice::Info)
 		n$file_mime_type = fi$mime;
 
 	n$file_desc = fi$desc;
-	n$id = fi$cid;
-	n$uid = fi$cuid;
+
+	if ( fi?$cid )
+		n$id = fi$cid;
+
+	if ( fi?$cuid )
+		n$uid = fi$cuid;
 	}
 
 # This is run synchronously as a function before all of the other
@@ -669,15 +746,6 @@ function apply_policy(n: Notice::Info)
 
 	if ( n?$p )
 		n$proto = get_port_transport_proto(n$p);
-
-	if ( n?$iconn )
-		{
-		n$proto = icmp;
-		if ( ! n?$src )
-			n$src = n$iconn$orig_h;
-		if ( ! n?$dst )
-			n$dst = n$iconn$resp_h;
-		}
 
 	if ( ! n?$email_body_sections )
 		n$email_body_sections = vector();

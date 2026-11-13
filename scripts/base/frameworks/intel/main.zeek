@@ -115,9 +115,9 @@ export {
 		## Where the data was seen.
 		seen:     Seen           &log;
 		## Which indicator types matched.
-		matched:  TypeSet        &log;
+		matched:  TypeSet        &log &ordered;
 		## Sources which supplied data that resulted in this match.
-		sources:  set[string]    &log &default=string_set();
+		sources:  set[string]    &log &ordered;
 	};
 
 	## Function to insert intelligence data. If the indicator is already
@@ -141,6 +141,8 @@ export {
 	##
 	## This is the primary mechanism where a user may take actions based on
 	## data provided by the intelligence framework.
+	##
+	## .. zeek::see:: Intel::seen_policy
 	global match: event(s: Seen, items: set[Item]);
 
 	## This hook can be used to influence the logging of intelligence hits
@@ -156,6 +158,27 @@ export {
 	## In case the hook execution is terminated using break, the match will
 	## not be logged.
 	global extend_match: hook(info: Info, s: Seen, items: set[Item]);
+
+	## Hook to modify and intercept :zeek:see:`Intel::seen` behavior.
+	##
+	## This hook is invoked after the Intel datastore was searched for
+	## a given :zeek:see:`Intel::Seen` instance. If a matching entry was
+	## found, the *found* argument is set to ``T``, else ``F``.
+	##
+	## Breaking from this hook suppresses :zeek:see:`Intel::match`
+	## event generation and any subsequent logging.
+	##
+	## Note that this hook only runs on the Zeek node where :zeek:see:`Intel::seen`
+	## is invoked. In a cluster configuration that is usually on the worker nodes.
+	## This is in contrast to :zeek:see:`Intel::match` that usually runs
+	## centrally on the the manager node instead.
+	##
+	## s: The :zeek:see:`Intel::Seen` instance passed to the :zeek:see:`Intel::seen` function.
+	##
+	## found: ``T`` if Intel datastore contained *s*, else ``F``.
+	##
+	## .. zeek::see:: Intel::match
+	global seen_policy: hook(s: Seen, found: bool);
 
 	## The expiration timeout for intelligence items. Once an item expires, the
 	## :zeek:id:`Intel::item_expired` hook is called. Reinsertion of an item
@@ -183,6 +206,35 @@ export {
 	##
 	## item: The intel item that should be inserted.
 	global filter_item: hook(item: Intel::Item);
+
+	## This hook is invoked when a new indicator has been inserted into
+	## the min data store for the first time.
+	##
+	## Calls to :zeek:see:`Intel::seen` with a matching indicator value
+	## and type will result in matches.
+	##
+	## Subsequent inserts of the same indicator type and value do not
+	## invoke this hook. Breaking from this hook has no effect.
+	##
+	## indicator: The indicator value.
+	##
+	## indicator_type: The indicator type.
+	##
+	## .. zeek::see:: Intel::indicator_removed
+	global indicator_inserted: hook(indicator: string, indiator_type: Type);
+
+	## This hook is invoked when an indicator has been removed from
+	## the min data store.
+	##
+	## After this hooks runs, :zeek:see:`Intel::seen` for the indicator
+	## will not return any matches. Breaking from this hook has no effect.
+	##
+	## indicator: The indicator value.
+	##
+	## indicator_type: The indicator type.
+	##
+	## .. zeek::see:: Intel::indicator_inserted
+	global indicator_removed: hook(indicator: string, indiator_type: Type);
 
 	global log_intel: event(rec: Info);
 }
@@ -228,7 +280,7 @@ global min_data_store: MinDataStore &redef;
 
 event zeek_init() &priority=5
 	{
-	Log::create_stream(LOG, [$columns=Info, $ev=log_intel, $path="intel", $policy=log_policy]);
+	Log::create_stream(LOG, Log::Stream($columns=Info, $ev=log_intel, $path="intel", $policy=log_policy));
 	}
 
 # Function that abstracts expiration of different types.
@@ -237,7 +289,7 @@ function expire_item(indicator: string, indicator_type: Type, metas: set[MetaDat
 	if ( hook item_expired(indicator, indicator_type, metas) )
 		return item_expiration;
 	else
-		remove([$indicator=indicator, $indicator_type=indicator_type, $meta=[$source=""]], T);
+		remove(Item($indicator=indicator, $indicator_type=indicator_type, $meta=MetaData($source="")), T);
 	return 0 sec;
 	}
 
@@ -246,7 +298,7 @@ function expire_host_data(data: table[addr] of MetaDataTable, idx: addr): interv
 	{
 	local meta_tbl: MetaDataTable = data[idx];
 	local metas: set[MetaData];
-	for ( src, md in meta_tbl )
+	for ( _, md in meta_tbl )
 		add metas[md];
 
 	return expire_item(cat(idx), ADDR, metas);
@@ -256,7 +308,7 @@ function expire_subnet_data(data: table[subnet] of MetaDataTable, idx: subnet): 
 	{
 	local meta_tbl: MetaDataTable = data[idx];
 	local metas: set[MetaData];
-	for ( src, md in meta_tbl )
+	for ( _, md in meta_tbl )
 		add metas[md];
 
 	return expire_item(cat(idx), SUBNET, metas);
@@ -270,7 +322,7 @@ function expire_string_data(data: table[string, Type] of MetaDataTable, idx: any
 
 	local meta_tbl: MetaDataTable = data[indicator, indicator_type];
 	local metas: set[MetaData];
-	for ( src, md in meta_tbl )
+	for ( _, md in meta_tbl )
 		add metas[md];
 
 	return expire_item(indicator, indicator_type, metas);
@@ -283,10 +335,10 @@ function find(s: Seen): bool
 		{
 		if ( have_full_data )
 			return ((s$host in data_store$host_data) ||
-			        (|matching_subnets(addr_to_subnet(s$host), data_store$subnet_data)| > 0));
+			        (|matching_subnets(s$host as subnet, data_store$subnet_data)| > 0));
 		else
 			return ((s$host in min_data_store$host_data) ||
-			        (|matching_subnets(addr_to_subnet(s$host), min_data_store$subnet_data)| > 0));
+			        (|matching_subnets(s$host as subnet, min_data_store$subnet_data)| > 0));
 		}
 	else
 		{
@@ -297,11 +349,31 @@ function find(s: Seen): bool
 		}
 	}
 
+# Compare subnets by prefix length (most specific first), then by address.
+function subnet_cmp(a: subnet, b: subnet): int
+	{
+	local wa = subnet_width(a);
+	local wb = subnet_width(b);
+	if ( wa > wb ) return -1;
+	if ( wa < wb ) return 1;
+	return strcmp(cat(a), cat(b));
+	}
+
+# Return the source keys of a MetaDataTable in sorted order.
+function sorted_sources(mt: MetaDataTable): vector of string
+	{
+	local keys: vector of string;
+	for ( src, _ in mt )
+		keys += src;
+	sort(keys, strcmp);
+	return keys;
+	}
+
 # Function to retrieve intelligence items while abstracting from different
 # data stores for different indicator types.
 function get_items(s: Seen): set[Item]
 	{
-	local return_data: set[Item];
+	local return_data: set[Item] &ordered;
 	local mt: MetaDataTable;
 
 	if ( ! have_full_data )
@@ -317,20 +389,21 @@ function get_items(s: Seen): set[Item]
 		if ( s$host in data_store$host_data )
 			{
 			mt = data_store$host_data[s$host];
-			for ( m, md in mt )
-				{
-				add return_data[Item($indicator=cat(s$host), $indicator_type=ADDR, $meta=md)];
-				}
+			for ( _, src in sorted_sources(mt) )
+				add return_data[Item($indicator=cat(s$host), $indicator_type=ADDR, $meta=mt[src])];
 			}
 		# See if the host is part of a known subnet, which has meta values
 		local nets: table[subnet] of MetaDataTable;
-		nets = filter_subnet_table(addr_to_subnet(s$host), data_store$subnet_data);
-		for ( n, mt in nets )
+		nets = filter_subnet_table(s$host as subnet, data_store$subnet_data);
+		local sorted_nets: vector of subnet;
+		for ( n, _ in nets )
+			sorted_nets += n;
+		sort(sorted_nets, subnet_cmp);
+		for ( _, n in sorted_nets )
 			{
-				for ( m, md in mt )
-					{
-					add return_data[Item($indicator=cat(n), $indicator_type=SUBNET, $meta=md)];
-					}
+			mt = nets[n];
+			for ( _, src in sorted_sources(mt) )
+				add return_data[Item($indicator=cat(n), $indicator_type=SUBNET, $meta=mt[src])];
 			}
 		}
 	else
@@ -340,10 +413,8 @@ function get_items(s: Seen): set[Item]
 		if ( [lower_indicator, s$indicator_type] in data_store$string_data )
 			{
 			mt = data_store$string_data[lower_indicator, s$indicator_type];
-			for ( m, md in mt )
-				{
-				add return_data[Item($indicator=s$indicator, $indicator_type=s$indicator_type, $meta=md)];
-				}
+			for ( _, src in sorted_sources(mt) )
+				add return_data[Item($indicator=s$indicator, $indicator_type=s$indicator_type, $meta=mt[src])];
 			}
 		}
 
@@ -352,34 +423,37 @@ function get_items(s: Seen): set[Item]
 
 function Intel::seen(s: Seen)
 	{
-	if ( find(s) )
+	local found = find(s);
+
+	if ( ! hook Intel::seen_policy(s, found) )
+		return;
+
+	if ( ! found )
+		return;
+
+	if ( s?$host )
 		{
-		if ( s?$host )
-			{
-			s$indicator = cat(s$host);
-			s$indicator_type = Intel::ADDR;
-			}
+		s$indicator = cat(s$host);
+		s$indicator_type = Intel::ADDR;
+		}
 
-		if ( ! s?$node )
-			{
-			s$node = peer_description;
-			}
+	if ( ! s?$node )
+		s$node = peer_description;
 
-		if ( have_full_data )
-			{
-			local items = get_items(s);
-			event Intel::match(s, items);
-			}
-		else
-			{
-			event Intel::match_remote(s);
-			}
+	if ( have_full_data )
+		{
+		local items = get_items(s);
+		event Intel::match(s, items);
+		}
+	else
+		{
+		event Intel::match_remote(s);
 		}
 	}
 
 event Intel::match(s: Seen, items: set[Item]) &priority=5
 	{
-	local info = Info($ts=network_time(), $seen=s, $matched=TypeSet());
+	local info = Info($ts=network_time(), $seen=s);
 
 	if ( hook extend_match(info, s, items) )
 		Log::write(Intel::LOG, info);
@@ -419,7 +493,7 @@ function insert_meta_data(item: Item): bool
 	switch ( item$indicator_type )
 		{
 		case ADDR:
-			local host = to_addr(item$indicator);
+			local host = item$indicator as addr;
 
 			if ( host !in data_store$host_data )
 				data_store$host_data[host] = table();
@@ -481,18 +555,44 @@ function _insert(item: Item, first_dispatch: bool &default = T)
 	# All intelligence is case insensitive at the moment.
 	local lower_indicator = to_lower(item$indicator);
 
+	# Track if the indicator was inserted into the min_data_store.
+	# It's tempting to just use is_new above, but it seems that only works
+	# correctly on a worker if the manager never spuriously sends a
+	# Intel::insert_item(), so better to determine this locally based
+	# on the actual contents of the min_data_store.
+	local inserted = F;
+	local inserted_value = "";
+
 	# Insert indicator into MinDataStore (might exist already).
 	switch ( item$indicator_type )
 		{
 		case ADDR:
-			local host = to_addr(item$indicator);
+			local host = item$indicator as addr;
+			if ( host !in min_data_store$host_data )
+				{
+				inserted = T;
+				inserted_value = cat(host);
+				}
+
 			add min_data_store$host_data[host];
 			break;
 		case SUBNET:
 			local net = to_subnet(item$indicator);
+			if ( net !in min_data_store$subnet_data )
+				{
+				inserted = T;
+				inserted_value = cat(net);
+				}
+
 			add min_data_store$subnet_data[net];
 			break;
 		default:
+			if ( [lower_indicator, item$indicator_type] !in min_data_store$string_data )
+				{
+				inserted = T;
+				inserted_value = lower_indicator;
+				}
+
 			add min_data_store$string_data[lower_indicator, item$indicator_type];
 			break;
 		}
@@ -507,6 +607,9 @@ function _insert(item: Item, first_dispatch: bool &default = T)
 		# Announce a (possibly) new item if this is the first dispatch and
 		# we know it is new or have to assume that on a worker.
 		event Intel::new_item(item);
+
+	if ( inserted )
+		hook Intel::indicator_inserted(inserted_value, item$indicator_type);
 	}
 
 function insert(item: Item)
@@ -524,8 +627,8 @@ function item_exists(item: Item): bool
 	switch ( item$indicator_type )
 		{
 		case ADDR:
-			return have_full_data ? to_addr(item$indicator) in data_store$host_data :
-			                        to_addr(item$indicator) in min_data_store$host_data;
+			return have_full_data ? item$indicator as addr in data_store$host_data :
+			                        item$indicator as addr in min_data_store$host_data;
 		case SUBNET:
 			return have_full_data ? to_subnet(item$indicator) in data_store$subnet_data :
 			                        to_subnet(item$indicator) in min_data_store$subnet_data;
@@ -549,7 +652,7 @@ function remove_meta_data(item: Item): bool
 	switch ( item$indicator_type )
 		{
 		case ADDR:
-			local host = to_addr(item$indicator);
+			local host = item$indicator as addr;
 			delete data_store$host_data[host][item$meta$source];
 			return (|data_store$host_data[host]| == 0);
 		case SUBNET:
@@ -587,7 +690,7 @@ function remove(item: Item, purge_indicator: bool)
 		switch ( item$indicator_type )
 			{
 			case ADDR:
-				local host = to_addr(item$indicator);
+				local host = item$indicator as addr;
 				delete data_store$host_data[host];
 				break;
 			case SUBNET:
@@ -606,18 +709,43 @@ function remove(item: Item, purge_indicator: bool)
 # Handling of indicator removal in minimal data stores.
 event remove_indicator(item: Item)
 	{
+	local removed = F;
+	local removed_value = "";
+
 	switch ( item$indicator_type )
 		{
 		case ADDR:
-			local host = to_addr(item$indicator);
+			local host = item$indicator as addr;
+			if ( host in min_data_store$host_data )
+				{
+				removed = T;
+				removed_value = cat(host);
+				}
+
 			delete min_data_store$host_data[host];
 			break;
 		case SUBNET:
 			local net = to_subnet(item$indicator);
+			if ( net in min_data_store$subnet_data )
+				{
+				removed = T;
+				removed_value = cat(net);
+				}
+
 			delete min_data_store$subnet_data[net];
 			break;
 		default:
-			delete min_data_store$string_data[to_lower(item$indicator), item$indicator_type];
+			local indicator_value = to_lower(item$indicator);
+			if ( [indicator_value, item$indicator_type] in min_data_store$string_data )
+				{
+				removed = T;
+				removed_value = indicator_value;
+				}
+
+			delete min_data_store$string_data[indicator_value, item$indicator_type];
 			break;
 		}
+
+	if ( removed )
+		hook Intel::indicator_removed(removed_value, item$indicator_type);
 	}

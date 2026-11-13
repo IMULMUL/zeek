@@ -1,10 +1,13 @@
-# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.trace discarder-ip.zeek >output
-# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.trace discarder-tcp.zeek >>output
-# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.trace discarder-udp.zeek >>output
+# Can't use this test for -O gen-C++ because of multiple differing Zeek runs.
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
+
+# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.pcap discarder-ip.zeek >output
+# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.pcap discarder-tcp.zeek >>output
+# @TEST-EXEC: zeek -b -C -r $TRACES/wikipedia.pcap discarder-udp.zeek >>output
 # @TEST-EXEC: zeek -b -C -r $TRACES/icmp/icmp-destunreach-udp.pcap discarder-icmp.zeek >>output
 # @TEST-EXEC: btest-diff output
 
-@TEST-START-FILE discarder-ip.zeek
+# @TEST-START-FILE discarder-ip.zeek
 
 event zeek_init()
 	{
@@ -24,9 +27,9 @@ event new_packet(c: connection, p: pkt_hdr)
     print c$id;
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE discarder-tcp.zeek
+# @TEST-START-FILE discarder-tcp.zeek
 
 event zeek_init()
     {
@@ -46,9 +49,9 @@ event new_packet(c: connection, p: pkt_hdr)
         print c$id;
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE discarder-udp.zeek
+# @TEST-START-FILE discarder-udp.zeek
 
 event zeek_init()
     {
@@ -68,9 +71,9 @@ event new_packet(c: connection, p: pkt_hdr)
         print c$id;
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE
 
-@TEST-START-FILE discarder-icmp.zeek
+# @TEST-START-FILE discarder-icmp.zeek
 
 event zeek_init()
     {
@@ -89,4 +92,4 @@ event new_packet(c: connection, p: pkt_hdr)
         print c$id;
     }
 
-@TEST-END-FILE
+# @TEST-END-FILE

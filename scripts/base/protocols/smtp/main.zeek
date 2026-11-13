@@ -2,11 +2,15 @@
 @load base/utils/directions-and-hosts
 @load base/utils/email
 @load base/protocols/conn/removal-hooks
+@load base/frameworks/notice/weird
 
 module SMTP;
 
 export {
 	redef enum Log::ID += { LOG };
+
+	## Well-known ports for SMTP.
+	const ports = { 25/tcp, 587/tcp } &redef;
 
 	global log_policy: Log::PolicyHook;
 
@@ -20,11 +24,11 @@ export {
 		## A count to represent the depth of this message transaction in
 		## a single connection where multiple messages were transferred.
 		trans_depth:       count           &log;
-		## Contents of the Helo header.
+		## Contents of the HELO/EHLO SMTP command.
 		helo:              string          &log &optional;
-		## Email addresses found in the From header.
+		## Email address found in the MAIL FROM SMTP command.
 		mailfrom:          string          &log &optional;
-		## Email addresses found in the Rcpt header.
+		## Email addresses found in the RCPT TO SMTP commands.
 		rcptto:            set[string]     &log &optional;
 		## Contents of the Date header.
 		date:              string          &log &optional;
@@ -34,9 +38,9 @@ export {
 		to:                set[string]     &log &optional;
 		## Contents of the CC header.
 		cc:                set[string]     &log &optional;
-		## Contents of the ReplyTo header.
+		## Contents of the Reply-To header.
 		reply_to:          string          &log &optional;
-		## Contents of the MsgID header.
+		## Contents of the Message-ID header.
 		msg_id:            string          &log &optional;
 		## Contents of the In-Reply-To header.
 		in_reply_to:       string          &log &optional;
@@ -75,6 +79,12 @@ export {
 		messages_transferred:     count     &default=0;
 
 		pending_messages:         set[Info] &optional;
+
+		trans_mail_from_seen:     bool      &default=F;
+		trans_rcpt_to_seen:       bool      &default=F;
+		invalid_transactions:     count     &default=0;
+		bdat_last_observed:       bool      &default=F;
+		analyzer_id:              count     &optional;
 	};
 
 	## Direction to capture the full "Received from" path.
@@ -91,6 +101,39 @@ export {
 
 	## SMTP finalization hook.  Remaining SMTP info may get logged when it's called.
 	global finalize_smtp: Conn::RemovalHook;
+
+	## When seeing a RCPT TO or DATA command, validate that it has been
+	## preceded by a MAIL FROM or RCPT TO command, respectively, else
+	## log a weird and possibly disable the SMTP analyzer upon too
+	## many invalid transactions.
+	option mail_transaction_validation = T;
+
+	## Disable the SMTP analyzer when that many invalid transactions
+	## have been observed in an SMTP session.
+	option max_invalid_mail_transactions = 25;
+
+	## Maximum number of unique ``rcptto`` addresses allowed for a single
+	## transaction. Exceeding this limit will report a
+	## ``smtp_too_many_rcptto_addresses`` weird and stop adding such addresses to the
+	## transaction. Setting this to zero disables the limit.
+	const max_rcptto_addresses: count = 1000 &redef;
+
+	## Maximum number of unique ``to`` addresses allowed for a single
+	## transaction. Exceeding this limit will report a ``smtp_too_many_to_addresses``
+	## weird and stop adding such addresses to the transaction. Setting this to zero
+	## disables the limit.
+	const max_to_addresses: count = 1000 &redef;
+
+	## Maximum number of unique ``cc`` addresses allowed for a single
+	## transaction. Exceeding this limit will report a ``smtp_too_many_cc_addresses``
+	## weird and stop adding such addresses to the transaction. Setting this to zero
+	## disables the limit.
+	const max_cc_addresses: count = 1000 &redef;
+
+	## Maximum size of the path for a single transaction.  Exceeding this limit will
+	## report a ``smtp_max_path_length_exceeded`` weird and stop adding entries to the
+	## path. Setting this to zero disables the limit.
+	const max_path_length: count = 1000 &redef;
 }
 
 redef record connection += {
@@ -98,12 +141,9 @@ redef record connection += {
 	smtp_state: State &optional;
 };
 
-const ports = { 25/tcp, 587/tcp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(SMTP::LOG, [$columns=SMTP::Info, $ev=log_smtp, $path="smtp", $policy=log_policy]);
+	Log::create_stream(SMTP::LOG, Log::Stream($columns=SMTP::Info, $ev=log_smtp, $path="smtp", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_SMTP, ports);
 	}
 
@@ -151,6 +191,24 @@ function set_smtp_session(c: connection)
 		c$smtp = new_smtp_log(c);
 	}
 
+function mail_transaction_invalid(c: connection, addl: string)
+	{
+	Reporter::conn_weird("smtp_mail_transaction_invalid", c, addl, "SMTP");
+
+	++c$smtp_state$invalid_transactions;
+
+	if ( max_invalid_mail_transactions > 0
+	     && c$smtp_state$invalid_transactions > max_invalid_mail_transactions
+	     && c$smtp_state?$analyzer_id )
+		{
+		Reporter::limit_reached_weird("smtp_excessive_invalid_mail_transactions", c,
+		                              c$smtp_state$invalid_transactions, max_invalid_mail_transactions,
+		                              "SMTP");
+		if ( disable_analyzer(c$id, c$smtp_state$analyzer_id) )
+			delete c$smtp_state$analyzer_id;
+		}
+	}
+
 function smtp_message(c: connection)
 	{
 	if ( c$smtp$has_client_activity )
@@ -158,6 +216,15 @@ function smtp_message(c: connection)
 		Log::write(SMTP::LOG, c$smtp);
 		c$smtp = new_smtp_log(c);
 		}
+	}
+
+event analyzer_confirmation_info(atype: AllAnalyzers::Tag, info: AnalyzerConfirmationInfo)
+	{
+	if ( atype != Analyzer::ANALYZER_SMTP )
+		return;
+
+	set_smtp_session(info$c);
+	info$c$smtp_state$analyzer_id = info$aid;
 	}
 
 event smtp_request(c: connection, is_orig: bool, command: string, arg: string) &priority=5
@@ -179,11 +246,24 @@ event smtp_request(c: connection, is_orig: bool, command: string, arg: string) &
 		local rcptto_addrs = extract_email_addrs_set(arg);
 		for ( rcptto_addr in rcptto_addrs )
 			{
+			if ( max_rcptto_addresses > 0 && |c$smtp$rcptto| >= max_rcptto_addresses )
+				{
+				Reporter::conn_weird("smtp_too_many_rcptto_addresses", c);
+				break;
+				}
+
 			rcptto_addr = gsub(rcptto_addr, /ORCPT=rfc822;?/, "");
 			add c$smtp$rcptto[rcptto_addr];
 			}
 
 		c$smtp$has_client_activity = T;
+		c$smtp_state$trans_rcpt_to_seen = T;
+
+		if ( mail_transaction_validation )
+			{
+			if ( ! c$smtp_state$trans_mail_from_seen )
+				mail_transaction_invalid(c, "rcpt to missing mail from");
+			}
 		}
 
 	else if ( upper_command == "MAIL" && /^[fF][rR][oO][mM]:/ in arg )
@@ -195,6 +275,32 @@ event smtp_request(c: connection, is_orig: bool, command: string, arg: string) &
 		if ( mailfrom != "" )
 			c$smtp$mailfrom = mailfrom;
 		c$smtp$has_client_activity = T;
+
+		c$smtp_state$trans_mail_from_seen = T;
+		c$smtp_state$trans_rcpt_to_seen = F;  # Reset state on MAIL FROM
+		}
+	else if ( upper_command == "DATA" || upper_command == "BDAT" )
+		{
+		if ( mail_transaction_validation )
+			{
+			if ( ! c$smtp_state$trans_rcpt_to_seen )  # mail from checked in rctp to
+				mail_transaction_invalid(c, "data missing rcpt to");
+			}
+
+		if ( upper_command == "BDAT" && ends_with(arg, " LAST") )
+			{
+			# Reset state mail transaction state when we're seeing
+			# the last BDAT command.
+			c$smtp_state$trans_mail_from_seen = F;
+			c$smtp_state$trans_rcpt_to_seen = F;
+			c$smtp_state$bdat_last_observed = T;
+			}
+		}
+	else if ( upper_command == "." )
+		{
+		# Reset state when we're seeing a .
+		c$smtp_state$trans_mail_from_seen = F;
+		c$smtp_state$trans_rcpt_to_seen = F;
 		}
 	}
 
@@ -211,10 +317,11 @@ event smtp_reply(c: connection, is_orig: bool, code: count, cmd: string,
 event smtp_reply(c: connection, is_orig: bool, code: count, cmd: string,
                  msg: string, cont_resp: bool) &priority=-5
 	{
-	if ( cmd == "." )
+	if ( cmd == "." || (!cont_resp && cmd == "BDAT" && c$smtp_state$bdat_last_observed ) )
 		{
 		# Track the number of messages seen in this session.
 		++c$smtp_state$messages_transferred;
+		c$smtp_state$bdat_last_observed = F;
 		smtp_message(c);
 		c$smtp = new_smtp_log(c);
 		}
@@ -257,6 +364,12 @@ event mime_one_header(c: connection, h: mime_header_rec) &priority=5
 		local to_email_addrs = split_mime_email_addresses(h$value);
 		for ( to_email_addr in to_email_addrs )
 			{
+			if ( max_to_addresses > 0 && |c$smtp$to| >= max_to_addresses )
+				{
+				Reporter::conn_weird("smtp_too_many_to_addresses", c);
+				break;
+				}
+
 			add c$smtp$to[to_email_addr];
 			}
 		}
@@ -268,14 +381,22 @@ event mime_one_header(c: connection, h: mime_header_rec) &priority=5
 
 		local cc_parts = split_mime_email_addresses(h$value);
 		for ( cc_part in cc_parts )
+			{
+			if ( max_cc_addresses > 0 && |c$smtp$cc| >= max_cc_addresses )
+				{
+				Reporter::conn_weird("smtp_too_many_cc_addresses", c);
+				break;
+				}
+
 			add c$smtp$cc[cc_part];
+			}
 		}
 
 	else if ( h$name == "X-ORIGINATING-IP" )
 		{
 		local addresses = extract_ip_addresses(h$value);
 		if ( 0 in addresses )
-			c$smtp$x_originating_ip = to_addr(addresses[0]);
+			c$smtp$x_originating_ip = addresses[0] as addr;
 		}
 
 	else if ( h$name == "X-MAILER" ||
@@ -298,15 +419,24 @@ event mime_one_header(c: connection, h: mime_header_rec) &priority=3
 	local text_ip = find_address_in_smtp_header(h$value);
 	if ( text_ip == "" )
 		return;
-	local ip = to_addr(text_ip);
+	local ip = text_ip as addr;
 
 	if ( ! addr_matches_host(ip, mail_path_capture) &&
 	     ! Site::is_private_addr(ip) )
 		{
 		c$smtp$process_received_from = F;
 		}
+
 	if ( c$smtp$path[|c$smtp$path|-1] != ip )
+		{
+		if ( max_path_length > 0 && |c$smtp$path| >= max_path_length )
+			{
+			Reporter::conn_weird("smtp_max_path_length_exceeded", c);
+			return;
+			}
+
 		c$smtp$path += ip;
+		}
 	}
 
 # This event handler sets the flag to stop processing SMTP headers if

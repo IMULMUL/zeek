@@ -48,7 +48,7 @@
 #
 # Implementation number: The number of the implementation this request code
 #        is defined by.  An implementation number of zero is used
-#        for requst codes/data formats which all implementations
+#        for request codes/data formats which all implementations
 #        agree on.  Implementation number 255 is reserved (for
 #        extensions, in case we run out).
 #
@@ -120,4 +120,3 @@ type NTP_mode7_msg = record {
 	error_code: uint8  = (err_and_data_len & 0xF000) >> 12;
 	data_len  : uint16 = (err_and_data_len & 0x0FFF);
 } &byteorder=bigendian &exportsourcedata;
-

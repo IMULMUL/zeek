@@ -23,7 +23,7 @@ zeek::ValPtr GetTimeFromAsn1(zeek::StringVal* atime, int64 usecs)
 	char* pBuffer = lBuffer;
 
 	size_t lTimeLength = atime->Len();
-	char * pString = (char *) atime->Bytes();
+	const char* pString = reinterpret_cast<const char*>(atime->Bytes());
 
 	if ( lTimeLength != 15 && lTimeLength != 17 )
 		return nullptr;
@@ -51,7 +51,7 @@ zeek::ValPtr GetTimeFromAsn1(zeek::StringVal* atime, int64 usecs)
 	if ( !lResult )
 		lResult = 0;
 
-	return zeek::make_intrusive<zeek::TimeVal>(double(lResult + double(usecs/100000.0)));
+	return zeek::make_intrusive<zeek::TimeVal>(static_cast<double>(lResult) + static_cast<double>(usecs/100000.0));
 	}
 
 %}

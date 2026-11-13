@@ -1,4 +1,4 @@
-# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.trace %INPUT
+# @TEST-EXEC: zeek -b -r $TRACES/wikipedia.pcap %INPUT
 # @TEST-EXEC: btest-diff local.log
 # @TEST-EXEC: btest-diff remote.log
 #
@@ -9,6 +9,9 @@
 @load base/protocols/conn
 @load base/frameworks/notice
 
+# Don't automatically treat private address space as local here so we filter
+# precisely on a single local prefix:
+redef Site::private_address_space_is_local = F;
 redef Site::local_nets = {141.142.0.0/16};
 
 function split_log(id: Log::ID, path: string, rec: record {id:conn_id;}): string

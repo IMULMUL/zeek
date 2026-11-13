@@ -1,5 +1,7 @@
+# @TEST-REQUIRES: test "${ZEEK_USE_CPP}" != "1"
 # @TEST-EXEC: zeek -b %INPUT >out
 # @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff .stderr
 
 function test_case(msg: string, expect: bool)
         {
@@ -10,11 +12,10 @@ function foo(c: count): bool
 	{ return c == 42 ? T : F; }
 
 global TRUE_CONDITION = T;
+global xyz = 0;
 
 event zeek_init()
 {
-	local xyz = 0;
-
 	# Test "if" without "else"
 
 	@if ( F )
@@ -54,4 +55,3 @@ event zeek_init()
 	test_case( "@if...@else", xyz == 1 );
 
 }
-

@@ -53,7 +53,7 @@ event http_message_done(c: connection, is_orig: bool, stat: http_message_stat)
 	# If a Flash was detected, it has to be logged considering the user agent.
 	if ( is_orig && c$http?$flash_version )
 		{
-		# AdobeAIR contains a seperate Flash, which should be emphasized.
+		# AdobeAIR contains a separate Flash, which should be emphasized.
 		# Note: We assume that the user agent header was not reset by the app.
 		if( c$http?$user_agent )
 			{
@@ -61,7 +61,7 @@ event http_message_done(c: connection, is_orig: bool, stat: http_message_stat)
 				c$http$flash_version = cat("AdobeAIR-", c$http$flash_version);
 			}
 
-		Software::found(c$id, [$unparsed_version=c$http$flash_version, $host=c$id$orig_h, $software_type=BROWSER_PLUGIN]);
+		Software::found(c$id, Software::Info($unparsed_version=c$http$flash_version, $host=c$id$orig_h, $software_type=BROWSER_PLUGIN));
 		}
 	}
 
@@ -81,7 +81,7 @@ event log_http(rec: Info)
 			local plugins = split_string(sw, /[[:blank:]]*;[[:blank:]]*/);
 
 			for ( i in plugins )
-				Software::found(rec$id, [$unparsed_version=plugins[i], $host=rec$id$orig_h, $software_type=BROWSER_PLUGIN]);
+				Software::found(rec$id, Software::Info($unparsed_version=plugins[i], $host=rec$id$orig_h, $software_type=BROWSER_PLUGIN));
 			}
 		}
 	}

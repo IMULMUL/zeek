@@ -27,6 +27,11 @@ export {
 		## The interface name from which the node will read/analyze packets.
 		## Typically used by worker nodes.
 		interface: string &optional;
+		## The PCAP file name from which the node will read/analyze packets.
+		## Typically used by worker nodes.
+		pcap_file: string &optional;
+		## The TCP port at which the cluster node exposes metrics for Prometheus.
+		metrics_port: port &optional;
 	};
 
 	## Configuration options that influence behavior of a supervised Zeek node.
@@ -36,6 +41,8 @@ export {
 		name: string;
 		## The interface name from which the node will read/analyze packets.
 		interface: string &optional;
+		## The PCAP file name from which the node will read/analyze packets.
+		pcap_file: string &optional;
 		## The working directory that the node should use.
 		directory: string &optional;
 		## The filename/path to which the node's stdout will be redirected.
@@ -45,8 +52,12 @@ export {
 		## Whether to start the node in bare mode. When left out, the node
 		## inherits the bare-mode status the supervisor itself runs with.
 		bare_mode: bool &optional;
-		## Additional script filenames/paths that the node should load.
-		scripts: vector of string &default = vector();
+		## Additional script filenames/paths that the node should load
+		## after the base scripts, and prior to any user-specified ones.
+		addl_base_scripts: vector of string &default = vector();
+		## Additional script filenames/paths that the node should load
+		## after any user-specified scripts.
+		addl_user_scripts: vector of string &default = vector();
 		## Environment variables to define in the supervised node.
 		env: table[string] of string &default=table();
 		## A cpu/core number to which the node will try to pin itself.
@@ -124,7 +135,7 @@ export {
 	global node: function(): NodeConfig;
 
 	## Hooks into the stdout stream for all supervisor's child processes.
-	## If a hook terminates with `break`, that will suppress output to the
+	## If a hook terminates with ``break``, that will suppress output to the
 	## associated stream.
 	##
 	## node: the name of a previously created node via
@@ -138,7 +149,7 @@ export {
 	global stdout_hook: hook(node: string, msg: string);
 
 	## Hooks into the stderr stream for all supervisor's child processes.
-	## If a hook terminates with `break`, that will suppress output to the
+	## If a hook terminates with ``break``, that will suppress output to the
 	## associated stream.
 	##
 	## node: the name of a previously created node via
@@ -150,4 +161,15 @@ export {
 	##
 	## msg: line-buffered contents from the stderr of a child process.
 	global stderr_hook: hook(node: string, msg: string);
+
+	## A notification event the Supervisor generates when it receives a
+	## status message update from the stem, indicating node has
+	## (re-)started.
+	##
+	## node: the name of a previously created node via
+	##       :zeek:see:`Supervisor::create` indicating to which
+	##       child process the stdout line is associated.
+	##
+	## pid: the process ID the stem reported for this node.
+	global node_status: event(node: string, pid: count);
 }

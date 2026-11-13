@@ -33,7 +33,6 @@ To later update to upstream changes:
 
 This updates the tests and the traces as necessary.
 
-
 Running Tests
 -------------
 
@@ -52,6 +51,18 @@ test repository:
 
 All the standard ``btest`` options can be used to run individual
 tests, get diagnostic output, etc.
+
+Versioning
+----------
+
+Since external testsuites live in separate repositories, we need a way to tie
+the local Zeek codebase to a particular version of the testsuites. Normally we'd
+use git submodules, but cloning the testsuites with the rest of the distribution
+isn't always desirable or feasible. We resort to "manual submodules": a file
+"commit-hash.<testsuite-name>" in this directory contains the commit hash to use
+for the respective testsuite. The Makefile target "checkout-repos" brings the local
+repositories in line with the commit files, while "update-commit-hashes" updates
+the commit files for locally available testsuites to their HEAD commits.
 
 Updating Baseline
 -----------------
@@ -95,7 +106,5 @@ there. For each trace, you also need to calculate a checksum with ``md5sum`` and
 put it into ``<url>.md5sum``. The scripts use this to decide if they need to
 redownload the trace. Accordingly, if you update a trace, make sure to also
 recalculate its checksum. Note that the traces will be downloaded to ``Traces/``
-but must not be added to the git repostiory; there's a ``.gitignore`` installed
+but must not be added to the git repository; there's a ``.gitignore`` installed
 to prevent that.
-
-

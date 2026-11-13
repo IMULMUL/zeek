@@ -1,6 +1,6 @@
-# @TEST-EXEC: zeek -b -r $TRACES/http/get.trace %INPUT 2>err
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff .stdout
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff err
+# @TEST-EXEC: zeek -b -r $TRACES/http/get.pcap %INPUT 2>err
+# @TEST-EXEC: btest-diff-remove-abspath .stdout
+# @TEST-EXEC: btest-diff-remove-abspath err
 
 @load base/protocols/http
 
@@ -9,7 +9,10 @@ event zeek_init()
 	print "This should fail but not crash";
 	# The following produces a run-time warning, "non-void function
 	# returning without a value" ... but not when inlined, since then
-	# there's no call to a script function occurring.
+	# there's no call to a script function occurring.  Also, for
+	# scripts compiled to C++, they treat all instances of returning
+	# without a value in a context where a value is needed as a
+	# run-time error, not just a warning.
 	print Files::lookup_file("asdf");
 
 	print "This should return F";

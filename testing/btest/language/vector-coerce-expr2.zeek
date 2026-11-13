@@ -1,6 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >output 2>error
 # @TEST-EXEC: btest-diff output
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff error
+# @TEST-EXEC: btest-diff-remove-abspath error
 
 event zeek_init()
 	{
@@ -50,4 +50,31 @@ event zeek_init()
 	d = b + c;
 
 	print d;
+	}
+
+type recursive: record {
+	placeholder: bool;
+};
+
+redef record recursive += { rec: table[count] of recursive &optional; };
+
+function connT(c: connection, r: recursive): bool
+	{
+	return T;
+	}
+
+function connF(c: connection, r: recursive): bool
+	{
+	return F;
+	}
+
+function connMaybe(c: connection, r: recursive): bool
+	{
+	return c$id$orig_p < c$id$resp_p;
+	}
+
+event zeek_init()
+	{
+	local v = vector(connT, connF, connMaybe);
+	print v;
 	}

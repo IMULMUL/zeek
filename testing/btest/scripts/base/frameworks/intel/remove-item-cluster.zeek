@@ -1,22 +1,17 @@
-# @TEST-PORT: BROKER_PORT1
-# @TEST-PORT: BROKER_PORT2
+# @TEST-PORT: BROKER_MANAGER_PORT
+# @TEST-PORT: BROKER_WORKER1_PORT
 #
-# @TEST-EXEC: btest-bg-run manager-1 ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager-1 zeek -b %INPUT
-# @TEST-EXEC: btest-bg-run worker-1  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-1 zeek -b %INPUT
+# @TEST-EXEC: cp $FILES/broker/cluster-layout.zeek .
+#
+# @TEST-EXEC: btest-bg-run manager  ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=manager  zeek -b %INPUT
+# @TEST-EXEC: btest-bg-run worker-1 ZEEKPATH=$ZEEKPATH:.. CLUSTER_NODE=worker-1 zeek -b %INPUT
 # @TEST-EXEC: btest-bg-wait 30
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-sort btest-diff manager-1/.stdout
+# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-sort btest-diff manager/.stdout
 # @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-sort btest-diff worker-1/.stdout
-# @TEST-EXEC: btest-diff manager-1/intel.log
+# @TEST-EXEC: btest-diff manager/intel.log
 
 @load base/frameworks/intel
-@load base/frameworks/cluster
-
-# @TEST-START-FILE cluster-layout.zeek
-redef Cluster::nodes = {
-	["manager-1"] = [$node_type=Cluster::MANAGER, $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT1"))],
-	["worker-1"]  = [$node_type=Cluster::WORKER,  $ip=127.0.0.1, $p=to_port(getenv("BROKER_PORT2")), $manager="manager-1"],
-};
-# @TEST-END-FILE
+@load policy/frameworks/cluster/experimental
 
 module Intel;
 
@@ -41,8 +36,11 @@ event test_manager()
 	Broker::publish(Cluster::worker_topic, test_worker);
 	}
 
-event ready()
+event Cluster::Experimental::cluster_started()
 	{
+	if ( Cluster::node != "manager" )
+		return;
+
 	# Insert the data once all workers are connected.
 	Intel::insert([$indicator="192.168.0.1", $indicator_type=Intel::ADDR, $meta=[$source="source1"]]);
 	Intel::insert([$indicator="192.168.0.2", $indicator_type=Intel::ADDR, $meta=[$source="source1"]]);
@@ -52,12 +50,6 @@ event ready()
 	Intel::insert([$indicator="10.10.10.10", $indicator_type=Intel::ADDR, $meta=[$source="end"]]);
 
 	event test_manager();
-	}
-
-event Cluster::node_up(name: string, id: string)
-	{
-	if ( Cluster::node == "worker-1" )
-		Broker::publish(Cluster::manager_topic, ready);
 	}
 
 event Intel::remove_item(item: Item, purge_indicator: bool)

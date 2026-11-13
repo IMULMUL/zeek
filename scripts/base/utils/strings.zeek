@@ -9,29 +9,6 @@ function is_string_binary(s: string): bool
 	return |gsub(s, /[\x00-\x7f]/, "")| * 100 / |s| >= 25;
 	}
 
-## Join a set of strings together, with elements delimited by a constant string.
-##
-## ss: a set of strings to join.
-##
-## j: the string used to join set elements.
-##
-## Returns: a string composed of all elements of the set, delimited by the
-##          joining string.
-function join_string_set(ss: set[string], j: string): string
-	{
-	local output="";
-	local i=0;
-	for ( s in ss )
-		{
-		if ( i > 0 )
-			output = cat(output, j);
-
-		output = cat(output, s);
-		++i;
-		}
-	return output;
-	}
-
 ## Given a string, returns an escaped version.
 ##
 ## s: a string to escape.
@@ -59,5 +36,5 @@ function cut_tail(s: string, tail_len: count): string
 	{
 	if ( tail_len > |s| )
 		tail_len = |s|;
-	return sub_bytes(s, 1, int_to_count(|s| - tail_len));
+	return sub_bytes(s, 1, (|s| - tail_len) as count);
 	}

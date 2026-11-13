@@ -9,6 +9,12 @@ module KRB;
 export {
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for KRB over TCP.
+	const tcp_ports = { 88/tcp } &redef;
+
+	## Well-known ports for KRB over UDP.
+	const udp_ports = { 88/udp } &redef;
+
 	global log_policy: Log::PolicyHook;
 
 	type Info: record {
@@ -20,7 +26,8 @@ export {
 		id:            conn_id  &log;
 
 		## Request type - Authentication Service ("AS") or
-		## Ticket Granting Service ("TGS")
+		## Ticket Granting Service ("TGS") or
+		## Application Request ("AP")
 		request_type:  string   &log &optional;
 		## Client
 		client:        string   &log &optional;
@@ -54,7 +61,7 @@ export {
 	option ignored_errors: set[string] = {
 		# This will significantly increase the noisiness of the log.
 		# However, one attack is to iterate over principals, looking
-		# for ones that don't require preauth, and then performn
+		# for ones that don't require preauth, and then perform
 		# an offline attack on that ticket. To detect that attack,
 		# log NEEDED_PREAUTH.
 		"NEEDED_PREAUTH",
@@ -75,15 +82,11 @@ redef record connection += {
 	krb: Info &optional;
 };
 
-const tcp_ports = { 88/tcp };
-const udp_ports = { 88/udp };
-redef likely_server_ports += { tcp_ports, udp_ports };
-
 event zeek_init() &priority=5
 	{
 	Analyzer::register_for_ports(Analyzer::ANALYZER_KRB, udp_ports);
 	Analyzer::register_for_ports(Analyzer::ANALYZER_KRB_TCP, tcp_ports);
-	Log::create_stream(KRB::LOG, [$columns=Info, $ev=log_krb, $path="kerberos", $policy=log_policy]);
+	Log::create_stream(KRB::LOG, Log::Stream($columns=Info, $ev=log_krb, $path="kerberos", $policy=log_policy));
 	}
 
 function set_session(c: connection): bool
@@ -188,10 +191,40 @@ event krb_as_response(c: connection, msg: KDC_Response) &priority=-5
 	do_log(c);
 	}
 
-event krb_ap_request(c: connection, ticket: KRB::Ticket, opts: KRB::AP_Options) &priority=5
+event krb_ap_request(c: connection, ticket: KRB::Ticket, opts: KRB::AP_Options, in_kdc_padata: bool) &priority=5
 	{
 	if ( set_session(c) )
 		return;
+
+	# Ignore AP requests part of the PADATA in the AS/TGS messages.
+	if ( in_kdc_padata )
+		return;
+
+	c$krb$request_type = "AP";
+
+	if ( ticket?$service_name )
+		c$krb$service = ticket$service_name;
+	if ( ticket?$cipher )
+		c$krb$cipher = cipher_name[ticket$cipher];
+
+	# An AP request does not carry a client name, so log the realm alone.
+	if ( ticket?$realm )
+		c$krb$client = fmt("/%s", ticket$realm);
+	}
+
+event krb_ap_response(c: connection) &priority=5
+	{
+	if ( set_session(c) )
+		return;
+
+	# AP-REP indicates that mutual authentication succeeded. A failure would be
+	# a KRB-ERROR instead, which krb_error handles.
+	c$krb$success = T;
+	}
+
+event krb_ap_response(c: connection) &priority=-5
+	{
+	do_log(c);
 	}
 
 event krb_tgs_request(c: connection, msg: KDC_Request) &priority=5

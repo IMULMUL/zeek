@@ -4,168 +4,184 @@
 
 #include "zeek/Desc.h"
 #include "zeek/Reporter.h"
-#include "zeek/script_opt/ScriptOpt.h"
 #include "zeek/script_opt/ZAM/Compile.h"
 
-namespace zeek::detail
-	{
+namespace zeek::detail {
 
-const ZAMStmt ZAMCompiler::StartingBlock()
-	{
-	return ZAMStmt(insts1.size());
-	}
+ZAMStmt ZAMCompiler::StartingBlock() { return {static_cast<int>(insts1.size())}; }
 
-const ZAMStmt ZAMCompiler::FinishBlock(const ZAMStmt /* start */)
-	{
-	return ZAMStmt(insts1.size() - 1);
-	}
+ZAMStmt ZAMCompiler::FinishBlock(ZAMStmt /* start */) { return {static_cast<int>(insts1.size() - 1)}; }
 
-bool ZAMCompiler::NullStmtOK() const
-	{
-	// They're okay iff they're the entire statement body.
-	return insts1.empty();
-	}
+bool ZAMCompiler::NullStmtOK() const {
+    // They're okay iff they're the entire statement body.
+    return insts1.empty();
+}
 
-const ZAMStmt ZAMCompiler::EmptyStmt()
-	{
-	return ZAMStmt(insts1.size() - 1);
-	}
+ZAMStmt ZAMCompiler::EmptyStmt() { return {static_cast<int>(insts1.size() - 1)}; }
 
-const ZAMStmt ZAMCompiler::LastInst()
-	{
-	return ZAMStmt(insts1.size() - 1);
-	}
+ZAMStmt ZAMCompiler::ErrorStmt() { return {0}; }
 
-const ZAMStmt ZAMCompiler::ErrorStmt()
-	{
-	return ZAMStmt(0);
-	}
+ZAMStmt ZAMCompiler::LastInst() { return {static_cast<int>(insts1.size() - 1)}; }
 
-OpaqueVals* ZAMCompiler::BuildVals(const ListExprPtr& l)
-	{
-	return new OpaqueVals(InternalBuildVals(l.get()));
-	}
+void ZAMCompiler::AddCFT(ZInstI* inst, ControlFlowType cft) {
+    if ( cft == CFT_NONE )
+        return;
 
-ZInstAux* ZAMCompiler::InternalBuildVals(const ListExpr* l, int stride)
-	{
-	auto exprs = l->Exprs();
-	int n = exprs.length();
+    if ( ! inst->aux )
+        inst->aux = new ZInstAux(0);
 
-	auto aux = new ZInstAux(n * stride);
+    auto cft_entry = inst->aux->cft.find(cft);
+    if ( cft_entry == inst->aux->cft.end() )
+        inst->aux->cft[cft] = 1;
+    else {
+        ASSERT(cft == CFT_BLOCK_END || cft == CFT_LOOP_END || cft == CFT_BREAK || cft == CFT_INLINED_RETURN);
+        ++cft_entry->second;
+    }
+}
 
-	int offset = 0; // offset into aux info
-	for ( int i = 0; i < n; ++i )
-		{
-		auto& e = exprs[i];
-		int num_vals = InternalAddVal(aux, offset, e);
-		ASSERT(num_vals == stride);
-		offset += num_vals;
-		}
+std::unique_ptr<OpaqueVals> ZAMCompiler::BuildVals(const ListExprPtr& l) {
+    return std::make_unique<OpaqueVals>(InternalBuildVals(l.get()));
+}
 
-	return aux;
-	}
+ZInstAux* ZAMCompiler::InternalBuildVals(const ListExpr* l, int stride) {
+    const auto& exprs = l->Exprs();
+    int n = exprs.length();
 
-int ZAMCompiler::InternalAddVal(ZInstAux* zi, int i, Expr* e)
-	{
-	if ( e->Tag() == EXPR_ASSIGN )
-		{ // We're building up a table constructor
-		auto& indices = e->GetOp1()->AsListExpr()->Exprs();
-		auto val = e->GetOp2();
-		int width = indices.length();
+    auto aux = new ZInstAux(n * stride);
 
-		for ( int j = 0; j < width; ++j )
-			ASSERT(InternalAddVal(zi, i + j, indices[j]) == 1);
+    int offset = 0; // offset into aux info
+    for ( int i = 0; i < n; ++i ) {
+        auto& e = exprs[i];
+        int num_vals = InternalAddVal(aux, offset, e);
+        ASSERT(num_vals == stride);
+        offset += num_vals;
+    }
 
-		ASSERT(InternalAddVal(zi, i + width, val.get()) == 1);
+    return aux;
+}
 
-		return width + 1;
-		}
+int ZAMCompiler::InternalAddVal(ZInstAux* zi, int i, Expr* e) {
+    if ( e->Tag() == EXPR_ASSIGN ) { // We're building up a table constructor
+        auto& indices = e->GetOp1()->AsListExpr()->Exprs();
+        auto val = e->GetOp2();
+        int width = indices.length();
+        int num_vals;
 
-	if ( e->Tag() == EXPR_LIST )
-		{ // We're building up a set constructor
-		auto& indices = e->AsListExpr()->Exprs();
-		int width = indices.length();
+        for ( int j = 0; j < width; ++j ) {
+            num_vals = InternalAddVal(zi, i + j, indices[j]);
+            ASSERT(num_vals == 1);
+        }
 
-		for ( int j = 0; j < width; ++j )
-			ASSERT(InternalAddVal(zi, i + j, indices[j]) == 1);
+        num_vals = InternalAddVal(zi, i + width, val.get());
+        ASSERT(num_vals == 1);
 
-		return width;
-		}
+        return width + 1;
+    }
 
-	if ( e->Tag() == EXPR_FIELD_ASSIGN )
-		{
-		// These can appear when we're processing the expression
-		// list for a record constructor.
-		auto fa = e->AsFieldAssignExpr();
-		e = fa->GetOp1().get();
+    if ( e->Tag() == EXPR_LIST ) { // We're building up a set constructor
+        auto& indices = e->AsListExpr()->Exprs();
+        int width = indices.length();
 
-		if ( e->GetType()->Tag() == TYPE_TYPE )
-			{
-			// Ugh - we actually need a "type" constant.
-			auto v = e->Eval(nullptr);
-			ASSERT(v);
-			zi->Add(i, v);
-			return 1;
-			}
+        for ( int j = 0; j < width; ++j ) {
+            int num_vals = InternalAddVal(zi, i + j, indices[j]);
+            ASSERT(num_vals == 1);
+        }
 
-		// Now that we've adjusted, fall through.
-		}
+        return width;
+    }
 
-	if ( e->Tag() == EXPR_NAME )
-		zi->Add(i, FrameSlot(e->AsNameExpr()), e->GetType());
+    if ( e->Tag() == EXPR_FIELD_ASSIGN ) {
+        // These can appear when we're processing the expression
+        // list for a record constructor.
+        auto fa = e->AsFieldAssignExpr();
+        e = fa->GetOp1().get();
 
-	else
-		zi->Add(i, e->AsConstExpr()->ValuePtr());
+        if ( e->GetType()->Tag() == TYPE_TYPE ) {
+            // Ugh - we actually need a "type" constant.
+            auto v = eval_in_isolation(e);
+            ASSERT(v);
+            zi->Add(i, v);
+            return 1;
+        }
 
-	return 1;
-	}
+        // Now that we've adjusted, fall through.
+    }
 
-const ZAMStmt ZAMCompiler::AddInst(const ZInstI& inst)
-	{
-	ZInstI* i;
+    if ( e->Tag() == EXPR_NAME )
+        zi->Add(i, FrameSlot(e->AsNameExpr()), e->GetType());
 
-	if ( pending_inst )
-		{
-		i = pending_inst;
-		pending_inst = nullptr;
-		}
-	else
-		i = new ZInstI();
+    else
+        zi->Add(i, e->AsConstExpr()->ValuePtr());
 
-	*i = inst;
+    return 1;
+}
 
-	insts1.push_back(i);
+ZAMStmt ZAMCompiler::AddInst(const ZInstI& inst, bool suppress_non_local) {
+    ZInstI* i;
 
-	top_main_inst = insts1.size() - 1;
+    if ( pending_inst ) {
+        i = pending_inst;
+        pending_inst = nullptr;
+    }
+    else
+        i = new ZInstI();
 
-	if ( pending_global_store < 0 )
-		return ZAMStmt(top_main_inst);
+    *i = inst;
+    last_added_inst = i;
 
-	auto global_slot = pending_global_store;
-	pending_global_store = -1;
+    insts1.push_back(i);
 
-	auto store_inst = ZInstI(OP_STORE_GLOBAL_V, global_slot);
-	store_inst.op_type = OP_V_I1;
-	store_inst.t = globalsI[global_slot].id->GetType();
+    top_main_inst = insts1.size() - 1;
 
-	return AddInst(store_inst);
-	}
+    if ( suppress_non_local )
+        return {top_main_inst};
 
-const Stmt* ZAMCompiler::LastStmt(const Stmt* s) const
-	{
-	if ( s->Tag() == STMT_LIST )
-		{
-		auto sl = s->AsStmtList()->Stmts();
-		return sl[sl.length() - 1];
-		}
+    // Ensure we haven't confused ourselves about any pending stores.
+    ASSERT(pending_global_store == -1 || pending_capture_store == -1);
 
-	else
-		return s;
-	}
+    if ( pending_global_store >= 0 ) {
+        auto gs = pending_global_store;
+        pending_global_store = -1;
 
-ZAMStmt ZAMCompiler::PrevStmt(const ZAMStmt s)
-	{
-	return ZAMStmt(s.stmt_num - 1);
-	}
+        auto store_inst = ZInstI(OP_STORE_GLOBAL_g, gs);
+        store_inst.op_type = OP_V_I1;
+        store_inst.SetType(globalsI[gs].id->GetType());
 
-	} // zeek::detail
+        return AddInst(store_inst);
+    }
+
+    if ( pending_capture_store >= 0 ) {
+        auto cs = pending_capture_store;
+        pending_capture_store = -1;
+
+        auto& cv = *func->GetType()->GetCaptures();
+        auto& c_id = cv[cs].Id();
+
+        ZOp op;
+
+        if ( ZVal::IsManagedType(c_id->GetType()) )
+            op = OP_STORE_MANAGED_CAPTURE_Vi;
+        else
+            op = OP_STORE_CAPTURE_Vi;
+
+        auto store_inst = ZInstI(op, RawSlot(c_id), cs);
+        store_inst.op_type = OP_VV_I2;
+
+        return AddInst(store_inst);
+    }
+
+    return {top_main_inst};
+}
+
+const Stmt* ZAMCompiler::LastStmt(const Stmt* s) const {
+    if ( s->Tag() == STMT_LIST ) {
+        auto sl = s->AsStmtList()->Stmts();
+        ASSERT(! sl.empty());
+        return sl.back().get();
+    }
+
+    else
+        return s;
+}
+
+} // namespace zeek::detail

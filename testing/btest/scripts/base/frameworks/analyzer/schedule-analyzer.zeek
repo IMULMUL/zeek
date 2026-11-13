@@ -1,5 +1,5 @@
 #
-# @TEST-EXEC: zeek -b  -r ${TRACES}/rotation.trace %INPUT | sort >output
+# @TEST-EXEC: zeek -b  -r ${TRACES}/rotation.pcap %INPUT | sort >output
 # @TEST-EXEC: btest-diff output
 
 global x = 0;
@@ -29,8 +29,3 @@ event scheduled_analyzer_applied(c: connection, a: Analyzer::Tag)
 	{
 	print "APPLIED:", network_time(), c$id, a;
 	}
-
-
-
-
-

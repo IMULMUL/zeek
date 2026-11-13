@@ -1,60 +1,57 @@
+%gen-native
 
 type ftp_port: record;
 
 %%{
+#include <cinttypes>
 #include "zeek/Reporter.h"
 
-static zeek::ValPtr parse_port(const char* line)
+static zeek::RecordValPtr parse_port(const std::string& line)
 	{
 	auto r = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::ftp_port);
 
-	int bytes[6];
-	if ( line && sscanf(line, "%d,%d,%d,%d,%d,%d",
-			&bytes[0], &bytes[1], &bytes[2],
-			&bytes[3], &bytes[4], &bytes[5]) == 6 )
-		{
-		int good = 1;
+	bool good = false;
+	uint32_t port = 0;
+	uint32_t addr = 0;
 
-		for ( int i = 0; i < 6; ++i )
-			if ( bytes[i] < 0 || bytes[i] > 255 )
+	int32_t bytes[6];
+	if ( line.size() >= 11 && sscanf(line.c_str(),
+                                     "%" SCNd32 ",%" SCNd32 ",%" SCNd32 ",%" SCNd32 ",%" SCNd32 ",%" SCNd32,
+	                                 &bytes[0], &bytes[1], &bytes[2],
+	                                 &bytes[3], &bytes[4], &bytes[5]) == 6 )
+		{
+		good = true;
+
+		for ( int b : bytes )
+			if ( b < 0 || b > 255 )
 				{
-				good = 0;
+				good = false;
 				break;
 				}
 
-		uint32_t addr = (bytes[0] << 24) | (bytes[1] << 16) |
-				(bytes[2] << 8) | bytes[3];
-		uint32_t port = (bytes[4] << 8) | bytes[5];
-
-		// Since port is unsigned, no need to check for < 0.
-		if ( port > 65535 )
+		if ( good )
 			{
-			port = 0;
-			good = 0;
+			addr = (static_cast<uint32_t>(bytes[0]) << 24) | (static_cast<uint32_t>(bytes[1]) << 16) |
+					(static_cast<uint32_t>(bytes[2]) << 8) | bytes[3];
+			port = (static_cast<uint32_t>(bytes[4]) << 8) | bytes[5];
 			}
+		}
 
-		r->Assign(0, zeek::make_intrusive<zeek::AddrVal>(htonl(addr)));
-		r->Assign(1, zeek::val_mgr->Port(port, TRANSPORT_TCP));
-		r->Assign(2, good);
-		}
-	else
-		{
-		r->Assign(0, zeek::make_intrusive<zeek::AddrVal>(uint32_t(0)));
-		r->Assign(1, zeek::val_mgr->Port(0, TRANSPORT_TCP));
-		r->Assign(2, false);
-		}
+	r->Assign(0, zeek::make_intrusive<zeek::AddrVal>(htonl(addr)));
+	r->Assign(1, zeek::val_mgr->Port(port, TRANSPORT_TCP));
+	r->Assign(2, good);
 
 	return r;
 	}
 
-static zeek::ValPtr parse_eftp(const char* line)
+static zeek::RecordValPtr parse_eftp(const char* line)
 	{
 	auto r = zeek::make_intrusive<zeek::RecordVal>(zeek::BifType::Record::ftp_port);
 
 	int net_proto = 0;	// currently not used
 	zeek::IPAddr addr;	// unspecified IPv6 address (all 128 bits zero)
 	int port = 0;
-	int good = 0;
+	bool good = false;
 
 	if ( line )
 		{
@@ -66,12 +63,12 @@ static zeek::ValPtr parse_eftp(const char* line)
 
 		if ( *line )
 			{
-			good = 1;
+			good = true;
 			++line;	// skip delimiter
 
 			net_proto = strtol(line, &next_delim, 10);
 			if ( *next_delim != delimiter )
-				good = 0;
+				good = false;
 
 			line = next_delim;
 			if ( *line )
@@ -80,31 +77,31 @@ static zeek::ValPtr parse_eftp(const char* line)
 			if ( *line && *line != delimiter )
 				{
 				const char* nptr = strchr(line, delimiter);
-				if ( nptr == NULL )
-					{
+				if ( nptr == nullptr )
 					nptr = line + strlen(line);
-					good = 0;
-					}
 
 				std::string s(line, nptr-line); // extract IP address
-				zeek::IPAddr tmp(s);
-				// on error, "tmp" will have all 128 bits zero
-				if ( tmp == addr )
-					good = 0;
-
-				addr = tmp;
+				struct in6_addr result;
+				good = zeek::IPAddr::ConvertString(s.c_str(), &result);
+				if ( good )
+					addr = zeek::IPAddr(result);
 				}
 
 			line = strchr(line, delimiter);
 
-			if ( line != NULL )
+			if ( line != nullptr )
 				{
 				++line;	// now the port
 				port = strtol(line, &next_delim, 10);
 				if ( *next_delim != delimiter )
-					good = 0;
-				}
+					good = false;
 
+				if ( port < 0 || port > 65535 )
+					{
+					port = 0;
+					good = false;
+					}
+				}
 			}
 
 		}
@@ -127,7 +124,7 @@ static zeek::ValPtr parse_eftp(const char* line)
 ## .. zeek:see:: parse_eftp_port parse_ftp_pasv parse_ftp_epsv fmt_ftp_port
 function parse_ftp_port%(s: string%): ftp_port
 	%{
-	return parse_port(s->CheckString());
+	return parse_port(s->ToStdString());
 	%}
 
 ## Converts a string representation of the FTP EPRT command (see :rfc:`2428`)
@@ -155,19 +152,35 @@ function parse_eftp_port%(s: string%): ftp_port
 function parse_ftp_pasv%(str: string%): ftp_port
 	%{
 	const char* s = str->CheckString();
+
+	if ( str->Len() == 0 )
+	   return parse_port("");
+
 	const char* line = strchr(s, '(');
 	if ( line )
 		++line;	// move past '('
-	else if ( (line = strstr(s, "PORT")) )
+	else if ( line = strstr(s, "PORT"); line != nullptr )
 		line += 5;	// Skip over
-	else if ( (line = strchr(s, ',')) )
+	else if ( line = strchr(s, ','); line != nullptr )
 		{ // Look for comma-separated list.
-		while ( --line >= s && isdigit(*line) )
-			;	// Back up over preceding digits.
-		++line;	// now points to first digit, or beginning of s
+		do
+			{
+			// Back up over preceding digits. We'll end on the
+			// first digit or the beginning of s.
+			--line;
+			}
+		while ( line >= s && isdigit(*line) );
+
+		// Scoot forward one to point at the first digit or at the
+		// beginning of s.
+		++line;
 		}
 
-	return parse_port(line);
+	// Make sure we didn't step past the end of the string.
+	if ( ! line || ( line - s ) > str->Len() )
+		return parse_port("");
+	else
+		return parse_port(std::string{line});
 	%}
 
 ## Converts the result of the FTP EPSV command (see :rfc:`2428`) to an
@@ -214,7 +227,7 @@ function fmt_ftp_port%(a: addr, p: port%): string
 	else
 		{
 		zeek::emit_builtin_error("conversion of non-IPv4 address in fmt_ftp_port",
-		                         @ARG@[0]);
+		                         a);
 		return zeek::val_mgr->EmptyString();
 		}
 	%}

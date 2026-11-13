@@ -5,160 +5,159 @@
 #include "zeek/Desc.h"
 #include "zeek/Expr.h"
 #include "zeek/Val.h"
+#include "zeek/zeekygen/IdentifierReST.h"
 #include "zeek/zeekygen/ScriptInfo.h"
 #include "zeek/zeekygen/utils.h"
 
 using namespace std;
 
-namespace zeek::zeekygen::detail
-	{
+namespace zeek::zeekygen::detail {
 
 IdentifierInfo::IdentifierInfo(zeek::detail::IDPtr arg_id, ScriptInfo* script, bool redef)
-	: Info(), comments(), id(std::move(arg_id)), initial_val(), redefs(), fields(),
-	  last_field_seen(), declaring_script(script), from_redef(redef)
-	{
-	if ( id->GetVal() && (id->IsOption() || id->IsRedefinable()) )
-		initial_val = id->GetVal()->Clone();
-	}
+    : Info(),
+      comments(),
+      id(std::move(arg_id)),
+      initial_val(),
+      redefs(),
+      fields(),
+      declaring_script(script),
+      from_redef(redef) {
+    if ( id->GetVal() && (id->IsOption() || id->IsRedefinable()) )
+        initial_val = id->GetVal()->Clone();
+}
 
-IdentifierInfo::~IdentifierInfo()
-	{
-	for ( redef_list::const_iterator it = redefs.begin(); it != redefs.end(); ++it )
-		delete *it;
+IdentifierInfo::~IdentifierInfo() {
+    for ( redef_list::const_iterator it = redefs.begin(); it != redefs.end(); ++it )
+        delete *it;
 
-	for ( record_field_map::const_iterator it = fields.begin(); it != fields.end(); ++it )
-		delete it->second;
-	}
+    for ( record_field_map::const_iterator it = fields.begin(); it != fields.end(); ++it )
+        delete it->second;
+}
 
-void IdentifierInfo::AddRedef(const string& script, zeek::detail::InitClass ic,
-                              zeek::detail::ExprPtr init_expr, const vector<string>& comments)
-	{
-	Redefinition* redef = new Redefinition(script, ic, std::move(init_expr), comments);
-	redefs.push_back(redef);
-	}
+void IdentifierInfo::AddRedef(const string& script, zeek::detail::InitClass ic, zeek::detail::ExprPtr init_expr,
+                              vector<string> comments) {
+    bool omit_value = false;
+    for ( auto it = comments.begin(); it != comments.end(); ++it ) {
+        if ( it->starts_with("@docs-omit-value") ) {
+            comments.erase(it);
+            omit_value = true;
+            break;
+        }
+    }
 
-void IdentifierInfo::AddRecordField(const TypeDecl* field, const string& script,
-                                    vector<string>& comments, bool from_redef)
-	{
-	RecordField* rf = new RecordField();
-	rf->field = new TypeDecl(*field);
-	rf->from_script = script;
-	rf->comments = comments;
-	rf->from_redef = from_redef;
+    Redefinition* redef = new Redefinition(script, ic, std::move(init_expr), std::move(comments), omit_value);
+    redefs.push_back(redef);
+}
 
-	auto [it, inserted] = fields.emplace(rf->field->id, rf);
+void IdentifierInfo::AddRecordField(const TypeDecl* field, const string& script, vector<string>& comments,
+                                    bool from_redef) {
+    RecordField* rf = new RecordField();
+    rf->field = new TypeDecl(*field);
+    rf->from_script = script;
+    rf->comments = comments;
+    rf->from_redef = from_redef;
 
-	if ( ! inserted )
-		{
-		delete it->second;
-		it->second = rf;
-		}
+    auto [it, inserted] = fields.emplace(rf->field->id, rf);
 
-	last_field_seen = rf;
-	}
+    if ( ! inserted ) {
+        delete it->second;
+        it->second = rf;
+    }
 
-vector<string> IdentifierInfo::GetComments() const
-	{
-	return comments;
-	}
+    last_field_seen = rf;
+}
 
-vector<string> IdentifierInfo::GetFieldComments(const string& field) const
-	{
-	record_field_map::const_iterator it = fields.find(field);
+vector<string> IdentifierInfo::GetComments() const { return comments; }
 
-	if ( it == fields.end() )
-		return vector<string>();
+vector<string> IdentifierInfo::GetFieldComments(const string& field) const {
+    record_field_map::const_iterator it = fields.find(field);
 
-	return it->second->comments;
-	}
+    if ( it == fields.end() )
+        return {};
 
-list<IdentifierInfo::Redefinition> IdentifierInfo::GetRedefs(const string& from_script) const
-	{
-	list<Redefinition> rval;
+    return it->second->comments;
+}
 
-	for ( redef_list::const_iterator it = redefs.begin(); it != redefs.end(); ++it )
-		{
-		if ( from_script == (*it)->from_script )
-			rval.push_back(*(*it));
-		}
+list<IdentifierInfo::Redefinition> IdentifierInfo::GetRedefs(const string& from_script) const {
+    list<Redefinition> rval;
 
-	return rval;
-	}
+    for ( Redefinition* redef : redefs ) {
+        if ( from_script == redef->from_script )
+            rval.push_back(*redef);
+    }
 
-string IdentifierInfo::GetDeclaringScriptForField(const string& field) const
-	{
-	record_field_map::const_iterator it = fields.find(field);
+    return rval;
+}
 
-	if ( it == fields.end() )
-		return "";
+string IdentifierInfo::GetDeclaringScriptForField(const string& field) const {
+    record_field_map::const_iterator it = fields.find(field);
 
-	return it->second->from_script;
-	}
+    if ( it == fields.end() )
+        return "";
 
-bool IdentifierInfo::FieldIsFromRedef(const std::string& field) const
-	{
-	auto it = fields.find(field);
+    return it->second->from_script;
+}
 
-	if ( it == fields.end() )
-		return false;
+bool IdentifierInfo::FieldIsFromRedef(const std::string& field) const {
+    auto it = fields.find(field);
 
-	return it->second->from_redef;
-	}
+    if ( it == fields.end() )
+        return false;
 
-string IdentifierInfo::DoReStructuredText(bool roles_only) const
-	{
-	ODesc d;
-	d.SetIndentSpaces(3);
-	d.SetQuotes(true);
-	id->DescribeReST(&d, roles_only);
+    return it->second->from_redef;
+}
 
-	if ( comments.empty() )
-		return d.Description();
+string IdentifierInfo::DoReStructuredText(bool roles_only) const {
+    ODesc d;
+    d.SetIndentSpaces(3);
+    d.SetQuotes(true);
+    describe_id_rest(id.get(), &d, roles_only);
 
-	d.ClearIndentLevel();
-	d.PushIndent();
+    if ( comments.empty() )
+        return d.Description();
 
-	for ( size_t i = 0; i < comments.size(); ++i )
-		{
-		if ( i > 0 )
-			d.NL();
+    d.ClearIndentLevel();
+    d.PushIndent();
 
-		if ( IsFunc(id->GetType()->Tag()) )
-			{
-			string s = comments[i];
+    for ( size_t i = 0; i < comments.size(); ++i ) {
+        if ( i > 0 )
+            d.NL();
 
-			if ( prettify_params(s) )
-				d.NL();
+        if ( IsFunc(id->GetType()->Tag()) ) {
+            string s = comments[i];
 
-			d.Add(s.c_str());
-			}
-		else
-			d.Add(comments[i].c_str());
-		}
+            if ( prettify_params(s) )
+                d.NL();
 
-	return d.Description();
-	}
+            d.Add(s.c_str());
+        }
+        else
+            d.Add(comments[i].c_str());
+    }
 
-time_t IdentifierInfo::DoGetModificationTime() const
-	{
-	// Could probably get away with just checking the set of scripts that
-	// contributed to the ID declaration/redefinitions, but this is easier...
-	return declaring_script->GetModificationTime();
-	}
+    return d.Description();
+}
+
+time_t IdentifierInfo::DoGetModificationTime() const {
+    // Could probably get away with just checking the set of scripts that
+    // contributed to the ID declaration/redefinitions, but this is easier...
+    if ( declaring_script )
+        return declaring_script->GetModificationTime();
+
+    return 0;
+}
 
 IdentifierInfo::Redefinition::Redefinition(std::string arg_script, zeek::detail::InitClass arg_ic,
-                                           zeek::detail::ExprPtr arg_expr,
-                                           std::vector<std::string> arg_comments)
-	: from_script(std::move(arg_script)), ic(arg_ic), init_expr(std::move(arg_expr)),
-	  comments(std::move(arg_comments))
-	{
-	}
+                                           zeek::detail::ExprPtr arg_expr, std::vector<std::string> arg_comments,
+                                           bool arg_omit_value)
+    : from_script(std::move(arg_script)),
+      ic(arg_ic),
+      init_expr(std::move(arg_expr)),
+      comments(std::move(arg_comments)),
+      omit_value(arg_omit_value) {}
 
 IdentifierInfo::Redefinition::~Redefinition() = default;
 
-IdentifierInfo::RecordField::~RecordField()
-	{
-	delete field;
-	}
+IdentifierInfo::RecordField::~RecordField() { delete field; }
 
-	} // namespace zeek::zeekygen::detail
+} // namespace zeek::zeekygen::detail

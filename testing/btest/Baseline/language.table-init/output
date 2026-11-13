@@ -9,3 +9,18 @@ global table default
 [3] = three
 }
 local table default
+{
+
+}
+{
+[4] = [1],
+[5] = []
+}
+{
+[4] = {
+1
+},
+[5] = {
+
+}
+}

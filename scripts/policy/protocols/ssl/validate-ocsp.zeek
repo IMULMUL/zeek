@@ -1,6 +1,6 @@
 ##! Perform validation of stapled OCSP responses.
 #!
-#! Note: this _only_ performs validation of stapled OCSP responsed. It does
+#! Note: this _only_ performs validation of stapled OCSP responded. It does
 #! not validate OCSP responses that are retrieved via HTTP, because we do not
 #! have a mapping to certificates.
 
@@ -31,7 +31,7 @@ export {
 # certificate chain is seen.
 global recently_ocsp_validated: table[string] of string = table() &read_expire=5mins;
 
-event ssl_stapled_ocsp(c: connection, is_orig: bool, response: string) &priority=3
+event ssl_stapled_ocsp(c: connection, is_client: bool, response: string) &priority=3
 	{
 	c$ssl$ocsp_response = response;
 	}
@@ -68,8 +68,8 @@ event ssl_established(c: connection) &priority=3
 	if( result$result_string != "good" )
 		{
 		local message = fmt("OCSP response validation failed with (%s)", result$result_string);
-		NOTICE([$note=Invalid_Ocsp_Response, $msg=message,
-		        $sub=c$ssl$subject, $conn=c,
-		        $identifier=cat(c$id$resp_h,c$id$resp_p,c$ssl$ocsp_status)]);
+		NOTICE(Notice::Info($note=Invalid_Ocsp_Response, $msg=message,
+		                    $sub=c$ssl$subject, $conn=c,
+		                    $identifier=cat(c$id$resp_h,c$id$resp_p,c$ssl$ocsp_status)));
 		}
 	}

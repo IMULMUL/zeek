@@ -2,6 +2,7 @@
 
 %extern{
 #include "zeek/ZeekString.h"
+#include "zeek/analyzer/protocol/ssh/types.bif.h"
 %}
 
 # Common constructs across SSH1 and SSH2
@@ -20,25 +21,43 @@ proc: bool = $context.connection.inc_encrypted_byte_count_in_current_segment();
 };
 
 type SSH_PDU(is_orig: bool) = case $context.connection.get_state(is_orig) of {
-	VERSION_EXCHANGE -> version   : SSH_Version(is_orig);
+	VERSION_EXCHANGE -> version   : SSH_Version_Switch(is_orig);
 	ENCRYPTED        -> encrypted : EncryptedByte(is_orig);
 	default          -> kex       : SSH_Key_Exchange(is_orig);
 } &byteorder=bigendian;
 
-type SSH_Version(is_orig: bool) = record {
-	version : bytestring &oneline;
+type SSH_Version_Switch(is_orig: bool) = case is_orig of {
+	true -> client_version : SSH_Version_Client;
+	false -> server_version: SSH_Version_Server;
+};
+
+# SSH servers can have banners before their SSH version. Which... fun.
+type SSH_Version_Server = record {
+	version: RE/(SSH-.*)?/;
+	# only UTF-8 data. This doesn't catch all bad cases, but some
+	nonversiondata: RE/([^[\xC0-\xC1]|[\xF5-\xFF]])*/;
 } &let {
-	update_state   : bool = $context.connection.update_state(KEX_INIT, is_orig);
-	update_version : bool = $context.connection.update_version(version, is_orig);
+	update_state   : bool = $context.connection.update_state(KEX_INIT, false) &if(sizeof(version) > 0);
+	update_version : bool = $context.connection.update_version(version, false) &if(sizeof(version) > 0);
+} &oneline;
+
+# SSH clients _always_ have to send a line starting with SSH- first.
+type SSH_Version_Client = record {
+	version : RE/SSH-.*/ &oneline;
+} &let {
+	update_state   : bool = $context.connection.update_state(KEX_INIT, true);
+	update_version : bool = $context.connection.update_version(version, true);
 };
 
 type SSH_Key_Exchange(is_orig: bool) = record {
 	packet_length: uint32;
 	key_ex: case $context.connection.get_version() of {
-		SSH1 -> ssh1_msg : SSH1_Key_Exchange(is_orig, packet_length);
-		SSH2 -> ssh2_msg : SSH2_Key_Exchange(is_orig, packet_length);
-	};
-} &length = $context.flow.get_kex_length($context.connection.get_version(), packet_length);
+		SSH1 -> ssh1_msg : SSH1_Key_Exchange(is_orig, capped_packet_length);
+		SSH2 -> ssh2_msg : SSH2_Key_Exchange(is_orig, capped_packet_length);
+	} &requires(capped_packet_length);
+} &let {
+	capped_packet_length: uint32 = context.flow.cap_packet_length(packet_length);
+} &length = $context.flow.get_kex_length($context.connection.get_version(), capped_packet_length);
 
 # SSH1 constructs
 #################
@@ -130,7 +149,7 @@ type SSH2_KEXINIT(length: uint32, is_orig: bool) = record {
 # KEX_DH exchanges
 
 type SSH2_Key_Exchange_DH_Message(is_orig: bool, msg_type: uint8, length: uint32) = case msg_type of {
-	SSH_MSG_KEXDH_INIT  -> init   : SSH2_DH_GEX_INIT(length);
+	SSH_MSG_KEXDH_INIT  -> init   : SSH2_DH_GEX_INIT(length, is_orig);
 	SSH_MSG_KEXDH_REPLY -> reply  : SSH2_DH_GEX_REPLY(length);
 	default             -> unknown: bytestring &length=length &transient;
 };
@@ -141,7 +160,7 @@ type SSH2_Key_Exchange_DH_GEX_Message(is_orig: bool, msg_type: uint8, length: ui
 	SSH_MSG_KEX_DH_GEX_REQUEST_OLD -> request_old : SSH2_DH_GEX_REQUEST_OLD;
 	SSH_MSG_KEX_DH_GEX_REQUEST     -> request     : SSH2_DH_GEX_REQUEST;
 	SSH_MSG_KEX_DH_GEX_GROUP       -> group       : SSH2_DH_GEX_GROUP(length);
-	SSH_MSG_KEX_DH_GEX_INIT        -> init        : SSH2_DH_GEX_INIT(length);
+	SSH_MSG_KEX_DH_GEX_INIT        -> init        : SSH2_DH_GEX_INIT(length, is_orig);
 	SSH_MSG_KEX_DH_GEX_REPLY       -> reply       : SSH2_DH_GEX_REPLY(length);
 	default                        -> unknown     : bytestring &length=length &transient;
 };
@@ -161,7 +180,7 @@ type SSH2_DH_GEX_GROUP(length: uint32) = record {
 	g : ssh_string;
 } &length=length;
 
-type SSH2_DH_GEX_INIT(length: uint32) = record {
+type SSH2_DH_GEX_INIT(length: uint32, is_orig: bool) = record {
 	e : ssh_string;
 } &length=length;
 
@@ -175,7 +194,7 @@ type SSH2_DH_GEX_REPLY(length: uint32) = record {
 
 type SSH2_Key_Exchange_RSA_Message(is_orig: bool, msg_type: uint8, length: uint32) = case msg_type of {
 	SSH_MSG_KEXRSA_PUBKEY -> pubkey : SSH2_RSA_PUBKEY(length);
-	SSH_MSG_KEXRSA_SECRET -> secret : SSH2_RSA_SECRET(length);
+	SSH_MSG_KEXRSA_SECRET -> secret : SSH2_RSA_SECRET(length, is_orig);
 	SSH_MSG_KEXRSA_DONE   -> done   : SSH2_RSA_DONE(length);
 };
 
@@ -184,7 +203,7 @@ type SSH2_RSA_PUBKEY(length: uint32) = record {
 	k_t : ssh_string;
 } &length=length;
 
-type SSH2_RSA_SECRET(length: uint32) = record {
+type SSH2_RSA_SECRET(length: uint32, is_orig: bool) = record {
 	encrypted_payload : ssh_string;
 } &length=length;
 
@@ -195,7 +214,7 @@ type SSH2_RSA_DONE(length: uint32) = record {
 # KEX_GSS exchanges
 
 type SSH2_Key_Exchange_GSS_Message(is_orig: bool, msg_type: uint8, length: uint32) = case msg_type of {
-	SSH_MSG_KEXGSS_INIT     -> init     : SSH2_GSS_INIT(length);
+	SSH_MSG_KEXGSS_INIT     -> init     : SSH2_GSS_INIT(length, is_orig);
 	SSH_MSG_KEXGSS_CONTINUE -> cont     : SSH2_GSS_CONTINUE(length);
 	SSH_MSG_KEXGSS_COMPLETE -> complete : SSH2_GSS_COMPLETE(length);
 	SSH_MSG_KEXGSS_HOSTKEY  -> hostkey  : SSH2_GSS_HOSTKEY(length);
@@ -204,7 +223,7 @@ type SSH2_Key_Exchange_GSS_Message(is_orig: bool, msg_type: uint8, length: uint3
 	SSH_MSG_KEXGSS_GROUP    -> group    : SSH2_DH_GEX_GROUP(length);
 };
 
-type SSH2_GSS_INIT(length: uint32) = record {
+type SSH2_GSS_INIT(length: uint32, is_orig: bool) = record {
 	output_token : ssh_string;
 	e            : ssh_string;
 } &length=length;
@@ -237,19 +256,19 @@ type SSH2_GSS_ERROR(length: uint32) = record {
 # KEX_ECDH and KEX_ECMQV exchanges
 
 type SSH2_Key_Exchange_ECC_Message(is_orig: bool, msg_type: uint8, length: uint32) = case msg_type of {
-	SSH_MSG_KEX_ECDH_INIT  -> init  : SSH2_ECC_INIT(length);
-	SSH_MSG_KEX_ECDH_REPLY -> reply : SSH2_ECC_REPLY(length);
+	SSH_MSG_KEX_ECDH_INIT  -> init  : SSH2_ECC_INIT(length, is_orig);
+	SSH_MSG_KEX_ECDH_REPLY -> reply : SSH2_ECC_REPLY(length, is_orig);
 };
 
 # This deviates from the RFC. SSH_MSG_KEX_ECDH_INIT and
 # SSH_MSG_KEX_ECMQV_INIT can be parsed the same way.
-type SSH2_ECC_INIT(length: uint32) = record {
+type SSH2_ECC_INIT(length: uint32, is_orig: bool) = record {
 	q_c : ssh_string;
 };
 
 # This deviates from the RFC. SSH_MSG_KEX_ECDH_REPLY and
 # SSH_MSG_KEX_ECMQV_REPLY can be parsed the same way.
-type SSH2_ECC_REPLY(length: uint32) = record {
+type SSH2_ECC_REPLY(length: uint32, is_orig: bool) = record {
 	k_s       : ssh_string;
 	q_s       : ssh_string;
 	signature : ssh_string;
@@ -259,8 +278,10 @@ type SSH2_ECC_REPLY(length: uint32) = record {
 
 type ssh_string = record {
 	len : uint32;
-	val : bytestring &length=len;
-};
+	val : bytestring &length=capped_len;
+} &let {
+	capped_len = context.flow.cap_string_length(len);
+}
 
 type ssh_host_key = record {
 	len      : uint32;
@@ -355,14 +376,14 @@ refine connection SSH_Conn += {
 		%{
 		if ( v.length() >= 5 )
 			{
-			if ( v[4] == '2' )
+			if ( v[4] != '1' )
 				{
 				if ( is_orig )
 					version_client_ = SSH2;
 				else
 					version_server_ = SSH2;
 				}
-			if ( v[4] == '1' )
+			else
 				{
 				if ( v.length() >= 8 && v[6] == '9' && v[7] == '9' )
 					{
@@ -381,59 +402,35 @@ refine connection SSH_Conn += {
 				}
 			}
 
-			if ( version_server_ == version_client_ )
-				{
-				// SSH199 vs SSH199 -> 2
-				if (version_server_ == SSH199 )
-					version_ = SSH2;
-				else
-					version_ = version_server_;
-				}
-			// SSH1 vs SSH2 -> Undefined
-			else if ( version_client_ == SSH1 && version_server_ == SSH2 )
-				version_ = UNK;
-			// SSH2 vs SSH1 -> Undefined
-			else if ( version_client_ == SSH2 && version_server_ == SSH1 )
-				version_ = UNK;
-			// SSH199 vs SSH2 -> 2
-			else if ( version_client_ == SSH199 && version_server_ == SSH2 )
+		if ( version_server_ == version_client_ )
+			{
+			// SSH199 vs SSH199 -> 2
+			if (version_server_ == SSH199 )
+				version_ = SSH2;
+			else
 				version_ = version_server_;
-			// SSH2 vs SSH199 -> 2
-			else if ( version_client_ == SSH2 && version_server_ == SSH199 )
-				version_ = version_client_;
-			// SSH1 vs SSH199 -> 1
-			else if ( version_client_ == SSH1 && version_server_ == SSH199 )
-				version_ = version_client_;
-			// SSH199 vs SSH1 -> 1
-			else if ( version_client_ == SSH199 && version_server_ == SSH1 )
-				version_ = version_server_;
-
+			}
+		// SSH1 vs SSH2 -> Undefined
+		// NOLINTBEGIN(bugprone-branch-clone)
+		else if ( version_client_ == SSH1 && version_server_ == SSH2 )
+			version_ = UNK;
+		// SSH2 vs SSH1 -> Undefined
+		else if ( version_client_ == SSH2 && version_server_ == SSH1 )
+			version_ = UNK;
+		// SSH199 vs SSH2 -> 2
+		else if ( version_client_ == SSH199 && version_server_ == SSH2 )
+			version_ = version_server_;
+		// SSH2 vs SSH199 -> 2
+		else if ( version_client_ == SSH2 && version_server_ == SSH199 )
+			version_ = version_client_;
+		// SSH1 vs SSH199 -> 1
+		else if ( version_client_ == SSH1 && version_server_ == SSH199 )
+			version_ = version_client_;
+		// SSH199 vs SSH1 -> 1
+		else if ( version_client_ == SSH199 && version_server_ == SSH1 )
+			version_ = version_server_;
+		// NOLINTEND(bugprone-branch-clone)
 		return true;
-		%}
-
-	function update_kex_state_if_equal(s: string, to_state: state) : bool
-		%{
-		if ( std_str(kex_algorithm_).compare(s) == 0 )
-			{
-			update_state(to_state, true);
-			update_state(to_state, false);
-			return true;
-			}
-		return false;
-		%}
-
-	function update_kex_state_if_startswith(s: string, to_state: state) : bool
-		%{
-		if ( (uint) kex_algorithm_.length() < s.length() )
-			return false;
-
-		if ( std_str(kex_algorithm_).substr(0, s.length()).compare(s) == 0 )
-			{
-			update_state(to_state, true);
-			update_state(to_state, false);
-			return true;
-			}
-		return false;
 		%}
 
 	function update_kex(algs: bytestring, orig: bool) : bool
@@ -449,59 +446,58 @@ refine connection SSH_Conn += {
 		else if ( kex_orig_ == orig )
 			return false;
 
-		auto client_list = name_list_to_vector(orig ? algs             : kex_algs_cache_);
-		auto server_list = name_list_to_vector(orig ? kex_algs_cache_  : algs);
+		auto to_sv = [](const auto& bs) -> std::string_view {
+			return {reinterpret_cast<const char*>(bs.begin()),
+			        static_cast<size_t>(bs.length())};
+		};
 
-		for ( unsigned int i = 0; i < client_list->Size(); ++i )
-			{
-			for ( unsigned int j = 0; j < server_list->Size(); ++j )
-				{
-				if ( *(client_list->StringAt(i)) == *(server_list->StringAt(j)) )
-					{
-					kex_algorithm_.free();
-					kex_algorithm_.init((const uint8 *) client_list->StringAt(i)->Bytes(),
-						client_list->StringAt(i)->Len());
+		auto client_algs_vec = zeek::util::tokenize_string(to_sv(orig ? algs : kex_algs_cache_), ',');
+		auto server_algs_vec = zeek::util::tokenize_string(to_sv(orig ? kex_algs_cache_ : algs), ',');
 
-					// UNTESTED
-					if ( update_kex_state_if_equal("rsa1024-sha1", KEX_RSA) )
-						return true;
-					// UNTESTED
-					if ( update_kex_state_if_equal("rsa2048-sha256", KEX_RSA) )
-						return true;
+		const size_t max_algs = zeek::BifConst::SSH::max_kexinit_kex_algorithms;
 
-					// UNTESTED
-					if ( update_kex_state_if_equal("diffie-hellman-group1-sha1", KEX_DH) )
-						return true;
-					// UNTESTED
-					if ( update_kex_state_if_equal("diffie-hellman-group14-sha1", KEX_DH) )
-						return true;
+		// Cap before creating the lookup table below. This creates
+		// weirds in ssh-analyzer when creating the ssh_capabilities
+		// event parameters.
+		if ( max_algs > 0 ) {
+			if ( client_algs_vec.size() > max_algs )
+				client_algs_vec.resize(max_algs);
 
-					if ( update_kex_state_if_equal("diffie-hellman-group-exchange-sha1", KEX_DH_GEX) )
-						return true;
-					if ( update_kex_state_if_equal("diffie-hellman-group-exchange-sha256", KEX_DH_GEX) )
-						return true;
+			if ( server_algs_vec.size() > max_algs )
+				server_algs_vec.resize(max_algs);
+		}
 
-					if ( update_kex_state_if_startswith("gss-group1-sha1-", KEX_GSS) )
-						return true;
-					if ( update_kex_state_if_startswith("gss-group14-sha1-", KEX_GSS) )
-						return true;
-					if ( update_kex_state_if_startswith("gss-gex-sha1-", KEX_GSS) )
-						return true;
-					if ( update_kex_state_if_startswith("gss-", KEX_GSS) )
-						return true;
+		std::set server_algs_set(server_algs_vec.begin(), server_algs_vec.end());
 
-					if ( update_kex_state_if_startswith("ecdh-sha2-", KEX_ECC) )
-						return true;
-					if ( update_kex_state_if_equal("ecmqv-sha2", KEX_ECC) )
-						return true;
-					if ( update_kex_state_if_startswith("curve25519-sha256", KEX_ECC) )
-						return true;
+		for ( auto client_alg : client_algs_vec ) {
+			if ( server_algs_set.contains(client_alg) ) {
+				kex_algorithm_.free();
+				kex_algorithm_.init(reinterpret_cast<const uint8*>(client_alg.data()), static_cast<int>(client_alg.size()));
 
+				// Look up the negotiated method's family in the script-land table
+				// SSH::kex_methods
+				static const auto kex_methods = zeek::id::find_const<zeek::TableVal>("SSH::kex_methods");
+				auto methods = kex_methods->LookupPattern(client_alg);
 
+				state to_state;
+				// Map explicitly rather than casting: a cast would require SSH::KexMethod
+				// (types.bif) and the state enum (consts.pac) to share values, which could
+				// silently drift apart without a compiler error.
+				switch ( methods->Size() > 0 ? methods->ValAt(0)->AsEnum() : -1 ) {
+				case zeek::BifEnum::SSH::KEX_DH: to_state = KEX_DH; break;
+				case zeek::BifEnum::SSH::KEX_DH_GEX: to_state = KEX_DH_GEX; break;
+				case zeek::BifEnum::SSH::KEX_ECC: to_state = KEX_ECC; break;
+				case zeek::BifEnum::SSH::KEX_GSS: to_state = KEX_GSS; break;
+				case zeek::BifEnum::SSH::KEX_RSA: to_state = KEX_RSA; break;
+				default:
 					zeek_analyzer()->Weird("ssh_unknown_kex_algorithm", c_str(kex_algorithm_));
-					return true;
+					return false;
+				}
+				// Both directions continue with the negotiated method
+				update_state(to_state, true);
+				update_state(to_state, false);
+				return true;
 
-					}
 				}
 			}
 

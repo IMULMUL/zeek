@@ -8,24 +8,24 @@ type SSLRecord(is_orig: bool) = record {
 	head2 : uint8;
 	head3 : uint8;
 	head4 : uint8;
-	rec : RecordText(this)[] &length=length, &requires(version,content_type,raw_tls_version);
+	rec : RecordText(this)[] &length=length, &requires(record_layer_version,content_type,raw_tls_version);
 } &length = length+5, &byteorder=bigendian,
 	&let {
-	version : int =
+	record_layer_version : int =
 		$context.connection.determine_ssl_record_layer(head0, head1, head2, head3, head4, is_orig);
 
 	# unmodified tls record layer version of this packet. Do not use this if you are parsing SSLv2
-	raw_tls_version: uint16 = case version of {
+	raw_tls_version: uint16 = case record_layer_version of {
 		SSLv20 -> 0;
 		default -> (head1<<8) | head2;
 	} &requires(version);
 
-	content_type : int = case version of {
+	content_type : int = case record_layer_version of {
 		SSLv20 -> head2+300;
 		default -> head0;
 	} &requires(version);
 
-	length : int = case version of {
+	length : int = case record_layer_version of {
 		# fail analyzer if the packet cannot be recognized as TLS.
 		UNKNOWN_VERSION -> 0;
 		SSLv20 -> (((head0 & 0x7f) << 8) | head1) - 3;
@@ -77,7 +77,7 @@ type V2ClientHello(rec: SSLRecord) = record {
 	session_id : uint8[session_len];
 	challenge : bytestring &length = chal_len;
 } &length = 6 + csuit_len + session_len + chal_len, &let {
-	client_version : int = rec.version;
+	client_version : int = (rec.head3 << 8) | rec.head4;
 };
 
 
@@ -91,10 +91,10 @@ type V2ServerHello(rec: SSLRecord) = record {
 	#cert_type : uint8;
 	server_version : uint16;
 	cert_len : uint16;
-	ciph_len : uint16;
+	ciphers_len : uint16;
 	conn_id_len : uint16;
 	cert_data : bytestring &length = cert_len;
-	ciphers : uint24[ciph_len/3];
+	ciphers : uint24[ciphers_len/3];
 	conn_id_data : bytestring &length = conn_id_len;
 } &let {
 	session_id_hit : uint8 = rec.head3;
@@ -171,7 +171,7 @@ refine connection SSL_Conn += {
 		// some sort of TLS1.3. So - let's do it this way round instead.
 		if ( negotiated_version != SSLv20 && negotiated_version != SSLv30 && negotiated_version != TLSv10 && negotiated_version != TLSv11 && negotiated_version != TLSv12 )
 			{
-			// well, it seems like this is a TLS 1.3 (or equivalent) applicatio data packet. Let's enable encryption
+			// well, it seems like this is a TLS 1.3 (or equivalent) application data packet. Let's enable encryption
 			// and handle it as encrypted.
 			startEncryption(is_orig);
 			return STATE_ENCRYPTED;
@@ -183,7 +183,7 @@ refine connection SSL_Conn += {
 	function determine_ssl_record_layer(head0 : uint8, head1 : uint8,
 					head2 : uint8, head3: uint8, head4: uint8, is_orig: bool) : int
 		%{
-		// stop processing if we already had a protocol violation or otherwhise
+		// stop processing if we already had a protocol violation or otherwise
 		// decided that we do not want to parse anymore. Just setting skip is not
 		// enough for the data that is already in the pipe.
 		if ( zeek_analyzer()->Skipping() )

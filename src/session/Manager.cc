@@ -2,344 +2,261 @@
 
 #include "zeek/session/Manager.h"
 
-#include "zeek/zeek-config.h"
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pcap.h>
-#include <stdlib.h>
-#include <unistd.h>
+#include <algorithm>
+#include <cstddef>
+#include <cstdlib>
 
-#include "zeek/Desc.h"
-#include "zeek/Event.h"
-#include "zeek/NetVar.h"
+#include "zeek/Conn.h"
+#include "zeek/Func.h"
+#include "zeek/IP.h"
 #include "zeek/Reporter.h"
 #include "zeek/RuleMatcher.h"
 #include "zeek/RunState.h"
+#include "zeek/Stats.h"
 #include "zeek/Timer.h"
 #include "zeek/TunnelEncapsulation.h"
-#include "zeek/analyzer/Manager.h"
-#include "zeek/iosource/IOSource.h"
+#include "zeek/conn_key/Manager.h"
 #include "zeek/packet_analysis/Manager.h"
 #include "zeek/session/Session.h"
 #include "zeek/telemetry/Manager.h"
+#include "zeek/util.h"
 
 zeek::session::Manager* zeek::session_mgr = nullptr;
-zeek::session::Manager*& zeek::sessions = zeek::session_mgr;
 
-namespace zeek::session
-	{
-namespace detail
-	{
+namespace zeek::session {
+namespace detail {
 
-class ProtocolStats
-	{
-
+class ProtocolStats {
 public:
-	struct Protocol
-		{
-		telemetry::IntGauge active;
-		telemetry::IntCounter total;
-		ssize_t max = 0;
+    struct Protocol {
+        std::shared_ptr<telemetry::Gauge> active;
+        std::shared_ptr<telemetry::Counter> total;
+        ptrdiff_t max = 0;
 
-		Protocol(telemetry::IntGaugeFamily active_family, telemetry::IntCounterFamily total_family,
-		         std::string protocol)
-			: active(active_family.GetOrAdd({{"protocol", protocol}})),
-			  total(total_family.GetOrAdd({{"protocol", protocol}}))
-			{
-			}
-		};
+        Protocol(const std::shared_ptr<telemetry::GaugeFamily>& active_family,
+                 const std::shared_ptr<telemetry::CounterFamily>& total_family, std::string protocol)
+            : active(active_family->GetOrAdd({{"protocol", protocol}})),
+              total(total_family->GetOrAdd({{"protocol", protocol}})) {}
+    };
 
-	using ProtocolMap = std::map<std::string, Protocol>;
+    using ProtocolMap = std::map<std::string, Protocol>;
 
-	ProtocolMap::iterator InitCounters(const std::string& protocol)
-		{
-		telemetry::IntGaugeFamily active_family = telemetry_mgr->GaugeFamily(
-			"zeek", "active-sessions", {"protocol"}, "Active Zeek Sessions");
-		telemetry::IntCounterFamily total_family = telemetry_mgr->CounterFamily(
-			"zeek", "total-sessions", {"protocol"}, "Total number of sessions", "1", true);
+    ProtocolMap::iterator InitCounters(const std::string& protocol) {
+        auto active_family =
+            telemetry_mgr->GaugeFamily("zeek", "active_sessions", {"protocol"}, "Active Zeek Sessions");
+        auto total_family =
+            telemetry_mgr->CounterFamily("zeek", "total_sessions", {"protocol"}, "Total number of sessions");
 
-		auto [it, inserted] = entries.insert(
-			{protocol, Protocol{active_family, total_family, protocol}});
+        auto [it, inserted] = entries.insert({protocol, Protocol{active_family, total_family, protocol}});
 
-		if ( inserted )
-			return it;
+        if ( inserted )
+            return it;
 
-		return entries.end();
-		}
+        return entries.end();
+    }
 
-	Protocol* GetCounters(const std::string& protocol)
-		{
-		auto it = entries.find(protocol);
-		if ( it == entries.end() )
-			it = InitCounters(protocol);
+    Protocol* GetCounters(const std::string& protocol) {
+        auto it = entries.find(protocol);
+        if ( it == entries.end() )
+            it = InitCounters(protocol);
 
-		if ( it != entries.end() )
-			return &(it->second);
+        if ( it != entries.end() )
+            return &(it->second);
 
-		return nullptr;
-		}
+        return nullptr;
+    }
 
 private:
-	ProtocolMap entries;
-	};
+    ProtocolMap entries;
+};
 
-	} // namespace detail
+} // namespace detail
 
-Manager::Manager()
-	{
-	stats = new detail::ProtocolStats();
-	}
+Manager::Manager() {
+    stats = new detail::ProtocolStats();
+    ended_sessions_metric_family = telemetry_mgr->CounterFamily("zeek", "ended_sessions", {"reason"},
+                                                                "Number of sessions ended for specific reasons");
+    ended_by_inactivity_metric = ended_sessions_metric_family->GetOrAdd({{"reason", "inactivity"}}, []() {
+        return static_cast<double>(zeek::detail::killed_by_inactivity);
+    });
+}
 
-Manager::~Manager()
-	{
-	Clear();
-	delete stats;
-	}
+Manager::~Manager() {
+    Clear();
+    delete stats;
+}
 
-void Manager::Done() { }
+Connection* Manager::FindConnection(Val* v) {
+    // XXX: This could in the future dispatch to different factories for
+    // different kinds of Vals. ``v`` will usually be a conn_id instance, which
+    // is IP-specific. If ``v`` is something else, maybe we'd like to use a
+    // different builder.
+    auto r = conn_key_mgr->GetFactory().ConnKeyFromVal(*v);
 
-Connection* Manager::FindConnection(Val* v)
-	{
-	zeek::detail::ConnKey conn_key(v);
+    if ( ! r.has_value() ) {
+        // Produce a loud error for invalid script-layer conn_id records.
+        zeek::emit_builtin_error(r.error().c_str());
+        return nullptr;
+    }
 
-	if ( ! conn_key.valid )
-		return nullptr;
+    return FindConnection(*r.value());
+}
 
-	return FindConnection(conn_key);
-	}
+Connection* Manager::FindConnection(const zeek::ConnKey& conn_key) {
+    auto key = conn_key.SessionKey();
 
-Connection* Manager::FindConnection(const zeek::detail::ConnKey& conn_key)
-	{
-	detail::Key key(&conn_key, sizeof(conn_key), detail::Key::CONNECTION_KEY_TYPE, false);
+    auto it = session_map.find(key);
+    if ( it != session_map.end() )
+        return static_cast<Connection*>(it->second);
 
-	auto it = session_map.find(key);
-	if ( it != session_map.end() )
-		return static_cast<Connection*>(it->second);
+    return nullptr;
+}
 
-	return nullptr;
-	}
+void Manager::Remove(Session* s) {
+    if ( s->IsInSessionTable() ) {
+        s->CancelTimers();
+        s->Done();
+        s->RemovalEvent();
 
-void Manager::Remove(Session* s)
-	{
-	if ( s->IsInSessionTable() )
-		{
-		s->CancelTimers();
-		s->Done();
-		s->RemovalEvent();
+        detail::Key key = s->SessionKey(false);
 
-		detail::Key key = s->SessionKey(false);
+        if ( session_map.erase(key) == 0 )
+            reporter->InternalWarning("connection missing");
+        else {
+            Connection* c = static_cast<Connection*>(s);
+            if ( auto* stat_block = stats->GetCounters(c->TransportIdentifier()) )
+                stat_block->active->Dec();
+        }
 
-		if ( session_map.erase(key) == 0 )
-			reporter->InternalWarning("connection missing");
-		else
-			{
-			Connection* c = static_cast<Connection*>(s);
-			if ( auto* stat_block = stats->GetCounters(c->TransportIdentifier()) )
-				stat_block->active.Dec();
-			}
+        // Mark that the session isn't in the table so that in case the
+        // session has been Ref()'d somewhere, we know that on a future
+        // call to Remove() that it's no longer in the map.
+        s->SetInSessionTable(false);
 
-		// Mark that the session isn't in the table so that in case the
-		// session has been Ref()'d somewhere, we know that on a future
-		// call to Remove() that it's no longer in the map.
-		s->SetInSessionTable(false);
+        Unref(s);
+    }
+}
 
-		Unref(s);
-		}
-	}
+void Manager::Insert(Session* s, bool remove_existing) {
+    Session* old = nullptr;
+    detail::Key key = s->SessionKey(true);
 
-void Manager::Insert(Session* s, bool remove_existing)
-	{
-	Session* old = nullptr;
-	detail::Key key = s->SessionKey(true);
+    if ( remove_existing ) {
+        auto it = session_map.find(key);
+        if ( it != session_map.end() )
+            old = it->second;
 
-	if ( remove_existing )
-		{
-		auto it = session_map.find(key);
-		if ( it != session_map.end() )
-			old = it->second;
+        session_map.erase(key);
+    }
 
-		session_map.erase(key);
-		}
+    InsertSession(std::move(key), s);
 
-	InsertSession(std::move(key), s);
+    if ( old && old != s ) {
+        // Some clean-ups similar to those in Remove() (but invisible
+        // to the script layer).
+        old->CancelTimers();
+        old->SetInSessionTable(false);
+        Unref(old);
+    }
+}
 
-	if ( old && old != s )
-		{
-		// Some clean-ups similar to those in Remove() (but invisible
-		// to the script layer).
-		old->CancelTimers();
-		old->SetInSessionTable(false);
-		Unref(old);
-		}
-	}
+void Manager::Drain() {
+    // If a random seed was passed in, we're most likely in testing mode and need the
+    // order of the sessions to be consistent. Sort the keys to force that order
+    // every run.
+    if ( zeek::util::detail::have_random_seed() ) {
+        std::vector<const detail::Key*> keys;
+        keys.reserve(session_map.size());
 
-void Manager::Drain()
-	{
-	// If a random seed was passed in, we're most likely in testing mode and need the
-	// order of the sessions to be consistent. Sort the keys to force that order
-	// every run.
-	if ( zeek::util::detail::have_random_seed() )
-		{
-		std::vector<const detail::Key*> keys;
-		keys.reserve(session_map.size());
+        for ( auto& entry : session_map )
+            keys.push_back(&(entry.first));
+        std::ranges::sort(keys, [](const detail::Key* a, const detail::Key* b) { return *a < *b; });
 
-		for ( auto& entry : session_map )
-			keys.push_back(&(entry.first));
-		std::sort(keys.begin(), keys.end(),
-		          [](const detail::Key* a, const detail::Key* b)
-		          {
-					  return *a < *b;
-				  });
+        for ( const auto* k : keys ) {
+            Session* tc = session_map.at(*k);
+            tc->Done();
+            tc->RemovalEvent();
+        }
+    }
+    else {
+        for ( const auto& entry : session_map ) {
+            Session* tc = entry.second;
+            tc->Done();
+            tc->RemovalEvent();
+        }
+    }
+}
 
-		for ( const auto* k : keys )
-			{
-			Session* tc = session_map.at(*k);
-			tc->Done();
-			tc->RemovalEvent();
-			}
-		}
-	else
-		{
-		for ( const auto& entry : session_map )
-			{
-			Session* tc = entry.second;
-			tc->Done();
-			tc->RemovalEvent();
-			}
-		}
-	}
+void Manager::Clear() {
+    for ( const auto& entry : session_map )
+        Unref(entry.second);
 
-void Manager::Clear()
-	{
-	for ( const auto& entry : session_map )
-		Unref(entry.second);
+    session_map.clear();
 
-	session_map.clear();
+    zeek::detail::fragment_mgr->Clear();
+}
 
-	zeek::detail::fragment_mgr->Clear();
-	}
+void Manager::GetStats(Stats& s) {
+    auto* tcp_stats = stats->GetCounters("tcp");
+    s.max_TCP_conns = tcp_stats->max;
+    s.num_TCP_conns = tcp_stats->active->Value();
+    s.cumulative_TCP_conns = tcp_stats->total->Value();
 
-void Manager::GetStats(Stats& s)
-	{
-	auto* tcp_stats = stats->GetCounters("tcp");
-	s.max_TCP_conns = tcp_stats->max;
-	s.num_TCP_conns = tcp_stats->active.Value();
-	s.cumulative_TCP_conns = tcp_stats->total.Value();
+    auto* udp_stats = stats->GetCounters("udp");
+    s.max_UDP_conns = udp_stats->max;
+    s.num_UDP_conns = udp_stats->active->Value();
+    s.cumulative_UDP_conns = udp_stats->total->Value();
 
-	auto* udp_stats = stats->GetCounters("udp");
-	s.max_UDP_conns = udp_stats->max;
-	s.num_UDP_conns = udp_stats->active.Value();
-	s.cumulative_UDP_conns = udp_stats->total.Value();
+    auto* icmp_stats = stats->GetCounters("icmp");
+    s.max_ICMP_conns = icmp_stats->max;
+    s.num_ICMP_conns = icmp_stats->active->Value();
+    s.cumulative_ICMP_conns = icmp_stats->total->Value();
 
-	auto* icmp_stats = stats->GetCounters("icmp");
-	s.max_ICMP_conns = icmp_stats->max;
-	s.num_ICMP_conns = icmp_stats->active.Value();
-	s.cumulative_ICMP_conns = icmp_stats->total.Value();
+    s.num_fragments = zeek::detail::fragment_mgr->Size();
+    s.max_fragments = zeek::detail::fragment_mgr->MaxFragments();
+    s.num_packets = packet_mgr->PacketsProcessed();
+    s.num_packets_unprocessed = packet_mgr->PacketsUnprocessed();
+}
 
-	s.num_fragments = zeek::detail::fragment_mgr->Size();
-	s.max_fragments = zeek::detail::fragment_mgr->MaxFragments();
-	s.num_packets = packet_mgr->PacketsProcessed();
-	}
+void Manager::Weird(const char* name, const Packet* pkt, const char* addl, const char* source) {
+    const char* weird_name = name;
 
-void Manager::Weird(const char* name, const Packet* pkt, const char* addl, const char* source)
-	{
-	const char* weird_name = name;
+    if ( pkt ) {
+        pkt->dump_packet = true;
 
-	if ( pkt )
-		{
-		pkt->dump_packet = true;
+        if ( pkt->encap && pkt->encap->LastType() != BifEnum::Tunnel::NONE )
+            weird_name = util::fmt("%s_in_tunnel", name);
 
-		if ( pkt->encap && pkt->encap->LastType() != BifEnum::Tunnel::NONE )
-			weird_name = util::fmt("%s_in_tunnel", name);
+        if ( pkt->ip_hdr ) {
+            reporter->Weird(pkt->ip_hdr->SrcAddr(), pkt->ip_hdr->DstAddr(), weird_name, addl, source);
+            return;
+        }
+    }
 
-		if ( pkt->ip_hdr )
-			{
-			reporter->Weird(pkt->ip_hdr->SrcAddr(), pkt->ip_hdr->DstAddr(), weird_name, addl,
-			                source);
-			return;
-			}
-		}
+    reporter->Weird(weird_name, addl, source);
+}
 
-	reporter->Weird(weird_name, addl, source);
-	}
+void Manager::Weird(const char* name, const IP_Hdr* ip, const char* addl) {
+    reporter->Weird(ip->SrcAddr(), ip->DstAddr(), name, addl);
+}
 
-void Manager::Weird(const char* name, const IP_Hdr* ip, const char* addl)
-	{
-	reporter->Weird(ip->SrcAddr(), ip->DstAddr(), name, addl);
-	}
+void Manager::InsertSession(detail::Key key, Session* session) {
+    session->SetInSessionTable(true);
+    key.CopyData();
+    session_map.insert_or_assign(std::move(key), session);
 
-unsigned int Manager::SessionMemoryUsage()
-	{
-	unsigned int mem = 0;
+    std::string protocol = session->TransportIdentifier();
 
-	if ( run_state::terminating )
-		// Connections have been flushed already.
-		return 0;
+    if ( auto* stat_block = stats->GetCounters(protocol) ) {
+        stat_block->active->Inc();
+        stat_block->total->Inc();
 
-	for ( const auto& entry : session_map )
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-		mem += entry.second->MemoryAllocation();
-#pragma GCC diagnostic pop
+        if ( stat_block->active->Value() > stat_block->max )
+            stat_block->max++;
+    }
+}
 
-	return mem;
-	}
-
-unsigned int Manager::SessionMemoryUsageVals()
-	{
-	unsigned int mem = 0;
-
-	if ( run_state::terminating )
-		// Connections have been flushed already.
-		return 0;
-
-	for ( const auto& entry : session_map )
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-		mem += entry.second->MemoryAllocationVal();
-#pragma GCC diagnostic pop
-
-	return mem;
-	}
-
-unsigned int Manager::MemoryAllocation()
-	{
-	if ( run_state::terminating )
-		// Connections have been flushed already.
-		return 0;
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-	return SessionMemoryUsage() + padded_sizeof(*this) +
-	       (session_map.size() * (sizeof(SessionMap::key_type) + sizeof(SessionMap::value_type))) +
-	       zeek::detail::fragment_mgr->MemoryAllocation();
-	// FIXME: MemoryAllocation() not implemented for rest.
-	;
-#pragma GCC diagnostic pop
-	}
-
-void Manager::InsertSession(detail::Key key, Session* session)
-	{
-	session->SetInSessionTable(true);
-	key.CopyData();
-	session_map.insert_or_assign(std::move(key), session);
-
-	std::string protocol = session->TransportIdentifier();
-
-	if ( auto* stat_block = stats->GetCounters(protocol) )
-		{
-		stat_block->active.Inc();
-		stat_block->total.Inc();
-
-		if ( stat_block->active.Value() > stat_block->max )
-			stat_block->max++;
-		}
-	}
-
-zeek::detail::PacketFilter* Manager::GetPacketFilter(bool init)
-	{
-	return packet_mgr->GetPacketFilter(init);
-	}
-
-	} // namespace zeek::session
+} // namespace zeek::session

@@ -4,7 +4,7 @@
 # @TEST-EXEC: make
 # @TEST-EXEC: make install
 # @TEST-EXEC: ZEEK_PLUGIN_PATH=`pwd`/test-install zeek -NN Demo::Foo >>output
-# @TEST-EXEC: ZEEK_PLUGIN_PATH=`pwd`/test-install zeek Demo/Foo -r $TRACES/empty.trace >>output
+# @TEST-EXEC: ZEEK_PLUGIN_PATH=`pwd`/test-install zeek Demo/Foo -r $TRACES/empty.pcap >>output
 # @TEST-EXEC: TEST_DIFF_CANONIFIER= btest-diff output
 
 mkdir -p scripts/Demo/Foo/base/
@@ -39,8 +39,4 @@ function hello_plugin_world%(%): string
         %}
 
 event plugin_event%(foo: count%);
-EOF
-
-cat >activate.zeek <<EOF
-@load-plugin Demo::Foo
 EOF

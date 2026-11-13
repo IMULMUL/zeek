@@ -73,6 +73,22 @@ export {
 	## Choices are: LOCAL_HOSTS, REMOTE_HOSTS, ALL_HOSTS, NO_HOSTS.
 	option asset_tracking = LOCAL_HOSTS;
 
+	## The framework maintains per-node caches that map unparsed version
+	## strings to :zeek:type:`Software::Version` instances. This is its
+	## expiration interval.
+	const parse_cache_interval = 65secs &redef;
+
+	## The framework maintains a redundancy cache in each worker that
+	## deduplicates their version reporting in :zeek:see:`Software::found`.
+	## This is its expiration interval. Setting to 0secs disables this cache.
+	const found_cache_interval = 10mins &redef;
+
+	## For each software, each proxy maintains a per-host deduplication
+	## cache of known versions that refreshes daily. This setting caps the
+	## size of each of these caches. Exceeding the cap leads to a reset of
+	## the cache, and to redundant software.log writes. 0 disables the cap.
+	const max_software_cache_size = 20 &redef;
+
 	## Other scripts should call this function when they detect software.
 	##
 	## id: The connection id where the software was discovered.
@@ -95,21 +111,32 @@ export {
 	## even if it exposes itself with an alternate name.  The
 	## yielded string is the name that will be logged and generally
 	## used for everything.
-	global alternate_names: table[string] of string {
+	global alternate_names: table[string] of string = {
 		["Flash Player"] = "Flash",
 	} &default=function(a: string): string { return a; };
 
+
+	## Type to represent a set of software versions of the same name,
+	## tracking the most recent version explicitly.
+	type Set: record {
+		## Set of version strings, unparsed when available (for full
+		## detail) or based on a :zeek:see:`Software::Version` record.
+		versions: set[string];
+		## The most recent software info record for this set.
+		last: Info &optional;
+	};
+
 	## Type to represent a collection of :zeek:type:`Software::Info` records.
 	## It's indexed with the name of a piece of software such as "Firefox"
-	## and it yields a :zeek:type:`Software::Info` record with more
-	## information about the software.
-	type SoftwareSet: table[string] of Info;
+	## and it yields a :zeek:type:`Software::Set` with specific versions
+	## of the software.
+	type SoftwareSets: table[string] of Set;
 
 	## The set of software associated with an address.  Data expires from
 	## this table after one day by default so that a detected piece of
 	## software will be logged once each day.  In a cluster, this table is
 	## uniformly distributed among proxy nodes.
-	global tracked: table[addr] of SoftwareSet &create_expire=1day;
+	global tracked_software: table[addr] of SoftwareSets &create_expire=1day;
 
 	## This event can be handled to access the :zeek:type:`Software::Info`
 	## record as it is sent on to the logging framework.
@@ -120,14 +147,9 @@ export {
 	global version_change: event(old: Info, new: Info);
 
 	## This event is raised when software is about to be registered for
-	## tracking in :zeek:see:`Software::tracked`.
+	## tracking in :zeek:see:`Software::tracked_software`.
 	global register: event(info: Info);
 }
-
-event zeek_init() &priority=5
-	{
-	Log::create_stream(Software::LOG, [$columns=Info, $ev=log_software, $path="software", $policy=log_policy]);
-	}
 
 type Description: record {
 	name:             string;
@@ -163,7 +185,7 @@ function parse(unparsed_version: string): Description
 			else
 				v = Version($major=extract_count(vs));
 
-			return [$version=v, $unparsed_version=unparsed_version, $name=software_name];
+			return Description($version=v, $unparsed_version=unparsed_version, $name=software_name);
 			}
 		}
 	else
@@ -190,7 +212,8 @@ function parse(unparsed_version: string): Description
 			# of the version number from the previous split_all.
 			local sv = strip(version_parts[1]);
 			if ( /^[\/\-\._v\(]/ in sv )
-				sv = strip(sub(version_parts[1], /^\(?[\/\-\._v\(]/, ""));
+				sv = strip(sub(sv, /^[\/\-\._v\(]/, ""));
+
 			local version_numbers = split_string_n(sv, /[\-\._,\[\(\{ ]/, F, 3);
 			if ( 4 in version_numbers && version_numbers[4] != "" )
 				v$addl = strip(version_numbers[4]);
@@ -235,10 +258,13 @@ function parse(unparsed_version: string): Description
 			}
 		}
 
-	return [$version=v, $unparsed_version=unparsed_version, $name=alternate_names[software_name]];
+	return Description($version=v, $unparsed_version=unparsed_version, $name=alternate_names[software_name]);
 	}
 
-global parse_cache: table[string] of Description &read_expire=65secs;
+# A cache for the proxies that stores the result of parsing unparsed_version.
+global parse_cache: table[string] of Description;
+# A suppression cache for the workers to prevent sending the same information to the proxies multiple times.
+global found_cache: set[Info];
 
 # Call parse, but cache results in the parse_cache table
 function parse_with_cache(unparsed_version: string): Description
@@ -268,13 +294,13 @@ function parse_mozilla(unparsed_version: string): Description
 		{
 		software_name = "MSIE";
 		if ( /Trident\/4\.0/ in unparsed_version )
-			v = [$major=8,$minor=0];
+			v = Version($major=8,$minor=0);
 		else if ( /Trident\/5\.0/ in unparsed_version )
-			v = [$major=9,$minor=0];
+			v = Version($major=9,$minor=0);
 		else if ( /Trident\/6\.0/ in unparsed_version )
-			v = [$major=10,$minor=0];
+			v = Version($major=10,$minor=0);
 		else if ( /Trident\/7\.0/ in unparsed_version )
-			v = [$major=11,$minor=0];
+			v = Version($major=11,$minor=0);
 		else
 			{
 			parts = split_string_all(unparsed_version, /MSIE [0-9]{1,2}\.*[0-9]*b?[0-9]*/);
@@ -372,7 +398,7 @@ function parse_mozilla(unparsed_version: string): Description
 			v = parse(parts[1])$version;
 		}
 
-	return [$version=v, $unparsed_version=unparsed_version, $name=software_name];
+	return Description($version=v, $unparsed_version=unparsed_version, $name=software_name);
 	}
 
 
@@ -454,13 +480,9 @@ function cmp_versions(v1: Version, v2: Version): int
 	return 0;
 	}
 
-function software_endpoint_name(id: conn_id, host: addr): string
-	{
-	return fmt("%s %s", host, (host == id$orig_h ? "client" : "server"));
-	}
-
-# Convert a version into a string "a.b.c-x".
-function software_fmt_version(v: Version): string
+# Convert a version into a string "a.b.c-x".  Marked "&is_used" because
+# while the base scripts don't call it, the optional policy/ scripts do.
+function software_fmt_version(v: Version): string &is_used
 	{
 	return fmt("%s%s%s%s%s",
 	           v?$major ? fmt("%d", v$major) : "0",
@@ -470,10 +492,35 @@ function software_fmt_version(v: Version): string
 	           v?$addl ? fmt("-%s", v$addl) : "");
 	}
 
-# Convert a software into a string "name a.b.cx".
-function software_fmt(i: Info): string
+# Like software_fmt_version(), but preferably returns the unparsed
+# version string when available. Falls back to the parsed one otherwise,
+# and the empty string in the (unlikely) case that both fail.
+function software_fmt_unparsed_version(i: Info): string
+	{
+	if ( i?$unparsed_version )
+		return i$unparsed_version;
+	if ( i?$version )
+		return software_fmt_version(i$version);
+
+	# This isn't supposed to happen because Software::found() already checks
+	# for the presence of at least once of those fields. We do this just for
+	# robustness.
+	Reporter::error("Software::Info record has neither version nor unparsed_version");
+	return "<unknown>";
+	}
+
+# Convert a software into a string "name a.b.cx".  Same as above re "&is_used".
+function software_fmt(i: Info): string &is_used
 	{
 	return fmt("%s %s", i$name, software_fmt_version(i$version));
+	}
+
+function software_in_sets(info: Info, ss: SoftwareSets): bool
+	{
+	if ( info$name in ss && software_fmt_unparsed_version(info) in ss[info$name]$versions )
+		return T;
+
+	return F;
 	}
 
 # Parse unparsed_version if needed before raising register event
@@ -494,30 +541,37 @@ event Software::new(info: Info)
 
 event Software::register(info: Info)
 	{
+	local ss: SoftwareSets;
 
-	local ts: SoftwareSet;
-
-	if ( info$host in tracked )
-		ts = tracked[info$host];
+	if ( info$host in tracked_software )
+		ss = tracked_software[info$host];
 	else
-		ts = tracked[info$host] = SoftwareSet();
+		ss = tracked_software[info$host] = SoftwareSets();
 
 	# Software already registered for this host?  We don't want to endlessly
-	# log the same thing.
-	if ( info$name in ts )
+	# log the same thing, unless we're explicitly asked to do so.
+	if ( software_in_sets(info, ss) )
 		{
-		local old = ts[info$name];
-		local changed = cmp_versions(old$version, info$version) != 0;
-
-		if ( changed )
-			event Software::version_change(old, info);
-		else if ( ! info$force_log )
-			# If the version hasn't changed, then we're just redetecting the
-			# same thing, then we don't care.
+		if ( ! info$force_log )
 			return;
 		}
+	else
+		{
+		if ( info$name !in ss )
+			ss[info$name] = Set();
+		else
+			event Software::version_change(ss[info$name]$last, info);
 
-	ts[info$name] = info;
+		add ss[info$name]$versions[software_fmt_unparsed_version(info)];
+		ss[info$name]$last = info;
+
+		# If the set just got too large, simply start over with the
+		# newest version. We currently lack a good way to track a set
+		# and its newest/oldest members.
+		if ( max_software_cache_size > 0 && |ss[info$name]$versions| > max_software_cache_size )
+			ss[info$name]$versions = {software_fmt_unparsed_version(info)};
+		}
+
 	Log::write(Software::LOG, info);
 	}
 
@@ -525,6 +579,14 @@ function found(id: conn_id, info: Info): bool
 	{
 	if ( ! info$force_log && ! addr_matches_host(info$host, asset_tracking) )
 		return F;
+
+	# This assumes that callers do not fill in info$ts, none of the current callers do.
+	if ( found_cache_interval > 0secs )
+		{
+		if ( info in found_cache )
+			return T;
+		add found_cache[info];
+		}
 
 	if ( ! info?$ts )
 		info$ts = network_time();
@@ -550,4 +612,14 @@ function found(id: conn_id, info: Info): bool
 	@endif
 
 	return T;
+	}
+
+event zeek_init() &priority=5
+	{
+	parse_cache = table() &read_expire=parse_cache_interval;
+
+	if ( found_cache_interval > 0secs )
+		found_cache = set() &create_expire=found_cache_interval;
+
+	Log::create_stream(Software::LOG, Log::Stream($columns=Info, $ev=log_software, $path="software", $policy=log_policy));
 	}

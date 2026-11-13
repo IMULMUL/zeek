@@ -46,7 +46,7 @@ function weird_epoch_finished(ts: time)
 
 		if ( num_seen > 0.0 )
 			Log::write(LOG, Info($ts = ts, $name = n,
-			                     $num_seen = double_to_count(num_seen)));
+			                     $num_seen = num_seen as count));
 		}
 
 	last_epoch_weirds = this_epoch_weirds;
@@ -56,14 +56,14 @@ function weird_epoch_finished(ts: time)
 event zeek_init() &priority=5
 	{
 	Log::create_stream(WeirdStats::LOG,
-	                   [$columns = Info, $ev = log_weird_stats,
-	                    $path="weird_stats", $policy=log_policy]);
+	                   Log::Stream($columns = Info, $ev = log_weird_stats,
+	                               $path="weird_stats", $policy=log_policy));
 	local r1 = SumStats::Reducer($stream = "weirds.encountered",
 	                             $apply = set(SumStats::SUM));
-	SumStats::create([$name = "weirds.statistics",
-	                  $epoch = weird_stat_interval, $reducers = set(r1),
-	                  $epoch_result = weird_epoch_results,
-	                  $epoch_finished = weird_epoch_finished]);
+	SumStats::create(SumStats::SumStat($name = "weirds.statistics",
+	                                   $epoch = weird_stat_interval, $reducers = set(r1),
+	                                   $epoch_result = weird_epoch_results,
+	                                   $epoch_finished = weird_epoch_finished));
 	}
 
 module SumStats;

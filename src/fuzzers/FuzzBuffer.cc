@@ -1,90 +1,90 @@
+// See the file "COPYING" in the main distribution directory for copyright.
+
 #if ! defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
 
 #include "zeek/fuzzers/FuzzBuffer.h"
 
-#include <string.h>
+#ifdef _MSC_VER
+#include <mem.h>
+#endif
 
-namespace zeek::detail
-	{
+#include <cstring>
 
-bool FuzzBuffer::Valid(int chunk_count_limit) const
-	{
-	if ( end - begin < PKT_MAGIC_LEN + 2 )
-		return false;
+namespace zeek::detail {
 
-	if ( memcmp(begin, PKT_MAGIC, PKT_MAGIC_LEN) != 0 )
-		return false;
+bool FuzzBuffer::Valid(int chunk_count_limit) const {
+    if ( end - begin < PKT_MAGIC_LEN + 2 )
+        return false;
 
-	if ( ExceedsChunkLimit(chunk_count_limit) )
-		return false;
+    if ( memcmp(begin, PKT_MAGIC, PKT_MAGIC_LEN) != 0 )
+        return false;
 
-	return true;
-	}
+    if ( ExceedsChunkLimit(chunk_count_limit) )
+        return false;
 
-int FuzzBuffer::ChunkCount(int chunk_count_limit) const
-	{
-	auto pos = begin;
-	int chunks = 0;
+    return true;
+}
 
-	while ( pos < end && (chunks < chunk_count_limit || chunk_count_limit == 0) )
-		{
-		pos = (const unsigned char*)memmem(pos, end - pos, PKT_MAGIC, PKT_MAGIC_LEN);
-		if ( ! pos )
-			break;
+int FuzzBuffer::ChunkCount(int chunk_count_limit) const {
+    auto pos = begin;
+    int chunks = 0;
 
-		pos += PKT_MAGIC_LEN + 1;
-		chunks++;
-		}
+    while ( pos < end && (chunks < chunk_count_limit || chunk_count_limit == 0) ) {
+        pos = (const unsigned char*)memmem(pos, end - pos, PKT_MAGIC, PKT_MAGIC_LEN);
+        if ( ! pos )
+            break;
 
-	return chunks;
-	}
+        pos += PKT_MAGIC_LEN + 1;
+        chunks++;
+    }
 
-std::optional<FuzzBuffer::Chunk> FuzzBuffer::Next()
-	{
-	if ( begin == end )
-		return {};
+    return chunks;
+}
 
-	auto pos = (const unsigned char*)memmem(begin, end - begin, PKT_MAGIC, PKT_MAGIC_LEN);
+std::optional<FuzzBuffer::Chunk> FuzzBuffer::Next() {
+    if ( begin == end )
+        return {};
 
-	if ( ! pos )
-		return {};
+    auto pos = (const unsigned char*)memmem(begin, end - begin, PKT_MAGIC, PKT_MAGIC_LEN);
 
-	begin += PKT_MAGIC_LEN;
-	auto remaining = end - begin;
+    if ( ! pos )
+        return {};
 
-	if ( remaining < 2 )
-		return {};
+    begin += PKT_MAGIC_LEN;
+    auto remaining = end - begin;
 
-	Chunk rval;
-	rval.is_orig = begin[0] & 0x01;
-	begin += 1;
+    if ( remaining < 2 )
+        return {};
 
-	auto chunk_begin = begin;
+    Chunk rval;
+    rval.is_orig = begin[0] & 0x01;
+    begin += 1;
 
-	auto next = (const unsigned char*)memmem(begin, end - begin, PKT_MAGIC, PKT_MAGIC_LEN);
+    auto chunk_begin = begin;
 
-	if ( next )
-		begin = next;
-	else
-		begin = end;
+    auto next = (const unsigned char*)memmem(begin, end - begin, PKT_MAGIC, PKT_MAGIC_LEN);
 
-	rval.size = begin - chunk_begin;
+    if ( next )
+        begin = next;
+    else
+        begin = end;
 
-	if ( rval.size )
-		{
-		// The point of allocating a new buffer here is to better detect
-		// analyzers that may over-read within a chunk  -- ASan wouldn't
-		// complain if that happens to land within the full input buffer
-		// provided by the fuzzing engine, but will if we allocate a new buffer
-		// for each chunk.
-		rval.data = std::make_unique<unsigned char[]>(rval.size);
-		memcpy(rval.data.get(), chunk_begin, rval.size);
-		return {std::move(rval)};
-		}
+    rval.size = begin - chunk_begin;
 
-	return {};
-	}
+    if ( rval.size ) {
+        // The point of allocating a new buffer here is to better detect
+        // analyzers that may over-read within a chunk  -- ASan wouldn't
+        // complain if that happens to land within the full input buffer
+        // provided by the fuzzing engine, but will if we allocate a new buffer
+        // for each chunk.
+        rval.data = std::make_unique<unsigned char[]>(rval.size);
+        memcpy(rval.data.get(), chunk_begin, rval.size);
+        return {std::move(rval)};
+    }
 
-	} // namespace zeek::detail
+    return {};
+}
+
+} // namespace zeek::detail

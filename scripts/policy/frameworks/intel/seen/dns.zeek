@@ -1,10 +1,10 @@
 @load base/frameworks/intel
 @load ./where-locations
 
-event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count)
+event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count) &group="Intel::DOMAIN"
 	{
-	Intel::seen([$indicator=query,
-	             $indicator_type=Intel::DOMAIN,
-	             $conn=c,
-	             $where=DNS::IN_REQUEST]);
+	Intel::seen(Intel::Seen($indicator=query,
+	                        $indicator_type=Intel::DOMAIN,
+	                        $conn=c,
+	                        $where=DNS::IN_REQUEST));
 	}

@@ -6,9 +6,12 @@
 @load base/files/x509
 
 redef record X509::Info += {
-	## Base64 endoded X.509 certificate.
+	## Base64 encoded X.509 certificate.
 	cert: string &log &optional;
 };
+
+## Certificates can be large and we don't want to risk truncating the output.
+redef X509::default_max_field_string_bytes = 0;
 
 event x509_certificate(f: fa_file, cert_ref: opaque of x509, cert: X509::Certificate) &priority=1
 	{

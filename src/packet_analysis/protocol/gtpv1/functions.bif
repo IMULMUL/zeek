@@ -1,7 +1,10 @@
+%gen-native
+
 module PacketAnalyzer::GTPV1;
 
 %%{
 #include "zeek/Conn.h"
+#include "zeek/conn_key/Manager.h"
 #include "zeek/session/Manager.h"
 #include "zeek/packet_analysis/Manager.h"
 #include "zeek/packet_analysis/protocol/gtpv1/GTPv1.h"
@@ -12,9 +15,13 @@ function remove_gtpv1_connection%(cid: conn_id%) : bool
 	zeek::packet_analysis::AnalyzerPtr gtpv1 = zeek::packet_mgr->GetAnalyzer("GTPv1");
 	if ( gtpv1 )
 		{
-		zeek::detail::ConnKey conn_key(cid);
-		static_cast<zeek::packet_analysis::gtpv1::GTPv1_Analyzer*>(gtpv1.get())->RemoveConnection(conn_key);
+		auto r = zeek::conn_key_mgr->GetFactory().ConnKeyFromVal(*cid);
+		if ( ! r.has_value() )
+			return false;
+
+		auto sk = r.value()->SessionKey();
+		static_cast<zeek::packet_analysis::gtpv1::GTPv1_Analyzer*>(gtpv1.get())->RemoveConnection(sk);
 		}
 
-	return zeek::val_mgr->True();
+	return true;
 	%}

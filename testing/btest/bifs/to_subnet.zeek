@@ -1,6 +1,6 @@
 # @TEST-EXEC: zeek -b %INPUT >output 2>error
 # @TEST-EXEC: btest-diff output
-# @TEST-EXEC: TEST_DIFF_CANONIFIER=$SCRIPTS/diff-remove-abspath btest-diff error
+# @TEST-EXEC: btest-diff-remove-abspath error
 
 global sn: subnet;
 sn = to_subnet("10.0.0.0/8");
@@ -9,6 +9,12 @@ sn = to_subnet("2607:f8b0::/32");
 print sn, sn == [2607:f8b0::]/32;
 sn = to_subnet("10.0.0.0");
 print sn, sn == [::]/0;
+sn = to_subnet("::ffff:0:0/1");
+print sn, sn == [::]/1;
+sn = to_subnet("::ffff:0:0/96");
+print sn, sn == 0.0.0.0/0;
+sn = to_subnet("::ffff:0:0/100");
+print sn, sn == 0.0.0.0/4;
 sn = to_subnet("10.0.0.0/222");
 print sn, sn == [::]/0;
 sn = to_subnet("don't work");

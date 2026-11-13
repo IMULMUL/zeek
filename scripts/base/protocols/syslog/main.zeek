@@ -8,6 +8,10 @@ module Syslog;
 export {
 	redef enum Log::ID += { LOG };
 
+	## Well-known ports for Syslog.
+	const ports = { 514/udp } &redef;
+	const tcp_ports = { 514/tcp } &redef;
+
 	global log_policy: Log::PolicyHook;
 
 	## The record type which contains the fields of the syslog log.
@@ -33,13 +37,11 @@ redef record connection += {
 	syslog: Info &optional;
 };
 
-const ports = { 514/udp };
-redef likely_server_ports += { ports };
-
 event zeek_init() &priority=5
 	{
-	Log::create_stream(Syslog::LOG, [$columns=Info, $path="syslog", $policy=log_policy]);
+	Log::create_stream(Syslog::LOG, Log::Stream($columns=Info, $path="syslog", $policy=log_policy));
 	Analyzer::register_for_ports(Analyzer::ANALYZER_SYSLOG, ports);
+	Analyzer::register_for_ports(Analyzer::ANALYZER_SYSLOG_TCP, tcp_ports);
 	}
 
 event syslog_message(c: connection, facility: count, severity: count, msg: string) &priority=5

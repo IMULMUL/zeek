@@ -2,101 +2,43 @@
 
 #include "zeek/telemetry/Gauge.h"
 
-#include "zeek/telemetry/Detail.h"
+#include <algorithm>
+#include <span>
 
-#include "caf/telemetry/gauge.hpp"
-#include "caf/telemetry/metric_family.hpp"
-#include "caf/telemetry/metric_family_impl.hpp"
+using namespace zeek::telemetry;
 
-namespace zeek::telemetry
-	{
+double Gauge::Value() const noexcept {
+    if ( callback )
+        return callback();
 
-// -- IntGauge ---------------------------------------------------------------
+    return handle.Value();
+}
 
-void IntGauge::Inc() noexcept
-	{
-	deref(pimpl).inc();
-	}
 
-void IntGauge::Inc(int64_t amount) noexcept
-	{
-	deref(pimpl).inc(amount);
-	}
+Gauge::Gauge(FamilyType* family, const prometheus::Labels& labels, detail::CollectCallbackPtr callback) noexcept
+    : family(family), handle(family->Add(labels)), labels(labels), callback(std::move(callback)) {}
 
-void IntGauge::Dec() noexcept
-	{
-	deref(pimpl).dec();
-	}
+std::shared_ptr<Gauge> GaugeFamily::GetOrAdd(std::span<const LabelView> labels, detail::CollectCallbackPtr callback) {
+    prometheus::Labels p_labels = detail::BuildPrometheusLabels(labels);
 
-void IntGauge::Dec(int64_t amount) noexcept
-	{
-	deref(pimpl).dec(amount);
-	}
+    auto check = [&](const std::shared_ptr<Gauge>& gauge) { return gauge->CompareLabels(p_labels); };
 
-int64_t IntGauge::operator++() noexcept
-	{
-	return ++deref(pimpl);
-	}
+    if ( auto it = std::ranges::find_if(gauges, check); it != gauges.end() )
+        return *it;
 
-int64_t IntGauge::operator--() noexcept
-	{
-	return --deref(pimpl);
-	}
+    auto gauge = std::make_shared<Gauge>(family, p_labels, callback);
+    gauges.push_back(gauge);
+    return gauge;
+}
 
-int64_t IntGauge::Value() const noexcept
-	{
-	return deref(pimpl).value();
-	}
+std::shared_ptr<Gauge> GaugeFamily::GetOrAdd(std::initializer_list<LabelView> labels,
+                                             detail::CollectCallbackPtr callback) {
+    return GetOrAdd(std::span{labels.begin(), labels.size()}, std::move(callback));
+}
 
-IntGaugeFamily::IntGaugeFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
-
-IntGauge IntGaugeFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return IntGauge{hdl};
-							  });
-	}
-
-// -- DblGauge ---------------------------------------------------------------
-
-void DblGauge::Inc() noexcept
-	{
-	deref(pimpl).inc();
-	}
-
-void DblGauge::Inc(double amount) noexcept
-	{
-	deref(pimpl).inc(amount);
-	}
-
-void DblGauge::Dec() noexcept
-	{
-	deref(pimpl).dec();
-	}
-
-void DblGauge::Dec(double amount) noexcept
-	{
-	deref(pimpl).dec(amount);
-	}
-
-double DblGauge::Value() const noexcept
-	{
-	return deref(pimpl).value();
-	}
-
-DblGaugeFamily::DblGaugeFamily(Impl* ptr) : MetricFamily(upcast(ptr)) { }
-
-DblGauge DblGaugeFamily::GetOrAdd(Span<const LabelView> labels)
-	{
-	return with_native_labels(labels,
-	                          [this](auto nativeLabels)
-	                          {
-								  auto hdl = opaque(deref(this, pimpl).get_or_add(nativeLabels));
-								  return DblGauge{hdl};
-							  });
-	}
-
-	} // namespace zeek::telemetry
+void GaugeFamily::RunCallbacks() {
+    for ( const auto& g : gauges ) {
+        if ( g->HasCallback() )
+            g->Set(g->RunCallback());
+    }
+}
